@@ -1,0 +1,240 @@
+# -*- coding: utf-8 -*-
+
+# --- 默认附加文本 ---
+
+PREAMBLE_TEXT = (
+    "我正在开发缠论分析系统，以下是现有的全量前端代码和开发规范、需求规则等，"
+    "你要全面阅读并充分理解开发与输出规范、功能需求和用户意图，并在后续任务中严格遵守，"
+    "接下来我们需要在这个代码基础上继续修改开发\n"
+)
+
+ENDING_TEXT = (
+    "以上现有前端代码全部发送完毕，请全面阅读并充分理解，完成后告诉我，我会继续提出开发需求。\n"
+    "我要再次强调，1. 严控范围：只对有明确具体要求的部分做改动，对未明确要求修改的内容要确保全部完美回归；"
+    "2. 极简重构（严格遵循奥卡姆剃刀原则，从业务需求反推最本质的解决方案，以最稳妥简洁高效直接的逻辑做根因拉直重构式修改，不做补丁摞补丁的堆砌和头疼医头脚疼医脚的拼凑；"
+    "3. 尊重原文（修改代码时，如无必要则不改变原代码中各组块的顺序，便于我对比前后差异，如确有需求必须改变顺序，则应该在注释中说明理由并说清楚是如何调序的）；"
+    "4. 查缺补漏（如果明确要求是全量输出，就必须严格全量输出，输出前仔细检查决不允许任何遗漏和省略，因为我要整体替换，绝不允许因任何遗漏省略而导致功能缺损崩溃）；"
+    "5. 合规变更（一切修改行为都强制要求严格遵循通用开发规范中“变更控制与交付保障协议（SOP）”规定）；"
+    "6. 有序输出（一切文件内容的输出都要放在代码块里，避免格式错乱）；"
+    "7. 有效交流（我是个编程小白，要用浅显易懂小白友好的自然语言跟我沟通，不要大量使用代码，我读不懂的，措辞要简洁，挑关键的讲，不要翻来覆去啰里啰嗦的信息轰炸）。"
+)
+
+SCAN_PREAMBLE_TEXT = (
+    "全景扫描模式：下列为指定根目录下所有层级的“文件清单”（统一为绝对路径），仅列路径，不包含内容。\n"
+)
+
+SCAN_ENDING_TEXT = (
+    "全景扫描已完成，请针对该目录文件结构帮我编写一个全面而稳妥的 .gitignore文件。"
+)
+
+# --- 默认排除项 ---
+
+DEFAULT_EXCLUDE_FOLDERS = [
+    ".git",
+    ".github",
+    ".vscode",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "dist",
+    "build",
+    "public",
+    "scripts",
+    "tests",
+    "dev_tests",
+    "var",
+]
+
+DEFAULT_EXCLUDE_FILES = [
+    ".DS_Store",
+    "Thumbs.db",
+    "README.md",
+]
+
+EXCLUDE_EXTENSIONS = [
+    ".pyc",
+    ".pyo",
+    ".o",
+    ".so",
+    ".dll",
+    ".exe",
+    ".log",
+    ".tmp",
+    ".bak",
+    ".bak1",
+    ".bak2",
+    ".md",
+    "",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".bmp",
+    ".svg",
+    ".ico",
+    ".mp3",
+    ".wav",
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".zip",
+    ".rar",
+    ".tar",
+    ".gz",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".gitignore",
+    ".sqlite",
+    ".sqlite-wal",
+    ".sqlite-shm",
+]
+
+# --- 合并/还原协议标记 ---
+
+CODE_HEADER_LINE = "---以下是源代码---"
+CODE_FOOTER_LINE = "---源代码结束---"
+FILE_SECTION_START_TEMPLATE = "---第{index}个文件---"
+
+MESSAGE_SKIP_BY_EXT = "文件扩展名命中排除名单"
+MESSAGE_SKIP_BY_NAME = "文件名命中排除名单"
+MESSAGE_CANNOT_READ = "无法读取或为非文本文件"
+MESSAGE_READ_ERROR = "*** 读取文件时发生错误"
+
+SKIPPED_LOG_FILENAME = "_RESTORE_SKIPPED_FILES_.log"
+
+# --- 修改包执行器协议常量 ---
+
+PATCH_START_PREFIX = "<<AI_FILE_PATCH_V2"
+PATCH_END = "<</AI_FILE_PATCH_V2>>"
+
+SUPPORTED_PATCH_OPS = {
+    "write_file",
+    "append_text",
+    "replace_between",
+    "replace_exact",
+    "delete_file",
+}
+
+PATCH_TEXT_BLOCK_STARTERS = {
+    "---CONTENT": "content",
+    "---OLD": "old",
+    "---NEW": "new",
+}
+
+# --- 编码 ---
+
+ENCODINGS_TO_TRY = [
+    "utf-8-sig",
+    "utf-8",
+    "gb18030",
+    "gbk",
+    "latin-1",
+]
+
+CONFIG_FILENAME = "app_config.json"
+
+# --- 主题配色 ---
+
+THEME = {
+    "bg": "#d8d8d8",
+    "bg_panel": "#cecece",
+    "bg_input": "#e0e0e0",
+    "bg_btn": "#b0b0b0",
+    "bg_btn_accent": "#888888",
+    "bg_btn_hover": "#707070",
+    "bg_btn_selected": "#888888",
+    "bg_log": "#e4e4e4",
+    "fg": "#1a1a1a",
+    "fg_dim": "#707070",
+    "fg_label": "#333333",
+    "fg_on_dark": "#ffffff",
+    "accent": "#555555",
+    "accent_dim": "#707070",
+    "border": "#b0b0b0",
+    "border_light": "#a0a0a0",
+    "select_bg": "#555555",
+    "select_fg": "#ffffff",
+    "danger": "#cc0000",
+    "danger_bg": "#ffd6d6",
+    "font_main": ("Microsoft YaHei UI", 10),
+    "font_title": ("Microsoft YaHei UI", 11, "bold"),
+    "font_mono": ("Consolas", 9),
+}
+
+# --- 默认配置 ---
+
+DEFAULT_CONFIG = {
+    "active_mode": "merge",
+    "entry_history": {},
+    "ui": {
+        "feature_order": ["scan", "merge", "restore", "patch"],
+    },
+    "scan": {
+        "source_folder": "",
+        "output_folder": "",
+        "output_filename": "panorama_scan.txt",
+        "exclude_folders": "",
+        "exclude_files": "",
+        "exclude_extensions": "",
+        "preamble_text": SCAN_PREAMBLE_TEXT,
+        "ending_text": SCAN_ENDING_TEXT,
+        "include_size": False,
+        "include_date": False,
+        "open_after_done": True,
+        "force_overwrite": True,
+    },
+    "merge": {
+        "source_folder": "",
+        "output_folder": "",
+        "output_filename": "merged_code.txt",
+        "exclude_folders": "\n".join(DEFAULT_EXCLUDE_FOLDERS),
+        "exclude_files": "\n".join(DEFAULT_EXCLUDE_FILES),
+        "exclude_extensions": "\n".join(EXCLUDE_EXTENSIONS),
+        "preamble_text": PREAMBLE_TEXT,
+        "ending_text": ENDING_TEXT,
+        "code_header_line": CODE_HEADER_LINE,
+        "code_footer_line": CODE_FOOTER_LINE,
+        "open_after_done": True,
+        "force_overwrite": True,
+        "demand_file_list_text": "",
+        "demand_preamble_text": "",
+        "demand_ending_text": "",
+    },
+    "restore": {
+        "source_txt_file": "",
+        "target_folder": "",
+        "code_header_line": CODE_HEADER_LINE,
+        "code_footer_line": CODE_FOOTER_LINE,
+        "existing_file_policy": "overwrite",
+        "open_after_done": True,
+    },
+    "patch": {
+        "project_root": "",
+        "allow_delete": False,
+        "allow_multi_replace_exact": False,
+        "patch_text": "",
+        "last_result_text": "",
+        "open_backup_after_done": False,
+    },
+    "favorites": {
+        "scan_preamble": [],
+        "scan_ending": [],
+        "scan_exclude_folders": [],
+        "scan_exclude_files": [],
+        "scan_exclude_extensions": [],
+        "merge_regular_preamble": [],
+        "merge_regular_ending": [],
+        "merge_exclude_folders": [],
+        "merge_exclude_files": [],
+        "merge_exclude_extensions": [],
+        "demand_file_list": [],
+        "demand_preamble": [],
+        "demand_ending": [],
+        "patch_text": [],
+    },
+}

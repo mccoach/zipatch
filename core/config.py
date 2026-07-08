@@ -1,0 +1,113 @@
+# -*- coding: utf-8 -*-
+
+import json
+import sys
+
+from core.constants import DEFAULT_CONFIG
+from core.paths import get_config_path
+
+
+def deep_merge_config(defaults, user_config):
+    """
+    用默认配置修补用户配置。
+
+    好处：
+    1. 老版本配置可以自动补新字段；
+    2. 用户已有配置不会被覆盖；
+    3. 嵌套 dict 也能递归合并。
+    """
+    result = {}
+
+    for key, default_value in defaults.items():
+        if isinstance(default_value, dict):
+            user_value = user_config.get(key, {}) if isinstance(user_config, dict) else {}
+            result[key] = deep_merge_config(default_value, user_value)
+        else:
+            if isinstance(user_config, dict) and key in user_config:
+                result[key] = user_config[key]
+            else:
+                result[key] = default_value
+
+    return result
+
+
+def load_user_config():
+    path = get_config_path()
+
+    if not path.exists():
+        return deep_merge_config(DEFAULT_CONFIG, {})
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            user_config = json.load(f)
+
+        return deep_merge_config(DEFAULT_CONFIG, user_config)
+
+    except Exception as e:
+        print(f"[配置] 读取失败，使用默认配置：{e}", file=sys.stderr)
+        return deep_merge_config(DEFAULT_CONFIG, {})
+
+
+def save_user_config(config):
+    path = get_config_path()
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        print(f"[配置] 已保存：{path}")
+    except Exception as e:
+        print(f"[配置] 保存失败：{e}", file=sys.stderr)
+
+
+def normalize_feature_order(config_data, feature_registry):
+    """
+    修复功能标签顺序配置。
+
+    规则：
+    1. 移除已经不存在的功能 key；
+    2. 自动补上新增功能 key；
+    3. 如果配置为空，则按 default_order 生成；
+    4. 保证顺序稳定、可恢复。
+    """
+    config_data.setdefault("ui", {})
+
+    known_keys = set(feature_registry.keys())
+    saved_order = config_data["ui"].get("feature_order", [])
+
+    if not isinstance(saved_order, list):
+        saved_order = []
+
+    normalized = []
+    seen = set()
+
+    for key in saved_order:
+        if key in known_keys and key not in seen:
+            normalized.append(key)
+            seen.add(key)
+
+    missing = [
+        key
+        for key, item in sorted(
+            feature_registry.items(),
+            key=lambda pair: pair[1].get("default_order", 9999)
+        )
+        if key not in seen
+    ]
+
+    normalized.extend(missing)
+
+    if not normalized:
+        normalized = [
+            key
+            for key, item in sorted(
+                feature_registry.items(),
+                key=lambda pair: pair[1].get("default_order", 9999)
+            )
+        ]
+
+    config_data["ui"]["feature_order"] = normalized
+
+    active_mode = config_data.get("active_mode")
+    if active_mode not in known_keys:
+        config_data["active_mode"] = normalized[0]

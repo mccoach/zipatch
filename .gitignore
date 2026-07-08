@@ -1,0 +1,217 @@
+# ============================================================
+# CodeWeaver .gitignore
+# Python desktop utility project
+# ============================================================
+
+
+# ============================================================
+# 1. Python cache / bytecode
+# ============================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+
+# ============================================================
+# 2. Virtual environments
+# ============================================================
+
+.venv/
+venv/
+env/
+ENV/
+virtualenv/
+.conda/
+
+
+# ============================================================
+# 3. Python packaging / build artifacts
+# ============================================================
+
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+
+# ============================================================
+# 4. PyInstaller / executable packaging artifacts
+# ============================================================
+
+*.spec
+*.manifest
+*.toc
+*.pkg
+*.pyz
+*.pyzw
+
+# PyInstaller temporary/build output
+*.log
+*.tmp
+*.temp
+
+
+# ============================================================
+# 5. Test / coverage / type-check cache
+# ============================================================
+
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+.hypothesis/
+
+
+# ============================================================
+# 6. IDE / editor files
+# ============================================================
+
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+*~
+
+
+# ============================================================
+# 7. OS generated files
+# ============================================================
+
+.DS_Store
+.AppleDouble
+.LSOverride
+
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+
+# ============================================================
+# 8. Logs / runtime output
+# ============================================================
+
+logs/
+log/
+*.log
+*.out
+*.err
+*.trace
+
+
+# ============================================================
+# 9. Local config / secrets / environment files
+# ============================================================
+
+.env
+.env.*
+*.env
+*.local
+*.secret
+secrets.json
+secret.json
+credentials.json
+token.json
+
+
+# ============================================================
+# 10. App local data / user generated runtime files
+# ============================================================
+
+# 如果这些文件是用户本机运行时产生的配置或历史记录，建议忽略。
+# 如果 app_config.json 是项目默认配置模板，请不要忽略它。
+# 当前根据你的文件清单，保留 app_config.json，不写入忽略。
+
+*.bak
+*.backup
+*.orig
+*.old
+
+backup/
+backups/
+tmp/
+temp/
+.cache/
+
+
+# ============================================================
+# 11. Database / local storage
+# ============================================================
+
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+
+# ============================================================
+# 12. Archives / compressed files
+# ============================================================
+
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+
+# ============================================================
+# 13. Installer / binary outputs
+# ============================================================
+
+*.exe
+*.msi
+*.dmg
+*.pkg
+*.app
+*.AppImage
+
+
+# ============================================================
+# 14. Keep project source and resources
+# ============================================================
+
+# Explicitly keep source files
+!*.py
+
+# Explicitly keep requirements
+!requirements.txt
+
+# Explicitly keep project config if it is a default/shared config
+app_config.json
+!app_config.example.json
+
+# Explicitly keep assets
+!assets/
+!assets/*.ico
+!assets/*.svg
+!assets/*.png
+wechat_qr.png

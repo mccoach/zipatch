@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a3a5c"/>
+      <stop offset="100%" style="stop-color:#0d1f35"/>
+    </linearGradient>
+    <linearGradient id="card_l" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4fc3f7"/>
+      <stop offset="100%" style="stop-color:#0288d1"/>
+    </linearGradient>
+    <linearGradient id="card_r" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffb74d"/>
+      <stop offset="100%" style="stop-color:#f57c00"/>
+    </linearGradient>
+    <linearGradient id="arrow1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#4fc3f7"/>
+      <stop offset="100%" style="stop-color:#ffffff"/>
+    </linearGradient>
+    <linearGradient id="arrow2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#ffffff"/>
+      <stop offset="100%" style="stop-color:#ffb74d"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="256" height="256" rx="44" ry="44" fill="url(#bg)"/>
+
+  <!-- 左侧文件卡片：x=22, w=80, h=134 -->
+  <rect x="22" y="22" width="80" height="134" rx="8" fill="url(#card_l)" opacity="0.93"/>
+  <polygon points="84,22 102,40 84,40" fill="#0277bd"/>
+  <rect x="84" y="22" width="18" height="18" fill="#01579b" opacity="0.7"/>
+  <rect x="32" y="50" width="52" height="5" rx="2.5" fill="#ffffff" opacity="0.85"/>
+  <rect x="32" y="64" width="40" height="5" rx="2.5" fill="#ffffff" opacity="0.6"/>
+  <rect x="32" y="78" width="48" height="5" rx="2.5" fill="#ffffff" opacity="0.85"/>
+  <rect x="32" y="92" width="32" height="5" rx="2.5" fill="#ffffff" opacity="0.6"/>
+  <rect x="32" y="106" width="46" height="5" rx="2.5" fill="#ffffff" opacity="0.85"/>
+  <rect x="32" y="120" width="36" height="5" rx="2.5" fill="#ffffff" opacity="0.6"/>
+  <rect x="32" y="134" width="44" height="5" rx="2.5" fill="#ffffff" opacity="0.85"/>
+
+  <!-- 右侧文件卡片：x=154, w=80, h=134 -->
+  <rect x="154" y="22" width="80" height="134" rx="8" fill="url(#card_r)" opacity="0.93"/>
+  <polygon points="216,22 234,40 216,40" fill="#e65100"/>
+  <rect x="216" y="22" width="18" height="18" fill="#bf360c" opacity="0.7"/>
+  <rect x="164" y="50" width="52" height="5" rx="2.5" fill="#ffffff" opacity="0.85"/>
+  <rect x="164" y="64" width="40" height="5" rx="2.5" fill="#ffffff" opacity="0.6"/>
+  <rect x="164" y="78" width="48" height="5" rx="2.5" fill="#ffffff" opacity="0.85"/>
+  <rect x="164" y="92" width="32" height="5" rx="2.5" fill="#ffffff" opacity="0.6"/>
+  <rect x="164" y="106" width="46" height="5" rx="2.5" fill="#ffffff" opacity="0.85"/>
+  <rect x="164" y="120" width="36" height="5" rx="2.5" fill="#ffffff" opacity="0.6"/>
+  <rect x="164" y="134" width="44" height="5" rx="2.5" fill="#ffffff" opacity="0.85"/>
+
+  <!-- 箭头区：x=102~154，中心 x=128，卡片垂直中心 y=89 -->
+  <!-- 向右箭头 y=78 -->
+  <line x1="105" y1="78" x2="138" y2="78" stroke="url(#arrow1)" stroke-width="6" stroke-linecap="round" filter="url(#glow)"/>
+  <polygon points="134,69 151,78 134,87" fill="#4fc3f7" filter="url(#glow)"/>
+
+  <!-- 向左箭头 y=100 -->
+  <line x1="151" y1="100" x2="118" y2="100" stroke="url(#arrow2)" stroke-width="6" stroke-linecap="round" filter="url(#glow)"/>
+  <polygon points="122,91 105,100 122,109" fill="#ffb74d" filter="url(#glow)"/>
+
+  <!-- 文字：字间距大幅压缩 -->
+  <text
+    y="224"
+    font-family="Arial Black, Arial, sans-serif"
+    font-weight="900"
+    text-anchor="middle"
+    x="128"
+    filter="url(#glow)"
+  >
+    <tspan font-size="75" fill="#4fc3f7" letter-spacing="-10">C</tspan>
+    <tspan font-size="20" fill="#4fc3f7" opacity="0.88" dy="0" letter-spacing="-1">ode</tspan>
+    <tspan font-size="75" fill="#ffb74d" dx="-10" dy="0" letter-spacing="-10">W</tspan>
+    <tspan font-size="20" fill="#ffb74d" opacity="0.88" dy="0" letter-spacing="-1">eaver</tspan>
+  </text>
+
+  <!-- 底部装饰线 -->
+  <rect x="32" y="234" width="192" height="2.5" rx="1.25" fill="#4fc3f7" opacity="0.38"/>
+  <rect x="68" y="240" width="120" height="1.5" rx="0.75" fill="#ffb74d" opacity="0.28"/>
+</svg>
