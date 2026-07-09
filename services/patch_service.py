@@ -143,6 +143,18 @@ def join_text_block(lines):
     return "\n".join(lines)
 
 
+def normalize_text_newlines(text: str):
+    """
+    将文本换行统一为 LF。
+
+    说明：
+    - 修改包文本框和解析器通常会把换行归一成 LF；
+    - Windows 源文件可能是 CRLF；
+    - replace_exact 如果直接做 text.count(old)，会因为 LF/CRLF 不同而误判命中 0 次。
+    """
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def ensure_no_duplicate_block(op, key, line_no):
     if key in op:
         raise ValueError(
@@ -522,9 +534,10 @@ class PatchExecutor:
 
             elif op_type == "replace_exact":
                 text, enc = read_text_auto(target)
-                old = op["old"]
+                normalized_text = normalize_text_newlines(text)
+                old = normalize_text_newlines(op["old"])
                 expected_count = parse_int(op.get("count"), 1, "count")
-                actual_count = text.count(old)
+                actual_count = normalized_text.count(old)
 
                 if actual_count != expected_count:
                     raise ValueError(
@@ -627,10 +640,11 @@ class PatchExecutor:
                 self.backup_file(target)
                 text, enc = read_text_auto(target)
 
-                old = op["old"]
-                new = op["new"]
+                normalized_text = normalize_text_newlines(text)
+                old = normalize_text_newlines(op["old"])
+                new = normalize_text_newlines(op["new"])
                 expected_count = parse_int(op.get("count"), 1, "count")
-                actual_count = text.count(old)
+                actual_count = normalized_text.count(old)
 
                 if actual_count != expected_count:
                     raise ValueError(
@@ -638,7 +652,7 @@ class PatchExecutor:
                         f"expected={expected_count}, actual={actual_count}, path={path}"
                     )
 
-                new_text = text.replace(old, new, expected_count)
+                new_text = normalized_text.replace(old, new, expected_count)
                 write_text_utf8(target, new_text)
                 self.log(f"[完成] 精确替换 {expected_count} 处：{rel_display}")
 
