@@ -14,6 +14,91 @@ from ui.theme import styled_frame, styled_entry, styled_button
 from ui.entry_history import EntryHistoryPlugin, save_entry_history
 
 
+class Tooltip:
+    """
+    轻量浮窗说明。
+
+    职责：
+    - 只负责鼠标悬停时显示说明；
+    - 不保存状态；
+    - 不参与业务逻辑；
+    - 不引入第三方依赖。
+    """
+
+    def __init__(self, widget, text, delay_ms=450, wraplength=420):
+        self.widget = widget
+        self.text = text or ""
+        self.delay_ms = delay_ms
+        self.wraplength = wraplength
+        self.after_id = None
+        self.tip_window = None
+
+        if not self.text:
+            return
+
+        widget.bind("<Enter>", self.schedule_show, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+
+    def schedule_show(self, event=None):
+        self.cancel_schedule()
+        self.after_id = self.widget.after(self.delay_ms, self.show)
+
+    def cancel_schedule(self):
+        if self.after_id is not None:
+            try:
+                self.widget.after_cancel(self.after_id)
+            except Exception:
+                pass
+            self.after_id = None
+
+    def show(self):
+        self.cancel_schedule()
+
+        if self.tip_window is not None or not self.text:
+            return
+
+        try:
+            x = self.widget.winfo_rootx() + 18
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+
+            self.tip_window = tk.Toplevel(self.widget)
+            self.tip_window.wm_overrideredirect(True)
+            self.tip_window.wm_geometry(f"+{x}+{y}")
+            self.tip_window.configure(bg=THEME["border"], padx=1, pady=1)
+
+            label = tk.Label(
+                self.tip_window,
+                text=self.text,
+                justify="left",
+                bg=THEME["bg_input"],
+                fg=THEME["fg"],
+                relief="flat",
+                padx=8,
+                pady=6,
+                wraplength=self.wraplength,
+                font=THEME["font_main"],
+            )
+            label.pack()
+        except Exception:
+            self.tip_window = None
+
+    def hide(self, event=None):
+        self.cancel_schedule()
+
+        if self.tip_window is not None:
+            try:
+                self.tip_window.destroy()
+            except Exception:
+                pass
+            self.tip_window = None
+
+
+def add_tooltip(widget, text):
+    widget._tooltip = Tooltip(widget, text)
+    return widget
+
+
 def create_entry_row(
     parent,
     label_text,
@@ -25,6 +110,7 @@ def create_entry_row(
     history_key=None,
     save_config=None,
     enable_history=True,
+    tooltip_text=None,
 ):
     """
     创建单行输入框行。
@@ -38,7 +124,7 @@ def create_entry_row(
     row = styled_frame(parent, bg=THEME["bg_panel"])
     row.pack(fill="x", pady=4)
 
-    tk.Label(
+    label = tk.Label(
         row,
         text=label_text,
         width=label_width,
@@ -46,10 +132,18 @@ def create_entry_row(
         bg=THEME["bg_panel"],
         fg=THEME["fg_label"],
         font=THEME["font_main"],
-    ).pack(side="left", padx=(0, 8))
+    )
+    label.pack(side="left", padx=(0, 8))
+
+    add_tooltip(label, tooltip_text)
 
     entry_frame, entry = styled_entry(row, text_var)
     entry_frame.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+    # 供需要动态隐藏整行的面板使用。
+    # create_entry_row 返回 entry 是为了兼容旧调用；
+    # 这里把整行 row 挂到 entry 上，避免调用方只能拿到 entry_frame 而隐藏不干净。
+    entry._row_frame = row
 
     if enable_history and config_data is not None and history_key:
         EntryHistoryPlugin(
@@ -153,8 +247,8 @@ def bind_autosave(config, var_to_cfg_map, save_config):
         var.trace_add("write", _save)
 
 
-def make_checkbutton(parent, text, variable, bg=None):
-    return tk.Checkbutton(
+def make_checkbutton(parent, text, variable, bg=None, tooltip_text=None):
+    widget = tk.Checkbutton(
         parent,
         text=text,
         variable=variable,
@@ -165,10 +259,12 @@ def make_checkbutton(parent, text, variable, bg=None):
         selectcolor=THEME["bg_input"],
         font=THEME["font_main"],
     )
+    add_tooltip(widget, tooltip_text)
+    return widget
 
 
-def make_radiobutton(parent, text, variable, value, bg=None):
-    return tk.Radiobutton(
+def make_radiobutton(parent, text, variable, value, bg=None, tooltip_text=None):
+    widget = tk.Radiobutton(
         parent,
         text=text,
         variable=variable,
@@ -180,3 +276,5 @@ def make_radiobutton(parent, text, variable, value, bg=None):
         selectcolor=THEME["bg_input"],
         font=THEME["font_main"],
     )
+    add_tooltip(widget, tooltip_text)
+    return widget

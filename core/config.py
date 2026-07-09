@@ -9,24 +9,34 @@ from core.paths import get_config_path
 
 def deep_merge_config(defaults, user_config):
     """
-    用默认配置修补用户配置。
+    按默认配置重建用户配置。
 
-    好处：
-    1. 老版本配置可以自动补新字段；
-    2. 用户已有配置不会被覆盖；
-    3. 嵌套 dict 也能递归合并。
+    规则：
+    1. 默认配置中存在、用户配置缺失的字段：按默认值补齐；
+    2. 默认配置中存在、用户配置也存在的字段：保留用户值；
+    3. 默认配置中不存在的旧字段：自动删除；
+    4. 嵌套 dict 递归执行同一规则。
+
+    这一步是配置的唯一清理入口：
+    - 不做旧字段兼容；
+    - 不保留废弃配置；
+    - 最终保存出的配置只包含当前版本唯一有效的配置结构。
     """
     result = {}
+    user_config = user_config if isinstance(user_config, dict) else {}
 
     for key, default_value in defaults.items():
+        user_value = user_config.get(key)
+
         if isinstance(default_value, dict):
-            user_value = user_config.get(key, {}) if isinstance(user_config, dict) else {}
-            result[key] = deep_merge_config(default_value, user_value)
+            result[key] = deep_merge_config(
+                default_value,
+                user_value if isinstance(user_value, dict) else {},
+            )
+        elif key in user_config:
+            result[key] = user_value
         else:
-            if isinstance(user_config, dict) and key in user_config:
-                result[key] = user_config[key]
-            else:
-                result[key] = default_value
+            result[key] = default_value
 
     return result
 

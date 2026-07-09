@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import hashlib
+import json
 import re
 import shlex
 import shutil
@@ -12,6 +14,7 @@ from core.constants import (
     SUPPORTED_PATCH_OPS,
     PATCH_TEXT_BLOCK_STARTERS,
 )
+from core.path_validation import resolve_path
 from core.paths import safe_join, normalize_rel_path
 from core.text_io import read_text_auto, write_text_utf8, split_lines_keep_text
 from core.time_utils import now_stamp
@@ -21,12 +24,118 @@ from core.time_utils import now_stamp
 class PatchPreviewResult:
     preview_text: str
     patch: dict
+    valid_patch: dict
+    has_errors: bool
+    success_count: int
+    failed_count: int
 
 
 @dataclass
 class PatchApplyResult:
     log_text: str
     backup_root: str
+
+
+@dataclass
+class PatchOpCheckResult:
+    index: int
+    op_type: str
+    path: str
+    ok: bool
+    message: str
+    locator: str
+    old_first_line: str = ""
+
+
+@dataclass
+class BackupRestorePreviewResult:
+    preview_text: str
+    manifest: dict
+    has_mismatch: bool
+
+
+@dataclass
+class BackupRestoreApplyResult:
+    log_text: str
+    backup_root: str
+
+
+def file_sha256(path: Path):
+    path = Path(path)
+
+    if not path.exists() or not path.is_file():
+        return ""
+
+    h = hashlib.sha256()
+
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+
+    return h.hexdigest()
+
+
+def resolve_backup_base_dir(project_root, backup_dir):
+    result = resolve_path(
+        backup_dir,
+        base_dir=project_root,
+        allow_relative=True,
+    )
+
+    if not result.is_valid:
+        raise ValueError(f"备份目录无效：{result.issue}")
+
+    return Path(result.resolved)
+
+
+def make_backup_root(project_root, backup_dir, action_name=""):
+    stamp = now_stamp()
+    safe_action_name = str(action_name or "").strip().replace("/", "_").replace("\\", "_")
+
+    if safe_action_name:
+        folder_name = f"{stamp}_{safe_action_name}"
+    else:
+        folder_name = stamp
+
+    return resolve_backup_base_dir(project_root, backup_dir) / folder_name
+
+
+def load_manifest(backup_root):
+    manifest_path = Path(backup_root) / "manifest.json"
+
+    if not manifest_path.is_file():
+        raise ValueError(f"备份目录中未找到 manifest.json：{manifest_path}")
+
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ValueError(f"manifest.json 读取失败：{e}")
+
+
+def save_json(path: Path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def first_non_empty_line(text):
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line
+    return ""
+
+
+def make_op_locator(op):
+    op_type = op.get("op", "")
+    path = op.get("path", "")
+    count = op.get("count")
+
+    if count is not None:
+        return f'---OP {op_type} path="{path}" count="{count}"'
+
+    return f'---OP {op_type} path="{path}"'
 
 
 def parse_bool(value, default=False):
@@ -360,13 +469,30 @@ def parse_patch_v2(text: str):
 
 
 class PatchExecutor:
-    def __init__(self, root: Path, allow_delete=False, allow_multi_replace_exact=False):
+    def __init__(
+        self,
+        root: Path,
+        allow_delete=False,
+        allow_multi_replace_exact=False,
+        backup_enabled=True,
+        backup_dir="99_归档/AI文件修改备份",
+        patch_text="",
+        preview_text="",
+    ):
         self.root = Path(root).resolve()
         self.allow_delete = allow_delete
         self.allow_multi_replace_exact = allow_multi_replace_exact
-        self.backup_root = self.root / "99_归档" / "AI文件修改备份" / now_stamp()
+        self.backup_enabled = backup_enabled
+        self.backup_root = (
+            make_backup_root(self.root, backup_dir, "执行修改")
+            if backup_enabled
+            else None
+        )
+        self.patch_text = patch_text
+        self.preview_text = preview_text
         self.logs = []
         self.backed_up = {}
+        self.manifest_operations = []
 
     def log(self, msg):
         self.logs.append(msg)
@@ -464,6 +590,9 @@ class PatchExecutor:
                 raise ValueError(f"第 {index} 个 delete_file 不允许删除目录：{op['path']}")
 
     def backup_file(self, target: Path):
+        if not self.backup_enabled:
+            return None
+
         if not target.exists():
             return None
 
@@ -473,43 +602,93 @@ class PatchExecutor:
             return self.backed_up[target]
 
         rel = target.relative_to(self.root)
-        backup_path = self.backup_root / rel
+        backup_path = self.backup_root / "files" / rel
         backup_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(target, backup_path)
         self.backed_up[target] = backup_path
 
-        self.log(f"[备份] {rel} -> {backup_path.relative_to(self.root)}")
+        self.log(f"[备份] {rel} -> {backup_path}")
 
         return backup_path
 
-    def preview(self, patch):
-        self.validate_patch(patch)
+    def record_manifest_operation(
+        self,
+        index,
+        op_type,
+        rel_path,
+        existed_before,
+        existed_after,
+        before_sha256,
+        after_sha256,
+        backup_path=None,
+    ):
+        backup_file = ""
 
-        lines = []
-        lines.append("【Dry Run 预演结果】")
-        lines.append("协议版本：AI_FILE_PATCH_V2 动态 boundary 原文块协议")
-        lines.append(f"项目根目录：{self.root}")
-        lines.append(f"boundary：{patch.get('boundary')}")
-        lines.append(f"操作数量：{len(patch['operations'])}")
-        lines.append("")
+        if backup_path:
+            backup_file = str(Path(backup_path).relative_to(self.backup_root)).replace("\\", "/")
 
-        for i, op in enumerate(patch["operations"], 1):
-            op_type = op["op"]
-            path = normalize_rel_path(op["path"])
-            target = safe_join(self.root, path)
+        self.manifest_operations.append({
+            "index": index,
+            "op": op_type,
+            "path": str(rel_path).replace("\\", "/"),
+            "existed_before": existed_before,
+            "existed_after": existed_after,
+            "before_sha256": before_sha256,
+            "after_sha256": after_sha256,
+            "backup_file": backup_file,
+        })
+
+    def write_patch_copy_and_manifest(self, patch):
+        if not self.backup_enabled:
+            return
+
+        patch_path = self.backup_root / "patch" / "修改包原文.txt"
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(self.patch_text or "", encoding="utf-8")
+
+        manifest = {
+            "version": "1.0",
+            "mode": "forward",
+            "project_root": str(self.root),
+            "backup_root": str(self.backup_root),
+            "patch_file": "patch/修改包原文.txt",
+            "patch_boundary": patch.get("boundary"),
+            "operations": self.manifest_operations,
+        }
+
+        save_json(self.backup_root / "manifest.json", manifest)
+
+    def check_one_op(self, op, index):
+        op_type = op.get("op", "")
+        path = op.get("path", "")
+
+        try:
+            self.validate_op(op, index)
+
+            target_path = normalize_rel_path(path)
+            target = safe_join(self.root, target_path)
 
             if op_type == "write_file":
-                status = "将新建" if not target.exists() else "将全量覆盖"
+                return PatchOpCheckResult(
+                    index=index,
+                    op_type=op_type,
+                    path=target_path,
+                    ok=True,
+                    message="校验通过",
+                    locator=make_op_locator(op),
+                )
 
-                if op.get("if_exists", "overwrite") == "skip" and target.exists():
-                    status = "将跳过（文件已存在且 if_exists=skip）"
+            if op_type == "append_text":
+                return PatchOpCheckResult(
+                    index=index,
+                    op_type=op_type,
+                    path=target_path,
+                    ok=True,
+                    message="校验通过",
+                    locator=make_op_locator(op),
+                )
 
-                lines.append(f"{i}. [write_file] {status}：{path}")
-
-            elif op_type == "append_text":
-                lines.append(f"{i}. [append_text] 将追加到文件末尾：{path}")
-
-            elif op_type == "replace_between":
+            if op_type == "replace_between":
                 text, enc = read_text_auto(target)
                 start_marker = op["start_marker"]
                 end_marker = op["end_marker"]
@@ -518,21 +697,22 @@ class PatchExecutor:
 
                 if s_count != 1 or e_count != 1:
                     raise ValueError(
-                        f"第 {i} 个 replace_between 锚点不唯一："
-                        f"start_count={s_count}, end_count={e_count}, path={path}"
+                        f"replace_between 锚点不唯一：start_count={s_count}, end_count={e_count}"
                     )
 
                 if text.find(start_marker) >= text.find(end_marker):
-                    raise ValueError(f"第 {i} 个 replace_between 起始锚点在结束锚点之后：{path}")
+                    raise ValueError("replace_between 起始锚点在结束锚点之后")
 
-                include_markers = parse_bool(op.get("include_markers"), False)
+                return PatchOpCheckResult(
+                    index=index,
+                    op_type=op_type,
+                    path=target_path,
+                    ok=True,
+                    message="校验通过",
+                    locator=make_op_locator(op),
+                )
 
-                lines.append(f"{i}. [replace_between] 将替换锚点区间：{path}")
-                lines.append(f"   start_marker: {start_marker}")
-                lines.append(f"   end_marker: {end_marker}")
-                lines.append(f"   include_markers: {include_markers}")
-
-            elif op_type == "replace_exact":
+            if op_type == "replace_exact":
                 text, enc = read_text_auto(target)
                 normalized_text = normalize_text_newlines(text)
                 old = normalize_text_newlines(op["old"])
@@ -541,30 +721,151 @@ class PatchExecutor:
 
                 if actual_count != expected_count:
                     raise ValueError(
-                        f"第 {i} 个 replace_exact 命中次数不符："
-                        f"expected={expected_count}, actual={actual_count}, path={path}"
+                        f"replace_exact 命中次数不符：expected={expected_count}, actual={actual_count}"
                     )
 
-                lines.append(f"{i}. [replace_exact] 将精确替换 {expected_count} 处：{path}")
+                return PatchOpCheckResult(
+                    index=index,
+                    op_type=op_type,
+                    path=target_path,
+                    ok=True,
+                    message="校验通过",
+                    locator=make_op_locator(op),
+                    old_first_line=first_non_empty_line(op.get("old", "")),
+                )
 
-            elif op_type == "delete_file":
-                lines.append(f"{i}. [delete_file] 将删除文件：{path}")
+            if op_type == "delete_file":
+                return PatchOpCheckResult(
+                    index=index,
+                    op_type=op_type,
+                    path=target_path,
+                    ok=True,
+                    message="校验通过",
+                    locator=make_op_locator(op),
+                )
+
+            raise ValueError(f"未知操作类型：{op_type}")
+
+        except Exception as e:
+            return PatchOpCheckResult(
+                index=index,
+                op_type=op_type,
+                path=path,
+                ok=False,
+                message=str(e),
+                locator=make_op_locator(op),
+                old_first_line=first_non_empty_line(op.get("old", "")),
+            )
+
+    def preview(self, patch):
+        if not isinstance(patch, dict):
+            raise ValueError("内部修改包对象非法")
+
+        if patch.get("version") != "2.0":
+            raise ValueError("仅支持 V2 动态 boundary 修改包")
+
+        ops = patch.get("operations")
+
+        if not isinstance(ops, list) or not ops:
+            raise ValueError("修改包 operations 必须是非空数组")
+
+        check_results = []
+        valid_ops = []
+
+        for i, op in enumerate(ops, 1):
+            result = self.check_one_op(op, i)
+            check_results.append(result)
+
+            if result.ok:
+                valid_ops.append(op)
+
+        success_count = len(valid_ops)
+        failed_count = len(ops) - success_count
+
+        valid_patch = dict(patch)
+        valid_patch["operations"] = valid_ops
+
+        lines = []
+        lines.append("【Dry Run 预演结果】")
+        lines.append("协议版本：AI_FILE_PATCH_V2 动态 boundary 原文块协议")
+        lines.append(f"项目根目录：{self.root}")
+        lines.append(f"boundary：{patch.get('boundary')}")
+        lines.append(f"操作数量：{len(ops)}")
+        lines.append(f"校验成功：{success_count}")
+        lines.append(f"校验失败：{failed_count}")
+
+        if self.backup_enabled:
+            lines.append(f"备份目录：{self.backup_root}")
+        else:
+            lines.append("备份状态：未启用自动备份")
 
         lines.append("")
-        lines.append("Dry Run 校验通过。执行前会自动备份被修改/删除文件。")
+        lines.append("=" * 60)
+        lines.append("【校验成功】")
+        lines.append("=" * 60)
 
-        return "\n".join(lines)
+        for item in check_results:
+            if item.ok:
+                lines.append(f"{item.index}. [通过] {item.op_type} {item.path}")
+
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append("【校验失败】")
+        lines.append("=" * 60)
+
+        if failed_count == 0:
+            lines.append("无")
+        else:
+            for item in check_results:
+                if item.ok:
+                    continue
+
+                lines.append("")
+                lines.append(f"{item.index}. [失败] {item.op_type} {item.path}")
+                lines.append("")
+                lines.append("失败原因：")
+                lines.append(item.message)
+                lines.append("")
+                lines.append("修改包定位：")
+                lines.append("请在修改包中搜索以下 OP 头：")
+                lines.append(item.locator)
+
+                if item.old_first_line:
+                    lines.append("")
+                    lines.append("或搜索 OLD 片段首个非空行：")
+                    lines.append(item.old_first_line)
+
+                lines.append("-" * 60)
+
+        lines.append("")
+
+        if failed_count == 0:
+            lines.append("Dry Run 全部校验通过。可以执行完整修改包。")
+        elif success_count > 0:
+            lines.append("Dry Run 存在失败项。执行时将只允许执行校验成功的 OP，失败 OP 会被跳过。")
+        else:
+            lines.append("Dry Run 全部失败。没有可执行的 OP。")
+
+        return "\n".join(lines), valid_patch, failed_count > 0, success_count, failed_count
 
     def apply(self, patch):
         self.validate_patch(patch)
 
         self.logs = []
-        self.backup_root.mkdir(parents=True, exist_ok=True)
+        self.manifest_operations = []
+
+        if self.backup_enabled:
+            self.backup_root.mkdir(parents=True, exist_ok=True)
 
         self.log("【开始执行修改包】")
         self.log("协议版本：AI_FILE_PATCH_V2 动态 boundary 原文块协议")
         self.log(f"项目根目录：{self.root}")
-        self.log(f"备份目录：{self.backup_root}")
+
+        if self.backup_enabled:
+            self.log(f"备份目录：{self.backup_root}")
+        else:
+            self.log("备份状态：未启用自动备份")
+
         self.log(f"boundary：{patch.get('boundary')}")
         self.log("")
 
@@ -575,6 +876,9 @@ class PatchExecutor:
             rel_display = target.relative_to(self.root)
 
             self.log(f"---- 操作 {i}: {op_type} {rel_display} ----")
+            existed_before = target.exists()
+            before_hash = file_sha256(target)
+            backup_path = None
 
             if op_type == "write_file":
                 if target.exists():
@@ -582,20 +886,40 @@ class PatchExecutor:
                         self.log(f"[跳过] 文件已存在且 if_exists=skip：{rel_display}")
                         continue
 
-                    self.backup_file(target)
+                    backup_path = self.backup_file(target)
 
                 write_text_utf8(target, op["content"])
                 self.log(f"[完成] 写入文件：{rel_display}")
+                self.record_manifest_operation(
+                    i,
+                    op_type,
+                    rel_display,
+                    existed_before,
+                    target.exists(),
+                    before_hash,
+                    file_sha256(target),
+                    backup_path,
+                )
 
             elif op_type == "append_text":
-                self.backup_file(target)
+                backup_path = self.backup_file(target)
                 old_text, enc = read_text_auto(target)
                 new_text = old_text + op["content"]
                 write_text_utf8(target, new_text)
                 self.log(f"[完成] 追加文本：{rel_display}")
+                self.record_manifest_operation(
+                    i,
+                    op_type,
+                    rel_display,
+                    existed_before,
+                    target.exists(),
+                    before_hash,
+                    file_sha256(target),
+                    backup_path,
+                )
 
             elif op_type == "replace_between":
-                self.backup_file(target)
+                backup_path = self.backup_file(target)
                 text, enc = read_text_auto(target)
 
                 start_marker = op["start_marker"]
@@ -635,9 +959,19 @@ class PatchExecutor:
                     new_text = before + content + after
                 write_text_utf8(target, new_text)
                 self.log(f"[完成] 替换锚点区间：{rel_display}")
+                self.record_manifest_operation(
+                    i,
+                    op_type,
+                    rel_display,
+                    existed_before,
+                    target.exists(),
+                    before_hash,
+                    file_sha256(target),
+                    backup_path,
+                )
 
             elif op_type == "replace_exact":
-                self.backup_file(target)
+                backup_path = self.backup_file(target)
                 text, enc = read_text_auto(target)
 
                 normalized_text = normalize_text_newlines(text)
@@ -655,6 +989,16 @@ class PatchExecutor:
                 new_text = normalized_text.replace(old, new, expected_count)
                 write_text_utf8(target, new_text)
                 self.log(f"[完成] 精确替换 {expected_count} 处：{rel_display}")
+                self.record_manifest_operation(
+                    i,
+                    op_type,
+                    rel_display,
+                    existed_before,
+                    target.exists(),
+                    before_hash,
+                    file_sha256(target),
+                    backup_path,
+                )
 
             elif op_type == "delete_file":
                 if not self.allow_delete:
@@ -663,16 +1007,45 @@ class PatchExecutor:
                 if target.is_dir():
                     raise ValueError(f"不允许删除目录：{rel_display}")
 
-                self.backup_file(target)
+                backup_path = self.backup_file(target)
                 target.unlink()
                 self.log(f"[完成] 删除文件：{rel_display}")
+                self.record_manifest_operation(
+                    i,
+                    op_type,
+                    rel_display,
+                    existed_before,
+                    target.exists(),
+                    before_hash,
+                    file_sha256(target),
+                    backup_path,
+                )
 
-        log_path = self.backup_root / "执行日志.txt"
+        self.write_patch_copy_and_manifest(patch)
 
         self.log("")
-        self.log(f"[日志] {log_path}")
 
-        log_path.write_text("\n".join(self.logs), encoding="utf-8")
+        if self.backup_enabled:
+            log_path = self.backup_root / "执行日志.txt"
+            self.log(f"[日志] {log_path}")
+
+            file_log_lines = []
+
+            if self.preview_text:
+                file_log_lines.extend([
+                    "【Dry Run 预演记录】",
+                    self.preview_text,
+                    "",
+                    "=" * 60,
+                    "【执行记录】",
+                    "=" * 60,
+                    "",
+                ])
+
+            file_log_lines.extend(self.logs)
+            log_path.write_text("\n".join(file_log_lines), encoding="utf-8")
+        else:
+            self.log("[日志] 未启用自动备份，未写入备份目录日志文件。")
 
         return "\n".join(self.logs)
 
@@ -682,6 +1055,8 @@ def preview_patch(
     patch_text,
     allow_delete=False,
     allow_multi_replace_exact=False,
+    backup_enabled=True,
+    backup_dir="99_归档/AI文件修改备份",
 ):
     root = Path(project_root)
 
@@ -697,12 +1072,20 @@ def preview_patch(
         root,
         allow_delete=allow_delete,
         allow_multi_replace_exact=allow_multi_replace_exact,
+        backup_enabled=backup_enabled,
+        backup_dir=backup_dir,
+        patch_text=patch_text,
     )
-    preview_text = executor.preview(patch)
+
+    preview_text, valid_patch, has_errors, success_count, failed_count = executor.preview(patch)
 
     return PatchPreviewResult(
         preview_text=preview_text,
         patch=patch,
+        valid_patch=valid_patch,
+        has_errors=has_errors,
+        success_count=success_count,
+        failed_count=failed_count,
     )
 
 
@@ -711,6 +1094,10 @@ def apply_patch(
     patch,
     allow_delete=False,
     allow_multi_replace_exact=False,
+    backup_enabled=True,
+    backup_dir="99_归档/AI文件修改备份",
+    patch_text="",
+    preview_text="",
 ):
     root = Path(project_root)
 
@@ -720,14 +1107,308 @@ def apply_patch(
     if patch is None:
         raise ValueError("请先执行 Dry Run，并确保校验通过")
 
+    if not patch.get("operations"):
+        raise ValueError("没有可执行的操作。请检查 Dry Run 结果。")
+
     executor = PatchExecutor(
         root,
         allow_delete=allow_delete,
         allow_multi_replace_exact=allow_multi_replace_exact,
+        backup_enabled=backup_enabled,
+        backup_dir=backup_dir,
+        patch_text=patch_text,
+        preview_text=preview_text,
     )
+
     log_text = executor.apply(patch)
 
     return PatchApplyResult(
         log_text=log_text,
-        backup_root=str(executor.backup_root),
+        backup_root=str(executor.backup_root) if executor.backup_root else "",
+    )
+
+class BackupRestoreExecutor:
+    def __init__(
+        self,
+        project_root,
+        source_backup_root,
+        backup_enabled=True,
+        backup_dir="99_归档/AI文件修改备份",
+        force_restore=False,
+        preview_text="",
+    ):
+        self.root = Path(project_root).resolve()
+        self.source_backup_root = Path(source_backup_root).resolve()
+        self.backup_enabled = backup_enabled
+        self.backup_root = (
+            make_backup_root(self.root, backup_dir, "备份还原")
+            if backup_enabled
+            else None
+        )
+        self.force_restore = force_restore
+        self.preview_text = preview_text
+        self.logs = []
+        self.manifest = load_manifest(self.source_backup_root)
+        self.has_mismatch = False
+        self.restore_operations = []
+
+    def log(self, msg):
+        self.logs.append(msg)
+
+    def backup_current_file(self, target: Path):
+        if not self.backup_enabled or not target.exists():
+            return ""
+
+        rel = target.resolve().relative_to(self.root)
+        backup_path = self.backup_root / "files" / rel
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(target, backup_path)
+        return str(backup_path.relative_to(self.backup_root)).replace("\\", "/")
+
+    def validate_manifest(self):
+        if self.manifest.get("version") != "1.0":
+            raise ValueError("仅支持 version=1.0 的备份 manifest")
+
+        mode = self.manifest.get("mode")
+        if mode not in ("forward", "restore"):
+            raise ValueError(f"未知备份类型：{mode}")
+
+        operations = self.manifest.get("operations")
+        if not isinstance(operations, list):
+            raise ValueError("manifest.operations 必须是数组")
+
+    def build_plan(self):
+        self.validate_manifest()
+        self.restore_operations = []
+        self.has_mismatch = False
+
+        for item in self.manifest.get("operations", []):
+            rel_path = normalize_rel_path(item["path"])
+            target = safe_join(self.root, rel_path)
+            current_exists = target.exists()
+            current_hash = file_sha256(target)
+            expected_hash = item.get("after_sha256", "")
+            expected_exists = item.get("existed_after", False)
+
+            mismatch = False
+            issue = ""
+
+            if expected_exists:
+                if not current_exists:
+                    mismatch = True
+                    issue = "当前文件不存在，但备份记录显示回退前应存在"
+                elif current_hash != expected_hash:
+                    mismatch = True
+                    issue = "当前文件内容与备份记录不一致"
+            else:
+                if current_exists:
+                    mismatch = True
+                    issue = "当前文件存在，但备份记录显示回退前应不存在"
+
+            if mismatch:
+                self.has_mismatch = True
+
+            self.restore_operations.append({
+                "source": item,
+                "path": rel_path,
+                "target": target,
+                "mismatch": mismatch,
+                "issue": issue,
+            })
+
+    def preview(self):
+        self.build_plan()
+
+        mode = self.manifest.get("mode")
+        mode_text = "执行修改备份" if mode == "forward" else "备份还原备份"
+
+        lines = []
+        lines.append("【备份还原 Dry Run】")
+        lines.append(f"备份类型：{mode_text}")
+        lines.append(f"项目根目录：{self.root}")
+        lines.append(f"备份来源：{self.source_backup_root}")
+
+        if self.backup_enabled:
+            lines.append(f"本次还原前备份目录：{self.backup_root}")
+        else:
+            lines.append("本次还原前备份：未启用")
+
+        lines.append(f"允许强制还原：{self.force_restore}")
+        lines.append("")
+
+        if mode == "forward":
+            lines.append("说明：将恢复到这次执行修改之前的状态。")
+        else:
+            lines.append("说明：将恢复到这次备份还原之前的状态，相当于撤销一次还原。")
+
+        lines.append("")
+
+        for i, plan in enumerate(self.restore_operations, 1):
+            item = plan["source"]
+            action = "还原文件" if item.get("existed_before", False) else "删除新增文件"
+            line = f"{i}. [{action}] {plan['path']}"
+
+            if plan["mismatch"]:
+                line += f"  ⚠ 状态不一致：{plan['issue']}"
+
+            lines.append(line)
+
+        lines.append("")
+
+        if self.has_mismatch:
+            lines.append("检测到当前文件状态与备份记录不一致。")
+            if self.force_restore:
+                lines.append("已勾选允许强制还原，执行时会再次弹窗确认。")
+            else:
+                lines.append("未勾选允许强制还原，禁止执行还原。")
+        else:
+            lines.append("Dry Run 校验通过，当前文件状态与备份记录一致。")
+
+        return "\n".join(lines)
+
+    def apply(self):
+        self.build_plan()
+
+        if self.has_mismatch and not self.force_restore:
+            raise ValueError("当前文件状态与备份记录不一致。请先 Dry Run 查看详情；如确认覆盖，请勾选允许强制还原。")
+
+        if self.backup_enabled:
+            self.backup_root.mkdir(parents=True, exist_ok=True)
+
+        self.logs = []
+
+        self.log("【开始执行备份还原】")
+        self.log(f"项目根目录：{self.root}")
+        self.log(f"备份来源：{self.source_backup_root}")
+
+        if self.backup_enabled:
+            self.log(f"本次还原前备份目录：{self.backup_root}")
+        else:
+            self.log("本次还原前备份：未启用")
+
+        self.log("")
+
+        restore_manifest_ops = []
+
+        for i, plan in enumerate(self.restore_operations, 1):
+            item = plan["source"]
+            target = plan["target"]
+            rel_path = plan["path"]
+            existed_before_rollback = target.exists()
+            before_hash = file_sha256(target)
+            current_backup_file = self.backup_current_file(target)
+
+            if item.get("existed_before", False):
+                backup_file = item.get("backup_file", "")
+
+                if not backup_file:
+                    raise ValueError(f"缺少备份文件记录，无法还原：{rel_path}")
+
+                source_file = self.source_backup_root / backup_file
+
+                if not source_file.is_file():
+                    raise ValueError(f"备份文件不存在：{source_file}")
+
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_file, target)
+                self.log(f"[还原] {rel_path}")
+            else:
+                if target.exists():
+                    target.unlink()
+                    self.log(f"[删除新增文件] {rel_path}")
+                else:
+                    self.log(f"[跳过] 新增文件已不存在：{rel_path}")
+
+            restore_manifest_ops.append({
+                "index": i,
+                "op": "restore",
+                "path": rel_path,
+                "existed_before": existed_before_rollback,
+                "existed_after": target.exists(),
+                "before_sha256": before_hash,
+                "after_sha256": file_sha256(target),
+                "backup_file": current_backup_file,
+            })
+
+        if self.backup_enabled:
+            manifest = {
+                "version": "1.0",
+                "mode": "restore",
+                "project_root": str(self.root),
+                "backup_root": str(self.backup_root),
+                "restore_from": str(self.source_backup_root),
+                "operations": restore_manifest_ops,
+            }
+
+            save_json(self.backup_root / "manifest.json", manifest)
+
+            log_path = self.backup_root / "执行日志.txt"
+            self.log("")
+            self.log(f"[日志] {log_path}")
+
+            file_log_lines = []
+
+            if self.preview_text:
+                file_log_lines.extend([
+                    "【Dry Run 预演记录】",
+                    self.preview_text,
+                    "",
+                    "=" * 60,
+                    "【执行记录】",
+                    "=" * 60,
+                    "",
+                ])
+
+            file_log_lines.extend(self.logs)
+            log_path.write_text("\n".join(file_log_lines), encoding="utf-8")
+
+        return "\n".join(self.logs)
+
+
+def preview_backup_restore(
+    project_root,
+    restore_source_dir,
+    backup_enabled=True,
+    backup_dir="99_归档/AI文件修改备份",
+    force_restore=False,
+):
+    executor = BackupRestoreExecutor(
+        project_root=project_root,
+        source_backup_root=restore_source_dir,
+        backup_enabled=backup_enabled,
+        backup_dir=backup_dir,
+        force_restore=force_restore,
+    )
+
+    preview_text = executor.preview()
+
+    return BackupRestorePreviewResult(
+        preview_text=preview_text,
+        manifest=executor.manifest,
+        has_mismatch=executor.has_mismatch,
+    )
+
+
+def apply_backup_restore(
+    project_root,
+    restore_source_dir,
+    backup_enabled=True,
+    backup_dir="99_归档/AI文件修改备份",
+    force_restore=False,
+    preview_text="",
+):
+    executor = BackupRestoreExecutor(
+        project_root=project_root,
+        source_backup_root=restore_source_dir,
+        backup_enabled=backup_enabled,
+        backup_dir=backup_dir,
+        force_restore=force_restore,
+        preview_text=preview_text,
+    )
+
+    log_text = executor.apply()
+
+    return BackupRestoreApplyResult(
+        log_text=log_text,
+        backup_root=str(executor.backup_root) if executor.backup_root else "",
     )

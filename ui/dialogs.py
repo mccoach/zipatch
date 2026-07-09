@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 
 import tkinter as tk
+from tkinter import filedialog
 
 from core.constants import THEME
-from core.text_io import get_text_value, replace_text_keep_undo
+from core.message_utils import safe_show_error, safe_show_info
+from core.text_io import get_text_value, replace_text_keep_undo, read_text_with_fallback_encodings
 from core.paths import center_window
 from ui.theme import styled_frame, styled_button, styled_text_with_scrollbars
 from ui.text_editor import TextEditorController
@@ -66,6 +68,7 @@ def create_managed_text_box(
     enable_favorites=True,
     enable_clear=True,
     enable_wrap_toggle=True,
+    enable_import_text=False,
 ):
     """
     通用文本框创建器。
@@ -76,12 +79,12 @@ def create_managed_text_box(
     - 自动换行统一显示在标题行，交给用户自行切换。
 
     标题行右侧视觉顺序固定为：
-        自动换行  清空  收藏
+        自动换行  清空  导入  收藏
 
     注意：
     Tkinter 的 pack(side="right") 显示顺序与创建顺序相反。
     因此右侧控件创建顺序应为：
-        收藏 -> 清空 -> 自动换行
+        收藏 -> 导入 -> 清空 -> 自动换行
     """
     title_row = styled_frame(parent)
     title_row.pack(fill="x", pady=(8, 2))
@@ -151,6 +154,40 @@ def create_managed_text_box(
             favorite_key=favorite_key,
             save_config_func=save_config_func,
         )
+
+    if not readonly and enable_import_text:
+        def import_text_file():
+            file_path = filedialog.askopenfilename(
+                title="导入文本文件",
+                filetypes=[
+                    ("All Files", "*.*"),
+                ],
+            )
+
+            if not file_path:
+                return
+
+            try:
+                content, encoding = read_text_with_fallback_encodings(file_path)
+                replace_text_keep_undo(text, content)
+                safe_show_info(
+                    "导入完成",
+                    f"文本文件已导入。\n\n编码：{encoding}\n路径：\n{file_path}",
+                    parent=parent,
+                )
+            except Exception as e:
+                safe_show_error(
+                    "导入失败",
+                    f"无法按文本读取该文件：\n{file_path}\n\n错误：{e}",
+                    parent=parent,
+                )
+
+        title_bar_button(
+            title_row,
+            "导入",
+            import_text_file,
+            width=6,
+        ).pack(side="right", padx=(0, 6))
 
     if enable_clear:
         title_bar_button(

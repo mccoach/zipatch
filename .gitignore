@@ -205,8 +205,10 @@ temp/
 # Explicitly keep requirements
 !requirements.txt
 
-# Explicitly keep project config if it is a default/shared config
+# Local user runtime config
 app_config.json
+
+# Shared config template
 !app_config.example.json
 
 # Explicitly keep assets
@@ -215,3 +217,6 @@ app_config.json
 !assets/*.svg
 !assets/*.png
 wechat_qr.png
+
+# Local archives / AI patch backups
+99_归档/

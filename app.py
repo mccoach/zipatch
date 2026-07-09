@@ -82,7 +82,7 @@ class CodeToolApp:
             print(f"[图标] 设置窗口图标失败：{e}", file=sys.stderr)
 
     def build_ui(self):
-        self.root.title("综合代码处理工具")
+        self.root.title("综合代码处理工具 v1.0.0-20260709")
         self.apply_window_icon()
         self.root.resizable(True, True)
         center_window(self.root, 1080, 800)
