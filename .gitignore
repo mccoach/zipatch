@@ -145,9 +145,12 @@ token.json
 # 10. App local data / user generated runtime files
 # ============================================================
 
-# 如果这些文件是用户本机运行时产生的配置或历史记录，建议忽略。
-# 如果 app_config.json 是项目默认配置模板，请不要忽略它。
-# 当前根据你的文件清单，保留 app_config.json，不写入忽略。
+# 如果这些文件是用户本机运行时产生的配置或历史记录，保护隐私信息，建议忽略。
+# app_config.json 保存本机路径、历史输入、收藏、修改包内容和运行结果，不应提交。
+app_config.json
+
+# Shared config template
+!app_config.example.json
 
 *.bak
 *.backup
@@ -204,12 +207,6 @@ temp/
 
 # Explicitly keep requirements
 !requirements.txt
-
-# Local user runtime config
-app_config.json
-
-# Shared config template
-!app_config.example.json
 
 # Explicitly keep assets
 !assets/

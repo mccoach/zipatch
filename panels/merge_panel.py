@@ -173,6 +173,9 @@ class MergePanel(BasePanel):
             files_favorite_key="merge_exclude_files",
             extensions_favorite_key="merge_exclude_extensions",
             save_config_func=self.save_config,
+            folders_wrap_config_key="merge.exclude_folders",
+            files_wrap_config_key="merge.exclude_files",
+            extensions_wrap_config_key="merge.exclude_extensions",
         ):
             self.save_config()
             self.log("文件代码合并 - 排除名单 已保存")
@@ -186,6 +189,8 @@ class MergePanel(BasePanel):
             preamble_favorite_key="merge_regular_preamble",
             ending_favorite_key="merge_regular_ending",
             save_config_func=self.save_config,
+            preamble_wrap_config_key="merge.regular_preamble",
+            ending_wrap_config_key="merge.regular_ending",
         ):
             self.save_config()
             self.log("文件代码合并 - 附加文本 已保存")
@@ -311,6 +316,7 @@ class MergePanel(BasePanel):
             config_data=self.config_data,
             favorite_key="demand_file_list",
             save_config_func=self.save_config,
+            wrap_config_key="merge.demand_file_list",
         )
 
         file_list_text.tag_configure("invalid_line", background=THEME["danger_bg"])
@@ -325,6 +331,7 @@ class MergePanel(BasePanel):
             config_data=self.config_data,
             favorite_key="demand_preamble",
             save_config_func=self.save_config,
+            wrap_config_key="merge.demand_preamble",
         )
 
         ending_text = create_managed_text_box(
@@ -336,6 +343,7 @@ class MergePanel(BasePanel):
             config_data=self.config_data,
             favorite_key="demand_ending",
             save_config_func=self.save_config,
+            wrap_config_key="merge.demand_ending",
         )
 
         bottom = styled_frame(dialog)

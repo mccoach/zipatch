@@ -71,10 +71,36 @@ def parse_merged_blocks(full_text, start_marker, end_marker):
 
 
 def resolve_restore_path(original_path_str, target_root_folder):
-    _, path_tail = os.path.splitdrive(original_path_str)
-    path_tail = path_tail.lstrip(os.path.sep + "/")
+    """
+    将合并文件中记录的原始路径映射到目标根目录下。
 
-    return os.path.join(target_root_folder, path_tail)
+    规则：
+    - 去除原始盘符或根路径前缀；
+    - 禁止路径片段包含 ..；
+    - 最终结果必须仍位于 target_root_folder 内部。
+    """
+    _, path_tail = os.path.splitdrive(original_path_str)
+    path_tail = path_tail.replace("\\", os.path.sep).replace("/", os.path.sep)
+    path_tail = path_tail.lstrip(os.path.sep)
+
+    parts = [
+        part
+        for part in Path(path_tail).parts
+        if part not in ("", os.path.sep)
+    ]
+
+    if any(part == ".." for part in parts):
+        raise ValueError(f"还原路径不允许包含 '..'：{original_path_str}")
+
+    target_root = Path(target_root_folder).resolve()
+    target_path = (target_root / Path(*parts)).resolve()
+
+    try:
+        target_path.relative_to(target_root)
+    except ValueError:
+        raise ValueError(f"还原路径逃逸目标文件夹：{target_path}")
+
+    return str(target_path)
 
 
 def should_skip_restored_content(content):

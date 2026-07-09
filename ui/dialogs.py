@@ -29,6 +29,32 @@ def clear_text_with_undo(text, readonly=False):
     replace_text_keep_undo(text, "")
 
 
+def get_text_wrap_value(config_data, wrap_config_key, default_wrap):
+    if not config_data or not wrap_config_key:
+        return default_wrap != "none"
+
+    config_data.setdefault("text_wrap", {})
+    value = config_data["text_wrap"].get(wrap_config_key)
+
+    if isinstance(value, bool):
+        return value
+
+    default_value = default_wrap != "none"
+    config_data["text_wrap"][wrap_config_key] = default_value
+    return default_value
+
+
+def save_text_wrap_value(config_data, wrap_config_key, value, save_config_func=None):
+    if not config_data or not wrap_config_key:
+        return
+
+    config_data.setdefault("text_wrap", {})
+    config_data["text_wrap"][wrap_config_key] = bool(value)
+
+    if save_config_func:
+        save_config_func()
+
+
 def create_wrap_checkbutton(parent, wrap_var, command):
     """
     标题行里的“自动换行”小控件。
@@ -69,6 +95,7 @@ def create_managed_text_box(
     enable_clear=True,
     enable_wrap_toggle=True,
     enable_import_text=False,
+    wrap_config_key=None,
 ):
     """
     通用文本框创建器。
@@ -76,10 +103,13 @@ def create_managed_text_box(
     功能策略：
     - 可编辑文本框：查找、替换、撤销、重做、清空、自动换行、收藏全开；
     - 只读文本框：查找、清空、自动换行；
-    - 自动换行统一显示在标题行，交给用户自行切换。
+    - 自动换行统一显示在标题行，交给用户自行切换；
+    - 如果传入 wrap_config_key，则每个文本框独立持久化自动换行状态。
 
     标题行右侧视觉顺序固定为：
         自动换行  清空  导入  收藏
+
+    其中“导入”和“收藏”按参数可选。
 
     注意：
     Tkinter 的 pack(side="right") 显示顺序与创建顺序相反。
@@ -98,7 +128,13 @@ def create_managed_text_box(
         font=THEME["font_main"],
     ).pack(side="left", fill="x", expand=True)
 
-    wrap_var = tk.BooleanVar(value=(wrap != "none"))
+    wrap_var = tk.BooleanVar(
+        value=get_text_wrap_value(
+            config_data,
+            wrap_config_key,
+            wrap,
+        )
+    )
 
     frame, text = styled_text_with_scrollbars(
         parent,
@@ -116,8 +152,14 @@ def create_managed_text_box(
 
     def toggle_wrap():
         text.configure(wrap="word" if wrap_var.get() else "none")
+        save_text_wrap_value(
+            config_data,
+            wrap_config_key,
+            wrap_var.get(),
+            save_config_func,
+        )
 
-    TextEditorController(
+    text._text_editor_controller = TextEditorController(
         parent=parent,
         toolbar_parent=parent,
         text_widget=text,
@@ -258,6 +300,9 @@ def edit_exclude_settings(
     files_favorite_key=None,
     extensions_favorite_key=None,
     save_config_func=None,
+    folders_wrap_config_key=None,
+    files_wrap_config_key=None,
+    extensions_wrap_config_key=None,
 ):
     dialog = tk.Toplevel(parent)
     dialog.title(title)
@@ -270,7 +315,7 @@ def edit_exclude_settings(
 
     tk.Label(
         dialog,
-        text="支持换行、英文逗号、中文逗号、空格分隔；扩展名不写点号会自动补点号。快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做。",
+        text="支持换行、英文逗号、中文逗号、空格分隔；扩展名不写点号会自动补点号。注意：像 .gitignore 这类完整特殊文件名应写入“排除文件名”，不要写入“排除扩展名”。快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做。",
         bg=THEME["bg"],
         fg=THEME["fg_dim"],
         font=THEME["font_main"],
@@ -292,6 +337,7 @@ def edit_exclude_settings(
         favorite_key=folders_favorite_key,
         save_config_func=save_config_func,
         wrap="word",
+        wrap_config_key=folders_wrap_config_key,
     )
 
     files_text = create_managed_text_box(
@@ -304,6 +350,7 @@ def edit_exclude_settings(
         favorite_key=files_favorite_key,
         save_config_func=save_config_func,
         wrap="word",
+        wrap_config_key=files_wrap_config_key,
     )
 
     extensions_text = create_managed_text_box(
@@ -316,6 +363,7 @@ def edit_exclude_settings(
         favorite_key=extensions_favorite_key,
         save_config_func=save_config_func,
         wrap="word",
+        wrap_config_key=extensions_wrap_config_key,
     )
 
     btn_frame = styled_frame(dialog)
@@ -362,6 +410,8 @@ def edit_extra_text_settings(
     preamble_favorite_key=None,
     ending_favorite_key=None,
     save_config_func=None,
+    preamble_wrap_config_key=None,
+    ending_wrap_config_key=None,
 ):
     dialog = tk.Toplevel(parent)
     dialog.title(title)
@@ -396,6 +446,7 @@ def edit_extra_text_settings(
         favorite_key=preamble_favorite_key,
         save_config_func=save_config_func,
         wrap="word",
+        wrap_config_key=preamble_wrap_config_key,
     )
 
     ending_text = create_managed_text_box(
@@ -408,6 +459,7 @@ def edit_extra_text_settings(
         favorite_key=ending_favorite_key,
         save_config_func=save_config_func,
         wrap="word",
+        wrap_config_key=ending_wrap_config_key,
     )
 
     btn_frame = styled_frame(dialog)

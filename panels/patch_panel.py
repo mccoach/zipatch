@@ -32,9 +32,6 @@ class PatchPanel(BasePanel):
     def build(self):
         body = self.make_body()
 
-        self.cfg.pop("rollback_backup_dir", None)
-        self.cfg.pop("force_rollback", None)
-
         self.project_root = tk.StringVar(value=self.cfg.get("project_root", ""))
         self.patch_mode = tk.StringVar(value=self.cfg.get("patch_mode", "apply"))
         self.allow_delete = tk.BooleanVar(value=self.cfg.get("allow_delete", False))
@@ -68,6 +65,29 @@ class PatchPanel(BasePanel):
             open_command=lambda: open_path_with_default_app(self.project_root.get(), self.root),
             config_data=self.config_data,
             history_key="patch.project_root",
+            save_config=self.save_config,
+        )
+
+        self.backup_dir_entry = create_entry_row(
+            body,
+            "备份目录",
+            self.backup_dir,
+            browse_command=lambda: browse_folder(self.backup_dir, title="选择备份保存目录"),
+            open_command=lambda: open_path_with_default_app(self.backup_dir.get(), self.root),
+            config_data=self.config_data,
+            history_key="patch.backup_dir",
+            save_config=self.save_config,
+        )
+
+        self.restore_source_entry = create_entry_row(
+            body,
+            "备份来源",
+            self.restore_source_dir,
+            browse_command=lambda: browse_folder(self.restore_source_dir, title="选择用于还原的历史备份目录"),
+            open_command=lambda: open_path_with_default_app(self.restore_source_dir.get(), self.root),
+            tooltip_text="用于备份还原的历史备份目录。该目录必须包含 manifest.json。",
+            config_data=self.config_data,
+            history_key="patch.restore_source_dir",
             save_config=self.save_config,
         )
 
@@ -127,31 +147,9 @@ class PatchPanel(BasePanel):
         )
         self.mode_hint.pack(side="left", padx=(24, 0))
 
-        self.backup_dir_entry = create_entry_row(
-            body,
-            "备份目录",
-            self.backup_dir,
-            browse_command=lambda: browse_folder(self.backup_dir, title="选择备份保存目录"),
-            open_command=lambda: open_path_with_default_app(self.backup_dir.get(), self.root),
-            config_data=self.config_data,
-            history_key="patch.backup_dir",
-            save_config=self.save_config,
-        )
-
-        self.restore_source_entry = create_entry_row(
-            body,
-            "备份来源",
-            self.restore_source_dir,
-            browse_command=lambda: browse_folder(self.restore_source_dir, title="选择用于还原的历史备份目录"),
-            open_command=lambda: open_path_with_default_app(self.restore_source_dir.get(), self.root),
-            tooltip_text="用于备份还原的历史备份目录。该目录必须包含 manifest.json。",
-            config_data=self.config_data,
-            history_key="patch.restore_source_dir",
-            save_config=self.save_config,
-        )
-
         option_row = styled_frame(body, bg=THEME["bg_panel"])
         option_row.pack(fill="x", pady=(10, 0))
+        self.option_row = option_row
 
         self.allow_delete_check = make_checkbutton(
             option_row,
@@ -238,6 +236,7 @@ class PatchPanel(BasePanel):
             save_config_func=self.save_config,
             wrap="none",
             enable_import_text=True,
+            wrap_config_key="patch.patch_text",
         )
 
         self.result_text = create_managed_text_box(
@@ -251,6 +250,9 @@ class PatchPanel(BasePanel):
             enable_favorites=False,
             enable_clear=True,
             enable_wrap_toggle=True,
+            config_data=self.config_data,
+            save_config_func=self.save_config,
+            wrap_config_key="patch.result_text",
         )
 
         btn_row = styled_frame(body, bg=THEME["bg_panel"])
@@ -294,16 +296,17 @@ class PatchPanel(BasePanel):
         backup_dir_row = getattr(getattr(self, "backup_dir_entry", None), "_row_frame", None)
         restore_source_row = getattr(getattr(self, "restore_source_entry", None), "_row_frame", None)
 
-        def show_entry_row(row):
-            if row is not None and not row.winfo_ismapped():
-                before_widget = getattr(self, "mode_row", None)
+        def show_path_row(row):
+            if row is None or row.winfo_ismapped():
+                return
 
-                if before_widget is not None:
-                    row.pack(fill="x", pady=4, before=before_widget)
-                else:
-                    row.pack(fill="x", pady=4)
+            row.pack(
+                fill="x",
+                pady=4,
+                before=self.mode_row,
+            )
 
-        def hide_entry_row(row):
+        def hide_path_row(row):
             if row is not None:
                 row.pack_forget()
 
@@ -320,8 +323,8 @@ class PatchPanel(BasePanel):
             self.preview_button.config(text="预演还原")
             self.apply_button.config(text="执行还原")
 
-            hide_entry_row(backup_dir_row)
-            show_entry_row(restore_source_row)
+            hide_path_row(backup_dir_row)
+            show_path_row(restore_source_row)
 
             hide_widget(getattr(self, "allow_delete_check", None))
             hide_widget(getattr(self, "allow_multi_replace_check", None))
@@ -335,8 +338,8 @@ class PatchPanel(BasePanel):
             self.preview_button.config(text="Dry Run 预演")
             self.apply_button.config(text="执行修改")
 
-            hide_entry_row(restore_source_row)
-            show_entry_row(backup_dir_row)
+            hide_path_row(restore_source_row)
+            show_path_row(backup_dir_row)
 
             show_widget(getattr(self, "allow_delete_check", None))
             show_widget(getattr(self, "allow_multi_replace_check", None))
@@ -355,8 +358,6 @@ class PatchPanel(BasePanel):
         self.cfg["restore_source_dir"] = self.restore_source_dir.get().strip()
         self.cfg["force_restore"] = self.force_restore.get()
         self.cfg["keep_restore_source_path"] = self.keep_restore_source_path.get()
-        self.cfg.pop("rollback_backup_dir", None)
-        self.cfg.pop("force_rollback", None)
         self.cfg["open_backup_after_done"] = self.open_backup_after_done.get()
         self.cfg["patch_text"] = get_text_value(self.patch_text)
         self.cfg["last_result_text"] = get_text_value(self.result_text)

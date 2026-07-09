@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from core.constants import (
     MESSAGE_READ_ERROR,
 )
 from core.file_walk import iter_all_files_with_skip_reason
+from core.path_validation import summarize_path_issues, validate_path_list
 from core.paths import ensure_parent_dir
 from core.text_io import read_text_content_for_merge
 from core.time_utils import current_timestamp_text
@@ -70,82 +70,27 @@ def build_regular_merge_plan(
     return sorted(plan, key=lambda item: item["path"].lower())
 
 
-def normalize_demand_file_path(raw_path):
-    value = (raw_path or "").strip()
-
-    if not value:
-        return ""
-
-    while len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-        value = value[1:-1].strip()
-
-    value = os.path.expandvars(os.path.expanduser(value))
-    value = value.replace("\\", os.path.sep).replace("/", os.path.sep)
-    value = os.path.normpath(value)
-
-    return value
-
-
 def validate_and_normalize_demand_file_list(file_list_text):
     """
-    按需合并名单校验：
-    - 自动去除引号；
-    - 自动标准化路径；
-    - 必须是绝对路径；
-    - 必须存在；
-    - 必须是文件；
-    - 自动去重；
-    - 返回错误行号用于 UI 高亮。
+    按需合并名单校验。
+
+    业务层只保留“按需合并需要文件路径名单”这一语义入口；
+    路径文本规范化、绝对路径校验、存在性校验、文件类型校验、去重和问题汇总，
+    统一由 core.path_validation 负责，避免同一规则多处重复实现。
     """
-    normalized_lines = []
-    valid_paths = []
-    invalid_line_numbers = []
-    issue_counts = {}
-    seen = set()
-    duplicate_count = 0
-
-    for raw_line in (file_list_text or "").splitlines():
-        if not raw_line.strip():
-            continue
-
-        normalized_path = normalize_demand_file_path(raw_line)
-        normalized_lines.append(normalized_path)
-        line_number = len(normalized_lines)
-
-        issue = ""
-
-        if not os.path.isabs(normalized_path):
-            issue = "非绝对路径"
-        elif not os.path.exists(normalized_path):
-            issue = "路径不存在"
-        elif not os.path.isfile(normalized_path):
-            issue = "不是文件"
-        else:
-            path_key = os.path.normcase(os.path.abspath(normalized_path))
-
-            if path_key in seen:
-                duplicate_count += 1
-                continue
-
-            seen.add(path_key)
-
-            abs_path = os.path.abspath(normalized_path)
-            valid_paths.append(abs_path)
-            normalized_lines[-1] = abs_path
-            continue
-
-        invalid_line_numbers.append(line_number)
-        issue_counts[issue] = issue_counts.get(issue, 0) + 1
-
-    if duplicate_count:
-        issue_counts["重复路径已自动去重"] = duplicate_count
+    result = validate_path_list(
+        file_list_text,
+        allow_relative=False,
+        expected_type="file",
+        deduplicate=True,
+    )
 
     return {
-        "normalized_text": "\n".join(normalized_lines),
-        "valid_paths": valid_paths,
-        "invalid_line_numbers": invalid_line_numbers,
-        "issue_counts": issue_counts,
-        "duplicate_count": duplicate_count,
+        "normalized_text": result.normalized_text,
+        "valid_paths": result.valid_paths,
+        "invalid_line_numbers": result.invalid_line_numbers,
+        "issue_counts": result.issue_counts,
+        "duplicate_count": result.duplicate_count,
     }
 
 
@@ -290,10 +235,4 @@ def merge_demand_files(
 
 
 def summarize_demand_file_list_issues(issue_counts):
-    if not issue_counts:
-        return ""
-
-    return "；".join(
-        f"{name} {count} 行"
-        for name, count in issue_counts.items()
-    )
+    return summarize_path_issues(issue_counts)

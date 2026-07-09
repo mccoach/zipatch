@@ -2,12 +2,11 @@
 
 import sys
 import tkinter as tk
-from pathlib import Path
 
 from core.config import load_user_config, save_user_config, normalize_feature_order
 from core.constants import THEME
 from core.message_utils import safe_show_error
-from core.paths import center_window, raise_and_focus
+from core.paths import center_window, get_asset_path, raise_and_focus
 from core.time_utils import current_log_time
 from feature_registry import get_feature_registry
 from ui.theme import (
@@ -20,16 +19,6 @@ from ui.theme import (
 from ui.feature_tabs import DraggableFeatureTabs
 from ui.window_manager import register_popup, unregister_popup
 
-
-def get_asset_path(relative_path):
-    """
-    兼容开发模式和 PyInstaller 打包后的资源路径。
-    """
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
-    else:
-        base = Path(__file__).resolve().parent
-    return base / relative_path
 
 
 class CodeToolApp:
@@ -82,7 +71,7 @@ class CodeToolApp:
             print(f"[图标] 设置窗口图标失败：{e}", file=sys.stderr)
 
     def build_ui(self):
-        self.root.title("综合代码处理工具 v1.0.0-20260709")
+        self.root.title("综合代码处理工具 v1.0.1-20260709")
         self.apply_window_icon()
         self.root.resizable(True, True)
         center_window(self.root, 1080, 800)
@@ -174,6 +163,8 @@ class CodeToolApp:
             unregister_popup(dialog)
             dialog.destroy()
             return "break"
+
+        dialog.protocol("WM_DELETE_WINDOW", close)
 
         qr_path = get_asset_path("assets/wechat_qr.png")
 

@@ -149,6 +149,9 @@ class ScanPanel(BasePanel):
             files_favorite_key="scan_exclude_files",
             extensions_favorite_key="scan_exclude_extensions",
             save_config_func=self.save_config,
+            folders_wrap_config_key="scan.exclude_folders",
+            files_wrap_config_key="scan.exclude_files",
+            extensions_wrap_config_key="scan.exclude_extensions",
         ):
             self.save_config()
             self.log("全景扫描 - 排除名单 已保存")
@@ -162,6 +165,8 @@ class ScanPanel(BasePanel):
             preamble_favorite_key="scan_preamble",
             ending_favorite_key="scan_ending",
             save_config_func=self.save_config,
+            preamble_wrap_config_key="scan.preamble",
+            ending_wrap_config_key="scan.ending",
         ):
             self.save_config()
             self.log("全景扫描 - 附加文本 已保存")

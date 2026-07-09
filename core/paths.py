@@ -20,6 +20,13 @@ def get_config_path():
     return get_app_dir() / CONFIG_FILENAME
 
 
+def get_asset_path(relative_path):
+    """
+    兼容开发模式和 PyInstaller 打包后的资源路径。
+    """
+    return get_app_dir() / relative_path
+
+
 def center_window(win, width=980, height=760):
     try:
         win.update_idletasks()

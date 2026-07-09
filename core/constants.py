@@ -138,6 +138,31 @@ ENCODINGS_TO_TRY = [
 
 CONFIG_FILENAME = "app_config.json"
 
+# --- 文本框自动换行默认状态 ---
+#
+# 说明：
+# - 这里保存的是“每个文本框”的 UI 偏好，不是业务数据；
+# - key 使用“功能.语义”的稳定命名；
+# - create_managed_text_box 只负责按 key 读取和保存；
+# - 各业务面板只负责传入自己文本框的唯一 key。
+TEXT_WRAP_DEFAULTS = {
+    "scan.exclude_folders": True,
+    "scan.exclude_files": True,
+    "scan.exclude_extensions": True,
+    "scan.preamble": True,
+    "scan.ending": True,
+    "merge.exclude_folders": True,
+    "merge.exclude_files": True,
+    "merge.exclude_extensions": True,
+    "merge.regular_preamble": True,
+    "merge.regular_ending": True,
+    "merge.demand_file_list": True,
+    "merge.demand_preamble": True,
+    "merge.demand_ending": True,
+    "patch.patch_text": False,
+    "patch.result_text": False,
+}
+
 # --- 主题配色 ---
 
 THEME = {
@@ -174,6 +199,7 @@ DEFAULT_CONFIG = {
     "ui": {
         "feature_order": ["scan", "merge", "restore", "patch"],
     },
+    "text_wrap": TEXT_WRAP_DEFAULTS,
     "scan": {
         "source_folder": "",
         "output_folder": "",
