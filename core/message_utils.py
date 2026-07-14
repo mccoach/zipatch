@@ -30,6 +30,15 @@ def safe_ask_yes_no(title, message, parent=None):
         return False
 
 
+def safe_ask_risk_confirm(title, message, parent=None, danger=False):
+    """
+    执行前风险确认弹窗。
+
+    danger 仅保留为调用语义参数，当前统一使用系统原生 yes/no 弹窗。
+    """
+    return safe_ask_yes_no(title, message, parent=parent)
+
+
 def resolve_output_file_conflict(output_file, force_overwrite, parent=None):
     """
     输出文件冲突处理：

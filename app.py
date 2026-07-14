@@ -9,11 +9,11 @@ from core.message_utils import safe_show_error
 from core.paths import center_window, get_asset_path, raise_and_focus
 from core.time_utils import current_log_time
 from feature_registry import get_feature_registry
+from ui.dialogs import create_managed_text_box
 from ui.theme import (
     apply_global_theme,
     styled_frame,
     styled_label_frame,
-    styled_scrolled_text,
     styled_button,
 )
 from ui.feature_tabs import DraggableFeatureTabs
@@ -21,7 +21,7 @@ from ui.window_manager import register_popup, unregister_popup
 
 
 
-class CodeToolApp:
+class ZipatchApp:
     """
     主窗口只负责：
     1. 加载/保存配置；
@@ -70,11 +70,31 @@ class CodeToolApp:
         except Exception as e:
             print(f"[图标] 设置窗口图标失败：{e}", file=sys.stderr)
 
+    def maximize_main_window(self):
+        """
+        启动时默认最大化主窗口。
+
+        Windows/Tk 常用 state("zoomed")；
+        少数平台不支持时，退回到 attributes("-zoomed", True)。
+        如果都不可用，则保留 center_window 设置的初始尺寸。
+        """
+        try:
+            self.root.state("zoomed")
+            return
+        except Exception:
+            pass
+
+        try:
+            self.root.attributes("-zoomed", True)
+        except Exception:
+            pass
+
     def build_ui(self):
-        self.root.title("综合代码处理工具 v1.0.1-20260709")
+        self.root.title("智派-文本代码修改合并助手 Zipatch v1.1.0-20260714")
         self.apply_window_icon()
         self.root.resizable(True, True)
         center_window(self.root, 1080, 800)
+        self.maximize_main_window()
         raise_and_focus(self.root)
 
         top = styled_frame(self.root)
@@ -117,13 +137,23 @@ class CodeToolApp:
         log_outer = styled_label_frame(self.root, "运行日志")
         log_outer.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
-        log_inner_frame, self.log_text = styled_scrolled_text(
-            log_outer,
+        log_body = styled_frame(log_outer, bg=THEME["bg_panel"])
+        log_body.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.log_text = create_managed_text_box(
+            parent=log_body,
+            label_text="日志内容",
+            initial_value="",
             height=12,
             mono=True,
+            readonly=True,
+            enable_favorites=False,
+            enable_clear=True,
+            enable_wrap_toggle=True,
+            config_data=self.config_data,
+            save_config_func=lambda: save_user_config(self.config_data),
+            wrap_config_key="app.log_text",
         )
-        log_inner_frame.pack(fill="both", expand=True, padx=8, pady=8)
-        self.log_text.configure(state="disabled")
 
         self.log_text.bind("<MouseWheel>", self.on_log_scroll)
         self.log_text.bind("<Button-4>", self.on_log_scroll)

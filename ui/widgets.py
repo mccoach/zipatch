@@ -111,6 +111,7 @@ def create_entry_row(
     save_config=None,
     enable_history=True,
     tooltip_text=None,
+    value_normalizer=None,
 ):
     """
     创建单行输入框行。
@@ -154,6 +155,7 @@ def create_entry_row(
             history_key=history_key,
             save_config=save_config,
             enabled=True,
+            value_normalizer=value_normalizer,
         )
 
     if browse_command:
@@ -161,11 +163,21 @@ def create_entry_row(
             browse_command()
 
             if enable_history and config_data is not None and history_key:
+                normalized_value = (
+                    value_normalizer(text_var.get())
+                    if value_normalizer
+                    else text_var.get().strip()
+                )
+
+                if normalized_value != text_var.get():
+                    text_var.set(normalized_value)
+
                 save_entry_history(
                     config_data,
                     history_key,
-                    text_var.get(),
+                    normalized_value,
                     save_config,
+                    value_normalizer=value_normalizer,
                 )
 
         styled_button(row, "浏览", browse_and_save, width=6).pack(
@@ -179,8 +191,8 @@ def create_entry_row(
     return entry
 
 
-def browse_folder(var, title="选择文件夹"):
-    initial_dir = get_initial_dir_from_path(var.get())
+def browse_folder(var, title="选择文件夹", initial_dir=None):
+    initial_dir = initial_dir or get_initial_dir_from_path(var.get())
     path = filedialog.askdirectory(initialdir=initial_dir, title=title)
 
     if path:

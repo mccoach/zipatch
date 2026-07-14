@@ -4,7 +4,7 @@ import sys
 import tkinter as tk
 from tkinter import TclError
 
-from app import CodeToolApp
+from app import ZipatchApp
 
 
 def run_gui_flow():
@@ -17,7 +17,7 @@ def run_gui_flow():
         return
 
     try:
-        CodeToolApp(root)
+        ZipatchApp(root)
         root.mainloop()
     finally:
         try:

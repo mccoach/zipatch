@@ -186,16 +186,33 @@ class FavoriteTextBoxController:
         if not name:
             return
 
-        favorites = [
-            item
-            for item in self.get_favorites()
-            if item.get("name") != name
-        ]
+        favorites = self.get_favorites()
+        existing_index = None
 
-        favorites.append({
-            "name": name,
-            "content": content,
-        })
+        for index, item in enumerate(favorites):
+            if item.get("name") == name:
+                existing_index = index
+                break
+
+        if existing_index is not None:
+            ok = safe_ask_yes_no(
+                "收藏已存在",
+                f"已存在同名收藏：\n{name}\n\n是否覆盖原收藏内容？",
+                parent=self.parent,
+            )
+
+            if not ok:
+                return
+
+            favorites[existing_index] = {
+                "name": name,
+                "content": content,
+            }
+        else:
+            favorites.append({
+                "name": name,
+                "content": content,
+            })
 
         self.save_favorites(favorites)
         self.refresh_popup()

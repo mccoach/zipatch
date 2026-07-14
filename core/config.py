@@ -29,10 +29,13 @@ def deep_merge_config(defaults, user_config):
         user_value = user_config.get(key)
 
         if isinstance(default_value, dict):
-            result[key] = deep_merge_config(
-                default_value,
-                user_value if isinstance(user_value, dict) else {},
-            )
+            if not default_value and isinstance(user_value, dict):
+                result[key] = user_value
+            else:
+                result[key] = deep_merge_config(
+                    default_value,
+                    user_value if isinstance(user_value, dict) else {},
+                )
         elif key in user_config:
             result[key] = user_value
         else:

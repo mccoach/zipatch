@@ -6,11 +6,30 @@ from core.constants import THEME
 from ui.window_manager import register_popup, unregister_popup
 
 
-MAX_ENTRY_HISTORY = 10
+DEFAULT_ENTRY_HISTORY_MAX_ITEMS = 10
 
 
 def normalize_history_item(value):
     return (value or "").strip()
+
+
+def get_entry_history_max_items(config_data):
+    if not isinstance(config_data, dict):
+        return DEFAULT_ENTRY_HISTORY_MAX_ITEMS
+
+    settings = config_data.setdefault("settings", {})
+    value = settings.get("entry_history_max_items", DEFAULT_ENTRY_HISTORY_MAX_ITEMS)
+
+    try:
+        value = int(value)
+    except Exception:
+        value = DEFAULT_ENTRY_HISTORY_MAX_ITEMS
+
+    if value < 1:
+        value = DEFAULT_ENTRY_HISTORY_MAX_ITEMS
+
+    settings["entry_history_max_items"] = value
+    return value
 
 
 def get_history_list(config_data, history_key):
@@ -27,13 +46,16 @@ def get_history_list(config_data, history_key):
     return history
 
 
-def save_entry_history(config_data, history_key, value, save_config=None):
-    value = normalize_history_item(value)
+def save_entry_history(config_data, history_key, value, save_config=None, value_normalizer=None):
+    normalizer = value_normalizer or normalize_history_item
+    value = normalizer(value)
 
     if not value or not config_data or not history_key:
         return
 
     history = get_history_list(config_data, history_key)
+
+    max_items = get_entry_history_max_items(config_data)
 
     history = [
         item
@@ -42,7 +64,7 @@ def save_entry_history(config_data, history_key, value, save_config=None):
     ]
 
     history.insert(0, value)
-    history = history[:MAX_ENTRY_HISTORY]
+    history = history[:max_items]
 
     config_data["entry_history"][history_key] = history
 
@@ -89,9 +111,10 @@ class EntryHistoryPlugin:
         history_key=None,
         save_config=None,
         enabled=True,
-        max_items=MAX_ENTRY_HISTORY,
+        max_items=None,
         auto_seed_current=True,
         close_delay_ms=160,
+        value_normalizer=None,
     ):
         self.parent = parent
         self.entry = entry
@@ -103,18 +126,14 @@ class EntryHistoryPlugin:
         self.max_items = max_items
         self.auto_seed_current = auto_seed_current
         self.close_delay_ms = close_delay_ms
+        self.value_normalizer = value_normalizer or normalize_history_item
         self.popup = None
 
         if not self.enabled or not self.config_data or not self.history_key:
             return
 
         if self.auto_seed_current:
-            save_entry_history(
-                self.config_data,
-                self.history_key,
-                self.text_var.get(),
-                self.save_config,
-            )
+            self.save_current_value()
 
         self.entry.bind("<FocusIn>", self.on_focus_in, add="+")
         self.entry.bind("<FocusOut>", self.on_focus_out, add="+")
@@ -123,7 +142,8 @@ class EntryHistoryPlugin:
         self.entry.bind("<Down>", self.on_down_key, add="+")
 
     def history_items(self):
-        return get_history_list(self.config_data, self.history_key)[:self.max_items]
+        max_items = self.max_items or get_entry_history_max_items(self.config_data)
+        return get_history_list(self.config_data, self.history_key)[:max_items]
 
     def has_history(self):
         return bool(self.history_items())
@@ -145,11 +165,17 @@ class EntryHistoryPlugin:
         return None
 
     def save_current_value(self):
+        normalized_value = self.value_normalizer(self.text_var.get())
+
+        if normalized_value != self.text_var.get():
+            self.text_var.set(normalized_value)
+
         save_entry_history(
             self.config_data,
             self.history_key,
-            self.text_var.get(),
+            normalized_value,
             self.save_config,
+            value_normalizer=self.value_normalizer,
         )
 
     def show_popup(self, event=None):

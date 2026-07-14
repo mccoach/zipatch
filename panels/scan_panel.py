@@ -4,6 +4,7 @@ import tkinter as tk
 
 from core.constants import THEME
 from core.message_utils import resolve_output_file_conflict, safe_show_info
+from core.path_validation import normalize_windows_display_path
 from core.paths import (
     build_output_path,
     open_path_with_default_app,
@@ -46,6 +47,7 @@ class ScanPanel(BasePanel):
             config_data=self.config_data,
             history_key="scan.source_folder",
             save_config=self.save_config,
+            value_normalizer=normalize_windows_display_path,
         )
 
         create_entry_row(
@@ -57,6 +59,7 @@ class ScanPanel(BasePanel):
             config_data=self.config_data,
             history_key="scan.output_folder",
             save_config=self.save_config,
+            value_normalizer=normalize_windows_display_path,
         )
 
         create_entry_row(

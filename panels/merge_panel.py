@@ -5,6 +5,7 @@ from tkinter import TclError
 
 from core.constants import THEME
 from core.message_utils import resolve_output_file_conflict, safe_show_error, safe_show_info
+from core.path_validation import normalize_windows_display_path
 from core.paths import (
     build_output_path,
     center_window,
@@ -58,6 +59,7 @@ class MergePanel(BasePanel):
             config_data=self.config_data,
             history_key="merge.source_folder",
             save_config=self.save_config,
+            value_normalizer=normalize_windows_display_path,
         )
 
         create_entry_row(
@@ -69,6 +71,7 @@ class MergePanel(BasePanel):
             config_data=self.config_data,
             history_key="merge.output_folder",
             save_config=self.save_config,
+            value_normalizer=normalize_windows_display_path,
         )
 
         create_entry_row(

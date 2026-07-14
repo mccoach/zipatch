@@ -123,46 +123,6 @@ def get_available_renamed_path(file_path):
         index += 1
 
 
-def normalize_rel_path(rel_path: str):
-    """
-    修改包执行器专用：标准化相对路径，禁止路径逃逸。
-    """
-    if not isinstance(rel_path, str) or not rel_path.strip():
-        raise ValueError("path 必须是非空字符串")
-
-    rel_path = rel_path.replace("\\", "/").strip()
-
-    if rel_path.startswith("/") or rel_path.startswith("\\"):
-        raise ValueError(f"不允许绝对路径：{rel_path}")
-
-    if len(rel_path) >= 2 and rel_path[1] == ":":
-        raise ValueError(f"不允许 Windows 盘符绝对路径：{rel_path}")
-
-    parts = Path(rel_path).parts
-
-    if any(part == ".." for part in parts):
-        raise ValueError(f"不允许路径穿越 '..'：{rel_path}")
-
-    return rel_path
-
-
-def safe_join(root: Path, rel_path: str):
-    """
-    修改包执行器专用：把相对路径安全拼接到项目根目录下。
-    """
-    rel_path = normalize_rel_path(rel_path)
-
-    root_real = Path(root).resolve()
-    target = (root_real / rel_path).resolve()
-
-    try:
-        target.relative_to(root_real)
-    except ValueError:
-        raise ValueError(f"目标路径逃逸项目根目录：{target}")
-
-    return target
-
-
 def validate_required_path(path, label):
     if not path:
         raise ValueError(f"{label}不能为空。")

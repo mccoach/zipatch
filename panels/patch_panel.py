@@ -2,11 +2,18 @@
 
 import traceback
 import tkinter as tk
+from pathlib import Path
 
 from core.constants import THEME
-from core.message_utils import safe_ask_yes_no, safe_show_error, safe_show_info
+from core.message_utils import (
+    safe_ask_yes_no,
+    safe_ask_risk_confirm,
+    safe_show_error,
+    safe_show_info,
+)
+from core.path_validation import normalize_windows_display_path
 from core.paths import open_path_with_default_app, validate_required_path
-from core.text_io import get_text_value, set_text_value
+from core.text_io import get_text_value, replace_text_preserve_view, set_text_value
 from core.time_utils import current_timestamp_text
 from panels.base_panel import BasePanel
 from services.patch_service import (
@@ -14,6 +21,7 @@ from services.patch_service import (
     apply_patch,
     preview_backup_restore,
     apply_backup_restore,
+    resolve_backup_base_dir,
 )
 from ui.dialogs import create_managed_text_box
 from ui.theme import styled_frame, styled_button
@@ -43,19 +51,24 @@ class PatchPanel(BasePanel):
             value=self.cfg.get("backup_dir", "99_归档/AI文件修改备份")
         )
         self.restore_source_dir = tk.StringVar(value=self.cfg.get("restore_source_dir", ""))
-        self.force_restore = tk.BooleanVar(value=self.cfg.get("force_restore", False))
         self.keep_restore_source_path = tk.BooleanVar(
             value=self.cfg.get("keep_restore_source_path", False)
         )
-        self.open_backup_after_done = tk.BooleanVar(value=self.cfg.get("open_backup_after_done", False))
+        self.open_backup_after_done = tk.BooleanVar(
+            value=self.cfg.get("open_backup_after_done", False)
+        )
+
         self.preview_has_errors = False
         self.preview_success_count = 0
         self.preview_failed_count = 0
+        self.preview_has_global_errors = False
 
-        self.preview_payload = None
+        self.preview_apply_patch = None
+        self.preview_restore_manifest = None
         self.preview_snapshot = None
         self.last_preview_text = ""
         self.last_backup_root = ""
+        self.restore_risk_summary = None
 
         create_entry_row(
             body,
@@ -66,29 +79,32 @@ class PatchPanel(BasePanel):
             config_data=self.config_data,
             history_key="patch.project_root",
             save_config=self.save_config,
+            value_normalizer=normalize_windows_display_path,
         )
 
         self.backup_dir_entry = create_entry_row(
             body,
             "备份目录",
             self.backup_dir,
-            browse_command=lambda: browse_folder(self.backup_dir, title="选择备份保存目录"),
-            open_command=lambda: open_path_with_default_app(self.backup_dir.get(), self.root),
+            browse_command=self.browse_backup_dir,
+            open_command=self.open_configured_backup_dir,
             config_data=self.config_data,
             history_key="patch.backup_dir",
             save_config=self.save_config,
+            value_normalizer=normalize_windows_display_path,
         )
 
         self.restore_source_entry = create_entry_row(
             body,
             "备份来源",
             self.restore_source_dir,
-            browse_command=lambda: browse_folder(self.restore_source_dir, title="选择用于还原的历史备份目录"),
+            browse_command=self.browse_restore_source_dir,
             open_command=lambda: open_path_with_default_app(self.restore_source_dir.get(), self.root),
             tooltip_text="用于备份还原的历史备份目录。该目录必须包含 manifest.json。",
             config_data=self.config_data,
             history_key="patch.restore_source_dir",
             save_config=self.save_config,
+            value_normalizer=normalize_windows_display_path,
         )
 
         mode_row = styled_frame(body, bg=THEME["bg_panel"])
@@ -120,7 +136,7 @@ class PatchPanel(BasePanel):
         )
         add_tooltip(
             mode_row.winfo_children()[-1],
-            "执行 AI V2 修改包。建议先 Dry Run 预演，确认全部校验通过后再执行。",
+            "执行 AI V2 修改包。必须先 Dry Run 预演，确认校验结果后再执行。",
         )
         mode_row.winfo_children()[-1].pack(side="left", padx=(0, 24))
 
@@ -153,9 +169,9 @@ class PatchPanel(BasePanel):
 
         self.allow_delete_check = make_checkbutton(
             option_row,
-            "允许删除文件（危险）",
+            "允许删除文件/文件夹（危险）",
             self.allow_delete,
-            tooltip_text="仅执行修改模式使用。勾选后，修改包中的 delete_file 操作才允许执行；删除前会按自动备份设置先备份。",
+            tooltip_text="仅执行修改模式使用。勾选后，修改包中的 delete_file 和 delete_dir 操作才允许执行；删除前会按自动备份设置先备份。",
         )
         self.allow_delete_check.pack(side="left", padx=(0, 24))
 
@@ -171,17 +187,9 @@ class PatchPanel(BasePanel):
             option_row,
             "自动备份",
             self.backup_enabled,
-            tooltip_text="勾选后，执行修改前会备份被修改/删除的文件；备份还原前会备份当前状态。实际备份文件是否生成和保留只由此项控制。",
+            tooltip_text="勾选后，执行修改前会备份被修改/删除的文件；备份还原前会备份当前状态。",
         )
         self.backup_enabled_check.pack(side="left", padx=(0, 24))
-
-        self.force_restore_check = make_checkbutton(
-            option_row,
-            "允许强制还原",
-            self.force_restore,
-            tooltip_text="仅备份还原模式使用。当前文件状态与备份记录不一致时，勾选后允许继续覆盖还原。",
-        )
-        self.force_restore_check.pack(side="left", padx=(0, 24))
 
         self.keep_restore_source_path_check = make_checkbutton(
             option_row,
@@ -209,7 +217,6 @@ class PatchPanel(BasePanel):
                 (self.backup_enabled, "backup_enabled"),
                 (self.backup_dir, "backup_dir"),
                 (self.restore_source_dir, "restore_source_dir"),
-                (self.force_restore, "force_restore"),
                 (self.keep_restore_source_path, "keep_restore_source_path"),
                 (self.open_backup_after_done, "open_backup_after_done"),
             ],
@@ -295,6 +302,7 @@ class PatchPanel(BasePanel):
     def refresh_mode_ui(self):
         backup_dir_row = getattr(getattr(self, "backup_dir_entry", None), "_row_frame", None)
         restore_source_row = getattr(getattr(self, "restore_source_entry", None), "_row_frame", None)
+        is_restore = self.patch_mode.get() == "restore"
 
         def show_path_row(row):
             if row is None or row.winfo_ismapped():
@@ -318,7 +326,7 @@ class PatchPanel(BasePanel):
             if widget is not None:
                 widget.pack_forget()
 
-        if self.patch_mode.get() == "restore":
+        if is_restore:
             self.mode_hint.config(text="当前为备份还原模式，请谨慎操作")
             self.preview_button.config(text="预演还原")
             self.apply_button.config(text="执行还原")
@@ -329,7 +337,6 @@ class PatchPanel(BasePanel):
             hide_widget(getattr(self, "allow_delete_check", None))
             hide_widget(getattr(self, "allow_multi_replace_check", None))
             show_widget(getattr(self, "backup_enabled_check", None))
-            show_widget(getattr(self, "force_restore_check", None))
             show_widget(getattr(self, "keep_restore_source_path_check", None))
             show_widget(getattr(self, "open_backup_after_done_check", None))
 
@@ -344,9 +351,121 @@ class PatchPanel(BasePanel):
             show_widget(getattr(self, "allow_delete_check", None))
             show_widget(getattr(self, "allow_multi_replace_check", None))
             show_widget(getattr(self, "backup_enabled_check", None))
-            hide_widget(getattr(self, "force_restore_check", None))
             hide_widget(getattr(self, "keep_restore_source_path_check", None))
             show_widget(getattr(self, "open_backup_after_done_check", None))
+
+        self.refresh_apply_button_style(is_restore)
+
+    def refresh_apply_button_style(self, is_restore):
+        """
+        执行按钮颜色表达实际执行风险：
+        - 执行修改：橙色；
+        - 备份还原：红色。
+        """
+        if is_restore:
+            bg = THEME["danger"]
+        else:
+            bg = THEME["warning"]
+
+        self.apply_button.config(
+            bg=bg,
+            fg=THEME["fg_on_dark"],
+            activebackground=bg,
+            activeforeground=THEME["fg_on_dark"],
+        )
+        self.apply_button._normal_bg = bg
+        self.apply_button._normal_fg = THEME["fg_on_dark"]
+
+    def resolve_project_relative_initial_dir(self, value):
+        """
+        解析项目相对路径输入框的浏览初始目录。
+
+        规则：
+        - 项目根目录有效时，相对路径以项目根目录为基准；
+        - 输入为空时，从项目根目录打开；
+        - 输入为绝对路径时，直接使用该路径；
+        - 目标目录存在时，从目标目录打开；
+        - 目标目录不存在但父目录存在时，从父目录打开；
+        - 路径非法或父目录无效时，回退项目根目录；
+        - 项目根目录无效时，返回 None，交给系统默认位置。
+        """
+        project_root_text = self.project_root.get().strip()
+
+        try:
+            project_root = Path(project_root_text).expanduser().resolve()
+        except Exception:
+            return None
+
+        if not project_root.is_dir():
+            return None
+
+        value = (value or "").strip()
+
+        if not value:
+            return str(project_root)
+
+        try:
+            target = Path(value).expanduser()
+
+            if not target.is_absolute():
+                target = project_root / target
+
+            target = target.resolve()
+
+            if target.is_dir():
+                return str(target)
+
+            if target.parent.is_dir():
+                return str(target.parent)
+
+        except Exception:
+            pass
+
+        return str(project_root)
+
+    def browse_project_relative_folder(self, var, title):
+        browse_folder(
+            var,
+            title=title,
+            initial_dir=self.resolve_project_relative_initial_dir(var.get()),
+        )
+
+    def browse_backup_dir(self):
+        self.browse_project_relative_folder(
+            self.backup_dir,
+            "选择备份保存目录",
+        )
+
+    def browse_restore_source_dir(self):
+        self.browse_project_relative_folder(
+            self.restore_source_dir,
+            "选择用于还原的历史备份目录",
+        )
+
+    def resolve_configured_backup_dir(self):
+        """
+        解析“备份目录”输入框中的路径。
+
+        规则：
+        - 绝对路径：直接打开该绝对路径；
+        - 相对路径：按当前修改包页面的“项目根目录”拼接；
+        - 不使用 Python 进程工作目录解析相对路径，避免打开到其他项目。
+        """
+        return str(
+            resolve_backup_base_dir(
+                self.project_root.get().strip(),
+                self.backup_dir.get().strip(),
+            )
+        )
+
+    def open_configured_backup_dir(self):
+        try:
+            open_path_with_default_app(
+                self.resolve_configured_backup_dir(),
+                self.root,
+            )
+        except Exception as e:
+            safe_show_error("打开失败", str(e), parent=self.root)
 
     def collect_config(self):
         self.cfg["project_root"] = self.project_root.get().strip()
@@ -356,7 +475,6 @@ class PatchPanel(BasePanel):
         self.cfg["backup_enabled"] = self.backup_enabled.get()
         self.cfg["backup_dir"] = self.backup_dir.get().strip()
         self.cfg["restore_source_dir"] = self.restore_source_dir.get().strip()
-        self.cfg["force_restore"] = self.force_restore.get()
         self.cfg["keep_restore_source_path"] = self.keep_restore_source_path.get()
         self.cfg["open_backup_after_done"] = self.open_backup_after_done.get()
         self.cfg["patch_text"] = get_text_value(self.patch_text)
@@ -375,7 +493,6 @@ class PatchPanel(BasePanel):
         if cfg.get("patch_mode", "apply") == "restore":
             snapshot.update({
                 "restore_source_dir": cfg.get("restore_source_dir", ""),
-                "force_restore": cfg.get("force_restore", False),
                 "keep_restore_source_path": cfg.get("keep_restore_source_path", False),
             })
         else:
@@ -388,23 +505,30 @@ class PatchPanel(BasePanel):
         return snapshot
 
     def ensure_preview_snapshot_still_valid(self, cfg):
-        if self.preview_payload is None or self.preview_snapshot is None:
-            raise ValueError("请先执行 Dry Run，并确保校验通过")
+        if self.preview_snapshot is None:
+            raise ValueError("请先执行 Dry Run，并确保存在可执行内容")
+
+        if cfg.get("patch_mode", "apply") == "restore":
+            if self.preview_restore_manifest is None:
+                raise ValueError("请先执行备份还原预演，并确保存在可还原内容。")
+        elif self.preview_apply_patch is None:
+            raise ValueError("请先执行 Dry Run，并确保存在可执行内容")
 
         current_snapshot = self.make_current_snapshot(cfg)
 
         if current_snapshot != self.preview_snapshot:
-            self.preview_payload = None
+            self.preview_apply_patch = None
+            self.preview_restore_manifest = None
             self.preview_snapshot = None
             self.last_preview_text = ""
             raise ValueError(
-                "当前项目根目录、允许删除选项或修改包内容已发生变化。\n\n"
+                "当前项目根目录、执行模式、选项或修改包内容已发生变化。\n\n"
                 "为避免执行未经校验的内容，请重新点击【Dry Run 预演】，确认通过后再执行。"
             )
 
     def write_result(self, text):
         self.result_text.configure(state="normal")
-        set_text_value(self.result_text, text)
+        replace_text_preserve_view(self.result_text, text)
         self.result_text.configure(state="disabled")
         self.cfg["last_result_text"] = text
         self.save_config()
@@ -413,6 +537,48 @@ class PatchPanel(BasePanel):
         if self.patch_mode.get() == "restore":
             return "备份还原"
         return "执行修改"
+
+    def extract_preview_failure_summary(self, preview_text, max_items=3):
+        """
+        从 Dry Run 结果文本中提取失败原因摘要，用于弹窗快速提示。
+
+        完整详情仍以右侧结果区为准；弹窗只承担“当前阶段关键错误不丢失”的提示职责。
+        """
+        reasons = []
+        lines = (preview_text or "").splitlines()
+
+        for index, line in enumerate(lines):
+            if line.strip() != "失败原因：":
+                continue
+
+            collected = []
+
+            for item in lines[index + 1:]:
+                value = item.strip()
+
+                if not value:
+                    if collected:
+                        break
+                    continue
+
+                if value in ("修改包定位：", "请在修改包中搜索以下 OP 头："):
+                    break
+
+                collected.append(value)
+
+            if collected:
+                reasons.append(" ".join(collected))
+
+            if len(reasons) >= max_items:
+                break
+
+        if not reasons:
+            return "请查看右侧结果区中的校验失败详情。"
+
+        return "\n".join(
+            f"{index}. {reason}"
+            for index, reason in enumerate(reasons, 1)
+        )
 
     def append_result(self, title, text):
         old_text = get_text_value(self.result_text).rstrip()
@@ -434,6 +600,286 @@ class PatchPanel(BasePanel):
     def clear_result(self):
         self.write_result("")
         self.log("修改包执行器：已清空结果")
+
+    def build_apply_operation_summary(self, cfg):
+        """
+        执行前确认摘要。
+
+        规则：
+        - 优先按处理修改类型分组；
+        - 同一类别下同一文件只显示一次；
+        - 同一文件跨类别出现时，允许分别显示；
+        - 最高风险是“未开启自动备份 + 修改/删除已有文件”。
+        """
+        project_root = Path(cfg["project_root"]).resolve()
+        groups = [
+            ("create", "新增文件"),
+            ("create_dir", "创建目录"),
+            ("overwrite", "覆盖已有路径"),
+            ("append_text", "追加文本"),
+            ("replace_exact", "精确替换"),
+            ("replace_between", "锚点区间替换"),
+            ("rename_file", "文件改名"),
+            ("move_file", "移动文件"),
+            ("copy_file", "复制文件"),
+            ("rename_dir", "目录改名"),
+            ("move_dir", "移动目录"),
+            ("copy_dir", "复制目录"),
+            ("delete_file", "删除文件"),
+            ("delete_dir", "删除文件夹"),
+            ("skip", "跳过写入"),
+        ]
+
+        files_by_group = {key: [] for key, _ in groups}
+        seen_by_group = {key: set() for key, _ in groups}
+        operations_by_group = {key: 0 for key, _ in groups}
+        replace_exact_total_count = 0
+        existing_file_groups = {
+            "overwrite",
+            "append_text",
+            "replace_exact",
+            "replace_between",
+            "rename_file",
+            "move_file",
+            "copy_file",
+            "rename_dir",
+            "move_dir",
+            "copy_dir",
+            "delete_file",
+            "delete_dir",
+        }
+        
+        for op in self.preview_apply_patch.get("operations", []):
+            op_type = op.get("op", "")
+            rel_path = str(op.get("path", "")).replace("\\", "/").strip()
+
+            if not rel_path:
+                continue
+
+            display_path = rel_path
+            target = project_root / rel_path
+
+            if op_type == "write_file":
+                if target.exists() and op.get("if_exists", "error") == "skip":
+                    group_key = "skip"
+                elif target.exists():
+                    group_key = "overwrite"
+                else:
+                    group_key = "create"
+            elif op_type in (
+                "rename_file",
+                "move_file",
+                "copy_file",
+                "rename_dir",
+                "move_dir",
+                "copy_dir",
+            ) and op.get("new_path"):
+                new_rel_path = str(op.get("new_path", "")).replace("\\", "/").strip()
+                new_target = project_root / new_rel_path
+                display_path = f"{rel_path} -> {new_rel_path}"
+
+                if new_target.exists() and op.get("if_exists", "error") == "skip":
+                    group_key = "skip"
+                elif new_target.exists():
+                    group_key = "overwrite"
+                else:
+                    group_key = op_type
+            else:
+                group_key = op_type
+
+            if group_key not in files_by_group:
+                continue
+
+            operations_by_group[group_key] += 1
+
+            if group_key == "replace_exact":
+                replace_exact_total_count += int(str(op["count"]).strip())
+
+            if display_path in seen_by_group[group_key]:
+                continue
+
+            seen_by_group[group_key].add(display_path)
+            files_by_group[group_key].append(display_path)
+
+        counts = {
+            key: len(files_by_group[key])
+            for key, _ in groups
+        }
+
+        affects_existing_files = any(
+            counts[key] > 0
+            for key in existing_file_groups
+        )
+
+        has_delete = counts["delete_file"] > 0 or counts["delete_dir"] > 0
+        high_risk = not cfg.get("backup_enabled", True) and affects_existing_files
+
+        return {
+            "groups": groups,
+            "files_by_group": files_by_group,
+            "counts": counts,
+            "operations_by_group": operations_by_group,
+            "replace_exact_total_count": replace_exact_total_count,
+            "affects_existing_files": affects_existing_files,
+            "has_delete": has_delete,
+            "high_risk": high_risk,
+        }
+
+    def format_grouped_file_list(self, summary, only_existing_risk=False, include_empty=False):
+        existing_risk_groups = {
+            "overwrite",
+            "append_text",
+            "replace_exact",
+            "replace_between",
+            "rename_file",
+            "move_file",
+            "copy_file",
+            "rename_dir",
+            "move_dir",
+            "copy_dir",
+            "delete_file",
+            "delete_dir",
+        }
+
+        lines = []
+
+        for key, title in summary["groups"]:
+            if only_existing_risk and key not in existing_risk_groups:
+                continue
+
+            files = summary["files_by_group"].get(key, [])
+
+            if not files and not include_empty:
+                continue
+
+            op_count = summary.get("operations_by_group", {}).get(key, len(files))
+
+            if key == "replace_exact":
+                replace_count = summary.get("replace_exact_total_count", op_count)
+                lines.append(f"{title}：OP {op_count} 个，文本替换 {replace_count} 处，涉及 {len(files)} 个文件")
+            else:
+                lines.append(f"{title}：OP {op_count} 个，涉及 {len(files)} 个文件")
+
+            for path in files:
+                lines.append(f"- {path}")
+
+            lines.append("")
+
+        return "\n".join(lines).rstrip()
+
+    def format_restore_risk_summary(self):
+        summary = self.restore_risk_summary or {}
+        lines = []
+
+        groups = [
+            ("mismatch_paths", "状态漂移项"),
+            ("delete_paths", "将删除当前存在路径"),
+            ("overwrite_paths", "将覆盖当前路径"),
+            ("restore_dirs", "涉及目录树还原"),
+        ]
+
+        for key, title in groups:
+            paths = summary.get(key, [])
+
+            if not paths:
+                continue
+
+            lines.append(f"{title}：{len(paths)} 项")
+
+            for path in paths:
+                lines.append(f"- {path}")
+
+            lines.append("")
+
+        return "\n".join(lines).rstrip() or "未检测到额外高风险项。"
+
+    def confirm_restore_execution(self, cfg):
+        risk_text = self.format_restore_risk_summary()
+        has_risk = bool((self.restore_risk_summary or {}).get("has_risk", False))
+
+        lines = [
+            "即将根据备份来源执行文件层级还原。",
+            "",
+            "还原前程序会按“自动备份”设置备份当前状态。",
+            "",
+            "风险清单：",
+            "",
+            risk_text,
+            "",
+        ]
+
+        if has_risk:
+            lines.extend([
+                "检测到高风险项。若继续执行，当前路径可能会被覆盖或删除。",
+                "本次确认只对当前这一次还原生效，不会保存为长期强制开关。",
+                "",
+            ])
+
+        if not cfg.get("keep_restore_source_path", False):
+            lines.extend([
+                "还原成功后会清空文本框中的备份来源路径，但不会删除任何实际备份文件。",
+                "",
+            ])
+
+        lines.append("确认执行还原？")
+
+        return safe_ask_risk_confirm(
+            "执行还原确认" if not has_risk else "高风险还原确认",
+            "\n".join(lines),
+            parent=self.root,
+            danger=has_risk,
+        )
+
+    def confirm_apply_execution(self, cfg):
+        summary = self.build_apply_operation_summary(cfg)
+
+        if summary["high_risk"]:
+            message = (
+                "高风险：当前未开启自动备份。\n\n"
+                "本次将修改或删除已有文件。执行后，工具无法帮你自动还原这些文件到执行前状态。\n\n"
+                "受影响文件清单：\n\n"
+                f"{self.format_grouped_file_list(summary, only_existing_risk=True)}\n\n"
+                "确认继续执行？"
+            )
+
+            return safe_ask_risk_confirm(
+                "高风险确认：未启用自动备份",
+                message,
+                parent=self.root,
+                danger=True,
+            )
+
+        lines = [
+            "即将执行文件修改。",
+            "",
+        ]
+
+        if cfg.get("backup_enabled", True):
+            lines.extend([
+                "自动备份已开启。执行前会备份被修改/删除的已有文件，可通过备份还原回退。",
+                "",
+            ])
+        else:
+            lines.extend([
+                "当前未开启自动备份。",
+                "本次未检测到会被修改/删除的已有文件，主要风险较低。",
+                "",
+            ])
+
+        lines.extend([
+            "本次操作清单：",
+            "",
+            self.format_grouped_file_list(summary),
+            "",
+            "确认执行？",
+        ])
+
+        return safe_ask_risk_confirm(
+            "执行确认",
+            "\n".join(lines),
+            parent=self.root,
+            danger=False,
+        )
 
     def open_last_backup_dir(self):
         if self.last_backup_root:
@@ -476,15 +922,17 @@ class PatchPanel(BasePanel):
                     restore_source_dir=restore_source_dir,
                     backup_enabled=cfg.get("backup_enabled", True),
                     backup_dir=cfg.get("backup_dir", "99_归档/AI文件修改备份"),
-                    force_restore=cfg.get("force_restore", False),
                 )
 
-                self.preview_payload = result.manifest
+                self.preview_apply_patch = None
+                self.preview_restore_manifest = result.manifest
                 self.preview_snapshot = self.make_current_snapshot(cfg)
                 self.last_preview_text = result.preview_text
+                self.restore_risk_summary = result.risk_summary
                 self.preview_has_errors = result.has_mismatch
                 self.preview_success_count = 0
                 self.preview_failed_count = 0
+                self.preview_has_global_errors = False
                 self.append_result("Dry Run 预演", result.preview_text)
 
                 self.set_status("备份还原预演完成")
@@ -506,12 +954,14 @@ class PatchPanel(BasePanel):
                 backup_dir=cfg.get("backup_dir", "99_归档/AI文件修改备份"),
             )
 
-            self.preview_payload = result.valid_patch
+            self.preview_apply_patch = result.valid_patch
+            self.preview_restore_manifest = None
             self.preview_snapshot = self.make_current_snapshot(cfg)
             self.last_preview_text = result.preview_text
             self.preview_has_errors = result.has_errors
             self.preview_success_count = result.success_count
             self.preview_failed_count = result.failed_count
+            self.preview_has_global_errors = result.has_global_errors
             self.append_result("Dry Run 预演", result.preview_text)
 
             self.set_status("Dry Run 预演完成")
@@ -523,23 +973,26 @@ class PatchPanel(BasePanel):
                     "V2 修改包全部校验通过。请查看预演结果，确认无误后再执行。",
                     parent=self.root,
                 )
-            elif result.success_count > 0:
-                safe_show_info(
-                    "Dry Run 部分通过",
-                    f"修改包存在失败项。\n\n校验成功：{result.success_count}\n校验失败：{result.failed_count}\n\n执行时将只执行校验成功的 OP。",
-                    parent=self.root,
-                )
             else:
                 safe_show_error(
-                    "Dry Run 全部失败",
-                    "修改包没有任何可执行的成功 OP。请查看结果区中的失败详情。",
+                    "Dry Run 存在失败项",
+                    "修改包存在校验失败项，请先查看并修正。\n\n"
+                    f"校验成功：{result.success_count}\n"
+                    f"校验失败：{result.failed_count}\n"
+                    f"全局冲突：{'有' if result.has_global_errors else '无'}\n\n"
+                    "失败原因摘要：\n"
+                    f"{self.extract_preview_failure_summary(result.preview_text)}\n\n"
+                    "完整详情请查看右侧结果区。",
                     parent=self.root,
                 )
 
         except Exception as e:
-            self.preview_payload = None
+            self.preview_apply_patch = None
+            self.preview_restore_manifest = None
             self.preview_snapshot = None
             self.last_preview_text = ""
+            self.restore_risk_summary = None
+            self.preview_has_global_errors = False
 
             err = "【Dry Run 失败】\n\n" + str(e) + "\n\n" + traceback.format_exc()
             self.append_result("Dry Run 失败", err)
@@ -556,28 +1009,7 @@ class PatchPanel(BasePanel):
             self.ensure_preview_snapshot_still_valid(cfg)
 
             if cfg.get("patch_mode", "apply") == "restore":
-                if cfg.get("force_restore", False):
-                    ok = safe_ask_yes_no(
-                        "强制还原确认",
-                        "你已勾选允许强制还原。\n\n"
-                        "即使当前文件状态与备份记录不一致，也可能覆盖或删除当前文件。\n\n"
-                        "确认继续？",
-                        parent=self.root,
-                    )
-
-                    if not ok:
-                        return
-
-                ok = safe_ask_yes_no(
-                    "执行还原确认",
-                    "即将根据备份来源执行文件层级还原。\n\n"
-                    "还原前程序会按“自动备份”设置备份当前状态。\n\n"
-                    "如果未勾选“保留备份来源路径”，还原成功后会清空文本框中的备份来源路径，但不会删除任何实际备份文件。\n\n"
-                    "确认执行？",
-                    parent=self.root,
-                )
-
-                if not ok:
+                if not self.confirm_restore_execution(cfg):
                     return
 
                 self.set_status("正在执行备份还原...")
@@ -591,7 +1023,7 @@ class PatchPanel(BasePanel):
                     ),
                     backup_enabled=cfg.get("backup_enabled", True),
                     backup_dir=cfg.get("backup_dir", "99_归档/AI文件修改备份"),
-                    force_restore=cfg.get("force_restore", False),
+                    risk_confirmed=True,
                     preview_text=self.last_preview_text,
                 )
 
@@ -612,6 +1044,12 @@ class PatchPanel(BasePanel):
 
                 return
 
+            if self.preview_has_global_errors:
+                raise ValueError(
+                    "当前 Dry Run 存在路径互斥或内容互斥等全局冲突，不能执行任何 OP。\n\n"
+                    "请先修正修改包并重新 Dry Run。"
+                )
+
             if self.preview_has_errors:
                 if self.preview_success_count <= 0:
                     raise ValueError("当前 Dry Run 没有任何校验成功的 OP，不能执行。")
@@ -629,27 +1067,7 @@ class PatchPanel(BasePanel):
                 if not ok:
                     return
 
-            if cfg["allow_delete"]:
-                ok = safe_ask_yes_no(
-                    "删除确认",
-                    "你已勾选允许删除文件。\n\n"
-                    "如果修改包包含 delete_file，文件会先备份再删除。\n\n"
-                    "确认继续？",
-                    parent=self.root,
-                )
-
-                if not ok:
-                    return
-
-            ok = safe_ask_yes_no(
-                "执行确认",
-                "即将执行文件修改。\n\n"
-                "程序会先备份被修改/删除的文件。\n\n"
-                "确认执行？",
-                parent=self.root,
-            )
-
-            if not ok:
+            if not self.confirm_apply_execution(cfg):
                 return
 
             self.set_status("正在执行修改包...")
@@ -657,7 +1075,7 @@ class PatchPanel(BasePanel):
 
             result = apply_patch(
                 project_root=project_root,
-                patch=self.preview_payload,
+                patch=self.preview_apply_patch,
                 allow_delete=cfg["allow_delete"],
                 allow_multi_replace_exact=cfg.get("allow_multi_replace_exact", False),
                 backup_enabled=cfg.get("backup_enabled", True),

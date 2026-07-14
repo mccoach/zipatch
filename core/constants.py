@@ -109,7 +109,6 @@ SKIPPED_LOG_FILENAME = "_RESTORE_SKIPPED_FILES_.log"
 
 # --- 修改包执行器协议常量 ---
 
-PATCH_START_PREFIX = "<<AI_FILE_PATCH_V2"
 PATCH_END = "<</AI_FILE_PATCH_V2>>"
 
 SUPPORTED_PATCH_OPS = {
@@ -118,6 +117,14 @@ SUPPORTED_PATCH_OPS = {
     "replace_between",
     "replace_exact",
     "delete_file",
+    "delete_dir",
+    "rename_file",
+    "move_file",
+    "copy_file",
+    "rename_dir",
+    "move_dir",
+    "copy_dir",
+    "create_dir",
 }
 
 PATCH_TEXT_BLOCK_STARTERS = {
@@ -161,6 +168,7 @@ TEXT_WRAP_DEFAULTS = {
     "merge.demand_ending": True,
     "patch.patch_text": False,
     "patch.result_text": False,
+    "app.log_text": True,
 }
 
 # --- 主题配色 ---
@@ -184,6 +192,7 @@ THEME = {
     "border_light": "#a0a0a0",
     "select_bg": "#555555",
     "select_fg": "#ffffff",
+    "warning": "#d97706",
     "danger": "#cc0000",
     "danger_bg": "#ffd6d6",
     "font_main": ("Microsoft YaHei UI", 10),
@@ -195,6 +204,9 @@ THEME = {
 
 DEFAULT_CONFIG = {
     "active_mode": "merge",
+    "settings": {
+        "entry_history_max_items": 10,
+    },
     "entry_history": {},
     "ui": {
         "feature_order": ["scan", "merge", "restore", "patch"],
@@ -247,7 +259,6 @@ DEFAULT_CONFIG = {
         "backup_enabled": True,
         "backup_dir": "99_归档/AI文件修改备份",
         "restore_source_dir": "",
-        "force_restore": False,
         "keep_restore_source_path": False,
         "patch_text": "",
         "last_result_text": "",

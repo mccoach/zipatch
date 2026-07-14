@@ -4,6 +4,7 @@ import tkinter as tk
 
 from core.constants import THEME
 from core.message_utils import safe_show_info
+from core.path_validation import normalize_windows_display_path
 from core.paths import (
     open_path_with_default_app,
     validate_required_path,
@@ -43,6 +44,7 @@ class RestorePanel(BasePanel):
             config_data=self.config_data,
             history_key="restore.source_txt_file",
             save_config=self.save_config,
+            value_normalizer=normalize_windows_display_path,
         )
 
         create_entry_row(
@@ -54,6 +56,7 @@ class RestorePanel(BasePanel):
             config_data=self.config_data,
             history_key="restore.target_folder",
             save_config=self.save_config,
+            value_normalizer=normalize_windows_display_path,
         )
 
         create_entry_row(
