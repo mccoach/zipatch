@@ -1,6 +1,0 @@
-Zipatch patch split refactor test file.
-
-MARKER_LINE=after
-
-This file is created by test package 1.
-Append text from test package 2.
