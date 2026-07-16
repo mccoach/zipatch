@@ -4,7 +4,7 @@ import traceback
 import tkinter as tk
 from pathlib import Path
 
-from core.constants import THEME
+from core.constants import PATCH_PROTOCOL_DOC_PATH, THEME
 from core.message_utils import (
     safe_ask_yes_no,
     safe_ask_risk_confirm,
@@ -12,8 +12,13 @@ from core.message_utils import (
     safe_show_info,
 )
 from core.path_validation import normalize_windows_display_path
-from core.paths import open_path_with_default_app, validate_required_path
-from core.text_io import get_text_value, replace_text_preserve_view, set_text_value
+from core.paths import center_window, get_asset_path, open_path_with_default_app, validate_required_path
+from core.text_io import (
+    get_text_value,
+    read_text_with_fallback_encodings,
+    replace_text_preserve_view,
+    set_text_value,
+)
 from core.time_utils import current_timestamp_text
 from panels.base_panel import BasePanel
 from services.patch_service import (
@@ -297,7 +302,81 @@ class PatchPanel(BasePanel):
         )
         self.preview_button.pack(side="right")
 
+        styled_button(
+            btn_row,
+            "修改包协议规范",
+            self.show_protocol_doc,
+            width=16,
+        ).pack(side="right", padx=(0, 8))
+
         self.refresh_mode_ui()
+
+    def show_protocol_doc(self):
+        """
+        只读弹窗显示修改包协议规范文档。
+
+        文档路径由 core.constants.PATCH_PROTOCOL_DOC_PATH 统一定义：
+        - 使用相对应用根目录的路径；
+        - 允许后台修改常量；
+        - 不开放到 UI，避免普通用户误改。
+        """
+        try:
+            doc_path = get_asset_path(PATCH_PROTOCOL_DOC_PATH)
+            content, encoding = read_text_with_fallback_encodings(doc_path)
+
+            dialog = tk.Toplevel(self.root)
+            dialog.title("修改包协议规范")
+            dialog.configure(bg=THEME["bg"])
+            center_window(dialog, 980, 740)
+            dialog.transient(self.root)
+            dialog.grab_set()
+
+            tk.Label(
+                dialog,
+                text=f"当前显示：{PATCH_PROTOCOL_DOC_PATH}    编码：{encoding}",
+                bg=THEME["bg"],
+                fg=THEME["fg_dim"],
+                font=THEME["font_main"],
+                anchor="w",
+                justify="left",
+                wraplength=930,
+            ).pack(fill="x", padx=16, pady=(12, 4))
+
+            body = styled_frame(dialog)
+            body.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+            create_managed_text_box(
+                parent=body,
+                label_text="协议规范内容",
+                initial_value=content,
+                height=30,
+                mono=True,
+                wrap="word",
+                readonly=True,
+                enable_favorites=False,
+                enable_clear=False,
+                enable_wrap_toggle=True,
+                config_data=self.config_data,
+                save_config_func=self.save_config,
+                wrap_config_key="patch.protocol_doc_text",
+            )
+
+            bottom = styled_frame(dialog)
+            bottom.pack(fill="x", padx=16, pady=(4, 14))
+
+            styled_button(
+                bottom,
+                "关闭",
+                dialog.destroy,
+                width=10,
+            ).pack(side="right")
+
+        except Exception as e:
+            safe_show_error(
+                "协议规范打开失败",
+                f"无法读取修改包协议规范文档：\n{PATCH_PROTOCOL_DOC_PATH}\n\n错误：{e}",
+                parent=self.root,
+            )
 
     def refresh_mode_ui(self):
         backup_dir_row = getattr(getattr(self, "backup_dir_entry", None), "_row_frame", None)

@@ -20,7 +20,6 @@ from ui.feature_tabs import DraggableFeatureTabs
 from ui.window_manager import register_popup, unregister_popup
 
 
-
 class ZipatchApp:
     """
     主窗口只负责：
@@ -90,7 +89,7 @@ class ZipatchApp:
             pass
 
     def build_ui(self):
-        self.root.title("智派-文本代码修改合并助手 Zipatch v1.1.0-20260714")
+        self.root.title("智派-文本代码修改合并助手 Zipatch v1.2.0-20260716")
         self.apply_window_icon()
         self.root.resizable(True, True)
         center_window(self.root, 1080, 800)
@@ -202,7 +201,8 @@ class ZipatchApp:
             try:
                 from PIL import Image, ImageTk
 
-                img = Image.open(str(qr_path)).resize((260, 260), Image.LANCZOS)
+                img = Image.open(str(qr_path)).resize((260, 260),
+                                                      Image.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
 
                 qr_label = tk.Label(

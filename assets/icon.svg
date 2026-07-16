@@ -27,7 +27,7 @@
   </defs>
 
   <!-- 背景 -->
-  <rect width="256" height="256" rx="44" ry="44" fill="url(#bg)"/>
+  <rect width="256" height="256" rx="0" ry="0" fill="url(#bg)"/>
 
   <!-- 左侧文件卡片：x=22, w=80, h=134 -->
   <rect x="22" y="22" width="80" height="134" rx="8" fill="url(#card_l)" opacity="0.93"/>
@@ -71,13 +71,13 @@
     x="128"
     filter="url(#glow)"
   >
-    <tspan font-size="75" fill="#4fc3f7" letter-spacing="-10">C</tspan>
-    <tspan font-size="20" fill="#4fc3f7" opacity="0.88" dy="0" letter-spacing="-1">ode</tspan>
-    <tspan font-size="75" fill="#ffb74d" dx="-10" dy="0" letter-spacing="-10">W</tspan>
-    <tspan font-size="20" fill="#ffb74d" opacity="0.88" dy="0" letter-spacing="-1">eaver</tspan>
+    <tspan font-size="75" fill="#4fc3f7" letter-spacing="0">Z</tspan>
+    <tspan font-size="40" fill="#4fc3f7" opacity="0.88" dx="-1" dy="0" letter-spacing="">i</tspan>
+    <tspan font-size="75" fill="#ffb74d" dx="-5" dy="0" letter-spacing="-10">P</tspan>
+    <tspan font-size="40" fill="#ffb74d" opacity="0.88" dx="-5" dy="0" letter-spacing="">atch</tspan>
   </text>
 
   <!-- 底部装饰线 -->
-  <rect x="32" y="234" width="192" height="2.5" rx="1.25" fill="#4fc3f7" opacity="0.38"/>
-  <rect x="68" y="240" width="120" height="1.5" rx="0.75" fill="#ffb74d" opacity="0.28"/>
+  <rect x="22" y="234" width="212" height="2.5" rx="1.25" fill="#4fc3f7" opacity="0.38"/>
+  <rect x="48" y="240" width="160" height="1.5" rx="0.75" fill="#ffb74d" opacity="0.28"/>
 </svg>

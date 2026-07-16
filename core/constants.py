@@ -2,11 +2,9 @@
 
 # --- 默认附加文本 ---
 
-PREAMBLE_TEXT = (
-    "我正在开发缠论分析系统，以下是现有的全量前端代码和开发规范、需求规则等，"
-    "你要全面阅读并充分理解开发与输出规范、功能需求和用户意图，并在后续任务中严格遵守，"
-    "接下来我们需要在这个代码基础上继续修改开发\n"
-)
+PREAMBLE_TEXT = ("我正在开发缠论分析系统，以下是现有的全量前端代码和开发规范、需求规则等，"
+                 "你要全面阅读并充分理解开发与输出规范、功能需求和用户意图，并在后续任务中严格遵守，"
+                 "接下来我们需要在这个代码基础上继续修改开发\n")
 
 ENDING_TEXT = (
     "以上现有前端代码全部发送完毕，请全面阅读并充分理解，完成后告诉我，我会继续提出开发需求。\n"
@@ -19,13 +17,9 @@ ENDING_TEXT = (
     "7. 有效交流（我是个编程小白，要用浅显易懂小白友好的自然语言跟我沟通，不要大量使用代码，我读不懂的，措辞要简洁，挑关键的讲，不要翻来覆去啰里啰嗦的信息轰炸）。"
 )
 
-SCAN_PREAMBLE_TEXT = (
-    "全景扫描模式：下列为指定根目录下所有层级的“文件清单”（统一为绝对路径），仅列路径，不包含内容。\n"
-)
+SCAN_PREAMBLE_TEXT = ("全景扫描模式：下列为指定根目录下所有层级的“文件清单”（统一为绝对路径），仅列路径，不包含内容。\n")
 
-SCAN_ENDING_TEXT = (
-    "全景扫描已完成，请针对该目录文件结构帮我编写一个全面而稳妥的 .gitignore文件。"
-)
+SCAN_ENDING_TEXT = ("全景扫描已完成，请针对该目录文件结构帮我编写一个全面而稳妥的 .gitignore文件。")
 
 # --- 默认排除项 ---
 
@@ -43,6 +37,7 @@ DEFAULT_EXCLUDE_FOLDERS = [
     "tests",
     "dev_tests",
     "var",
+    "99_归档",
 ]
 
 DEFAULT_EXCLUDE_FILES = [
@@ -52,6 +47,7 @@ DEFAULT_EXCLUDE_FILES = [
 ]
 
 EXCLUDE_EXTENSIONS = [
+    ".md",
     ".pyc",
     ".pyo",
     ".o",
@@ -63,7 +59,6 @@ EXCLUDE_EXTENSIONS = [
     ".bak",
     ".bak1",
     ".bak2",
-    ".md",
     "",
     ".jpg",
     ".jpeg",
@@ -110,6 +105,13 @@ SKIPPED_LOG_FILENAME = "_RESTORE_SKIPPED_FILES_.log"
 # --- 修改包执行器协议常量 ---
 
 PATCH_END = "<</AI_FILE_PATCH_V2>>"
+
+# 修改包协议规范文档路径。
+# 说明：
+# - 使用相对应用根目录的路径；
+# - 允许后台直接修改本常量；
+# - 不开放到 UI 配置，避免用户误改导致执行器帮助入口失效。
+PATCH_PROTOCOL_DOC_PATH = "Zipatch_V2_修改包协议规范.md"
 
 SUPPORTED_PATCH_OPS = {
     "write_file",
@@ -168,6 +170,7 @@ TEXT_WRAP_DEFAULTS = {
     "merge.demand_ending": True,
     "patch.patch_text": False,
     "patch.result_text": False,
+    "patch.protocol_doc_text": True,
     "app.log_text": True,
 }
 
@@ -209,7 +212,7 @@ DEFAULT_CONFIG = {
     },
     "entry_history": {},
     "ui": {
-        "feature_order": ["scan", "merge", "restore", "patch"],
+        "feature_order": ["scan", "merge", "patch", "restore"],
     },
     "text_wrap": TEXT_WRAP_DEFAULTS,
     "scan": {
