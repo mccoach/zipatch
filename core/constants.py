@@ -106,13 +106,6 @@ SKIPPED_LOG_FILENAME = "_RESTORE_SKIPPED_FILES_.log"
 
 PATCH_END = "<</AI_FILE_PATCH_V2>>"
 
-# 修改包协议规范文档路径。
-# 说明：
-# - 使用相对应用根目录的路径；
-# - 允许后台直接修改本常量；
-# - 不开放到 UI 配置，避免用户误改导致执行器帮助入口失效。
-PATCH_PROTOCOL_DOC_PATH = "Zipatch_V2_修改包协议规范.md"
-
 SUPPORTED_PATCH_OPS = {
     "write_file",
     "append_text",
@@ -266,6 +259,7 @@ DEFAULT_CONFIG = {
         "patch_text": "",
         "last_result_text": "",
         "open_backup_after_done": False,
+        "protocol_doc_source_path": "",
     },
     "favorites": {
         "scan_preamble": [],

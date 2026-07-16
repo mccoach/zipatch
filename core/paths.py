@@ -20,11 +20,43 @@ def get_config_path():
     return get_app_dir() / CONFIG_FILENAME
 
 
+def is_frozen_app():
+    """
+    判断当前是否为 PyInstaller 封装后的程序。
+
+    用途：
+    - 开发模式：允许维护类功能，例如从 Markdown 更新内置协议文档；
+    - 封装 exe：隐藏维护入口，避免用户误以为可以修改 exe 内部资源。
+    """
+    return bool(getattr(sys, "frozen", False))
+
+
 def get_asset_path(relative_path):
     """
-    兼容开发模式和 PyInstaller 打包后的资源路径。
+    获取应用静态资源路径。
+
+    兼容三种运行场景：
+    1. 开发模式：从项目根目录读取；
+    2. PyInstaller onefile/onedir：从 sys._MEIPASS 读取打包内置资源；
+    3. 后台外置覆盖：exe 同级目录存在同名资源时，优先使用外置资源。
+
+    查找顺序：
+    - 先查应用目录 / exe 同级目录，允许后台直接替换资源；
+    - 再查 PyInstaller 解包临时目录 sys._MEIPASS；
+    - 都不存在时返回应用目录路径，用于生成清晰报错。
     """
-    return get_app_dir() / relative_path
+    external_path = get_app_dir() / relative_path
+
+    if external_path.exists():
+        return external_path
+
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bundled_path = Path(sys._MEIPASS) / relative_path
+
+        if bundled_path.exists():
+            return bundled_path
+
+    return external_path
 
 
 def center_window(win, width=980, height=760):

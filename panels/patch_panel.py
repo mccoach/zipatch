@@ -3,8 +3,9 @@
 import traceback
 import tkinter as tk
 from pathlib import Path
+from tkinter import filedialog
 
-from core.constants import PATCH_PROTOCOL_DOC_PATH, THEME
+from core.constants import THEME
 from core.message_utils import (
     safe_ask_yes_no,
     safe_ask_risk_confirm,
@@ -12,15 +13,27 @@ from core.message_utils import (
     safe_show_info,
 )
 from core.path_validation import normalize_windows_display_path
-from core.paths import center_window, get_asset_path, open_path_with_default_app, validate_required_path
+from core.paths import (
+    center_window,
+    get_app_dir,
+    get_initial_dir_from_path,
+    is_frozen_app,
+    open_path_with_default_app,
+    validate_required_path,
+)
 from core.text_io import (
     get_text_value,
-    read_text_with_fallback_encodings,
     replace_text_preserve_view,
     set_text_value,
 )
 from core.time_utils import current_timestamp_text
 from panels.base_panel import BasePanel
+from services.patch_protocol_doc_service import get_patch_protocol_doc
+from services.patch_protocol_doc_sync import (
+    apply_protocol_doc_update,
+    is_protocol_doc_update_available,
+    preview_protocol_doc_update,
+)
 from services.patch_service import (
     preview_patch,
     apply_patch,
@@ -37,6 +50,7 @@ from ui.widgets import (
     make_checkbutton,
     add_tooltip,
 )
+from ui.window_manager import register_popup, unregister_popup
 
 
 class PatchPanel(BasePanel):
@@ -315,14 +329,16 @@ class PatchPanel(BasePanel):
         """
         只读弹窗显示修改包协议规范文档。
 
-        文档路径由 core.constants.PATCH_PROTOCOL_DOC_PATH 统一定义：
-        - 使用相对应用根目录的路径；
-        - 允许后台修改常量；
-        - 不开放到 UI，避免普通用户误改。
+        运行时唯一读取源是 services.patch_protocol_doc 中的内置文本：
+        - 不读取外部 md；
+        - 不依赖 assets；
+        - 打包 exe 后稳定可显示。
+
+        开发模式下额外显示“从 Markdown 更新”按钮，用于人工指定 md 源文档，
+        比对后确认同步到内置 py 文档模块。
         """
         try:
-            doc_path = get_asset_path(PATCH_PROTOCOL_DOC_PATH)
-            content, encoding = read_text_with_fallback_encodings(doc_path)
+            doc = get_patch_protocol_doc()
 
             dialog = tk.Toplevel(self.root)
             dialog.title("修改包协议规范")
@@ -331,9 +347,20 @@ class PatchPanel(BasePanel):
             dialog.transient(self.root)
             dialog.grab_set()
 
+            def close(event=None):
+                unregister_popup(dialog)
+                dialog.destroy()
+                return "break"
+
+            dialog.protocol("WM_DELETE_WINDOW", close)
+
+            source_desc_var = tk.StringVar(
+                value=self.format_protocol_doc_source_desc(doc)
+            )
+
             tk.Label(
                 dialog,
-                text=f"当前显示：{PATCH_PROTOCOL_DOC_PATH}    编码：{encoding}",
+                textvariable=source_desc_var,
                 bg=THEME["bg"],
                 fg=THEME["fg_dim"],
                 font=THEME["font_main"],
@@ -345,10 +372,10 @@ class PatchPanel(BasePanel):
             body = styled_frame(dialog)
             body.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
-            create_managed_text_box(
+            protocol_text = create_managed_text_box(
                 parent=body,
                 label_text="协议规范内容",
-                initial_value=content,
+                initial_value=doc.content,
                 height=30,
                 mono=True,
                 wrap="word",
@@ -364,18 +391,151 @@ class PatchPanel(BasePanel):
             bottom = styled_frame(dialog)
             bottom.pack(fill="x", padx=16, pady=(4, 14))
 
+            if is_protocol_doc_update_available():
+                styled_button(
+                    bottom,
+                    "从 Markdown 更新",
+                    lambda: self.update_protocol_doc_from_markdown(
+                        dialog,
+                        protocol_text,
+                        source_desc_var,
+                    ),
+                    width=16,
+                ).pack(side="left")
+
             styled_button(
                 bottom,
                 "关闭",
-                dialog.destroy,
+                close,
                 width=10,
             ).pack(side="right")
+
+            register_popup(dialog, close)
 
         except Exception as e:
             safe_show_error(
                 "协议规范打开失败",
-                f"无法读取修改包协议规范文档：\n{PATCH_PROTOCOL_DOC_PATH}\n\n错误：{e}",
+                f"无法打开内置修改包协议规范：\n\n错误：{e}",
                 parent=self.root,
+            )
+
+    def format_protocol_doc_source_desc(self, doc):
+        source_desc = "当前显示：内置修改包协议规范"
+
+        if doc.updated_at:
+            source_desc += f"    更新时间：{doc.updated_at}"
+
+        if doc.source_sha256:
+            source_desc += f"    指纹：{doc.source_sha256[:12]}..."
+
+        return source_desc
+
+    def choose_protocol_doc_source_path(self, parent):
+        """
+        手动选择 Markdown 维护源文档。
+
+        路径采用绝对路径，并持久化保存最后一次选择位置。
+        程序运行时不会自动读取该 md，只在用户点击更新时使用。
+        """
+        current_path = self.cfg.get("protocol_doc_source_path", "")
+        initial_dir = get_initial_dir_from_path(current_path) or str(get_app_dir())
+
+        file_path = filedialog.askopenfilename(
+            title="选择修改包协议规范 Markdown 源文档",
+            initialdir=initial_dir,
+            initialfile=Path(current_path).name if current_path else "Zipatch_V2_修改包协议规范.md",
+            filetypes=[
+                ("Markdown Documents", "*.md"),
+                ("All Files", "*.*"),
+            ],
+            parent=parent,
+        )
+
+        if not file_path:
+            return ""
+
+        resolved = str(Path(file_path).expanduser().resolve())
+        self.cfg["protocol_doc_source_path"] = resolved
+        self.save_config()
+
+        return resolved
+
+    def update_protocol_doc_from_markdown(self, dialog, protocol_text, source_desc_var):
+        """
+        开发模式维护功能：
+        选择 md -> 比对当前内置文档 -> 用户确认 -> 写入内置 py 文档。
+        """
+        try:
+            if is_frozen_app():
+                safe_show_error(
+                    "当前环境不支持更新",
+                    "当前程序为已封装版本，内置协议文档已写入 exe 内部，无法在运行时修改。\n\n"
+                    "如需更新，请在源码开发环境中同步 Markdown 后重新封装。",
+                    parent=dialog,
+                )
+                return
+
+            source_path = self.choose_protocol_doc_source_path(dialog)
+
+            if not source_path:
+                return
+
+            preview = preview_protocol_doc_update(source_path)
+
+            if not preview.has_difference:
+                safe_show_info(
+                    "无需更新",
+                    "所选 Markdown 文档与当前内置协议文档内容一致，无需更新。\n\n"
+                    f"文档路径：\n{preview.source_path}\n\n"
+                    f"编码：{preview.source_encoding}\n"
+                    f"字符数：{preview.source_length}\n"
+                    f"指纹：{preview.source_sha256}",
+                    parent=dialog,
+                )
+                return
+
+            message = (
+                "所选 Markdown 文档与当前内置协议文档不一致。\n\n"
+                "当前内置文档：\n"
+                f"- 字符数：{preview.embedded_length}\n"
+                f"- 指纹：{preview.embedded_sha256}\n\n"
+                "所选 Markdown：\n"
+                f"- 路径：{preview.source_path}\n"
+                f"- 编码：{preview.source_encoding}\n"
+                f"- 字符数：{preview.source_length}\n"
+                f"- 指纹：{preview.source_sha256}\n\n"
+                "是否使用所选 Markdown 更新内置协议文档？\n\n"
+                "更新后当前窗口会立即显示新内容；如需发布 exe，请重新封装。"
+            )
+
+            if not safe_ask_yes_no("发现协议文档差异", message, parent=dialog):
+                return
+
+            target_module = apply_protocol_doc_update(preview)
+            refreshed_doc = get_patch_protocol_doc()
+
+            protocol_text.configure(state="normal")
+            set_text_value(protocol_text, refreshed_doc.content)
+            protocol_text.configure(state="disabled")
+            source_desc_var.set(self.format_protocol_doc_source_desc(refreshed_doc))
+
+            self.log(f"内置修改包协议规范已更新：{target_module}")
+            self.set_status("内置协议文档已更新")
+
+            safe_show_info(
+                "更新完成",
+                "内置协议文档已更新。\n\n"
+                f"源 Markdown：\n{preview.source_path}\n\n"
+                f"目标模块：\n{target_module}\n\n"
+                "当前窗口已刷新为新内容。\n如需发布，请重新封装 exe。",
+                parent=dialog,
+            )
+
+        except Exception as e:
+            safe_show_error(
+                "更新失败",
+                f"无法从 Markdown 更新内置协议文档：\n\n错误：{e}",
+                parent=dialog,
             )
 
     def refresh_mode_ui(self):
