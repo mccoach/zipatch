@@ -138,7 +138,7 @@ ENCODINGS_TO_TRY = [
     "latin-1",
 ]
 
-CONFIG_FILENAME = "app_config.json"
+CONFIG_FILENAME = "zipatch_config.json"
 
 # --- 文本框自动换行默认状态 ---
 #

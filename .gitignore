@@ -146,11 +146,11 @@ token.json
 # ============================================================
 
 # 如果这些文件是用户本机运行时产生的配置或历史记录，保护隐私信息，建议忽略。
-# app_config.json 保存本机路径、历史输入、收藏、修改包内容和运行结果，不应提交。
-app_config.json
+# zipatch_config.json 保存本机路径、历史输入、收藏、修改包内容和运行结果，不应提交。
+zipatch_config.json
 
 # Shared config template
-!app_config.example.json
+!zipatch_config.example.json
 
 *.bak
 *.backup

@@ -89,7 +89,7 @@ class ZipatchApp:
             pass
 
     def build_ui(self):
-        self.root.title("智派-文本代码修改合并助手 Zipatch v1.2.1-20260716")
+        self.root.title("智派-文本代码修改合并助手 Zipatch v1.2.2-20260718")
         self.apply_window_icon()
         self.root.resizable(True, True)
         center_window(self.root, 1080, 800)
