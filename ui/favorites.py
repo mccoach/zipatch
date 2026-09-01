@@ -306,9 +306,9 @@ class FavoriteTextBoxController:
         register_popup(
             self.popup,
             self.close_popup,
-            focus_on_register=True,
-            close_on_focus_out=True,
-            focus_guard_widgets=[self.favorite_button],
+            focus_on_register=False,
+            close_on_focus_out=False,
+            focus_guard_widgets=[self.favorite_button, self.text_widget],
         )
 
         list_frame = tk.Frame(self.popup, bg=THEME["bg"])
