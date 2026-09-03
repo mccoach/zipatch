@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import re
 import shutil
 from pathlib import Path
 
@@ -20,28 +21,37 @@ from services.patch_contracts import (
     validate_global_patch_contracts,
 )
 from services.patch_models import PatchOpCheckResult
+from services.patch_reporter import format_patch_preview
 from services.patch_ops import (
     DUAL_PATH_OPS,
-    PATH_ONLY_OPS,
     parse_required_positive_int,
 )
 
 
-def first_non_empty_line(text):
-    for line in (text or "").splitlines():
-        if line.strip():
-            return line
-    return ""
-
-
 def make_op_locator(op):
-    op_type = op.get("op", "")
-    path = op.get("path", "")
+    return f'id="{op.get("id", "")}"'
 
-    if op_type == "replace_exact":
-        return f'---OP {op_type} path="{path}" count="{op.get("count", "")}"'
 
-    return f'---OP {op_type} path="{path}"'
+def extract_first_real_id(text):
+    match = re.search(r'id="([^"]+)"', text or "")
+
+    if not match:
+        return ""
+
+    return match.group(1)
+
+
+def make_result_for_global_error(message):
+    op_id = extract_first_real_id(message)
+
+    return PatchOpCheckResult(
+        op_id=op_id,
+        op_type="global_contract",
+        path="全局修改包",
+        ok=False,
+        message=message,
+        locator=f'id="{op_id}"',
+    )
 
 
 class PatchExecutor:
@@ -73,6 +83,9 @@ class PatchExecutor:
     def log(self, msg):
         self.logs.append(msg)
 
+    def op_label(self, op):
+        return f'id="{op.get("id", "")}" {op.get("op", "")}'
+
     def validate_patch(self, patch):
         """
         执行阶段的防御性复核。
@@ -94,166 +107,173 @@ class PatchExecutor:
 
         validate_global_patch_contracts(self.root, ops)
 
-        for i, op in enumerate(ops, 1):
-            self.validate_op(op, i)
+        for op in ops:
+            self.validate_op(op)
 
-    def validate_op(self, op, index):
+    def validate_op(self, op):
         if not isinstance(op, dict):
-            raise ValueError(f"第 {index} 个操作非法")
+            raise ValueError("内部 OP 对象非法")
 
         op_type = op.get("op")
+        op_id = op.get("id", "")
+        op_label = self.op_label(op)
+
+        if not op_id:
+            raise ValueError("内部 OP 对象缺少 id")
 
         if op_type not in SUPPORTED_PATCH_OPS:
-            raise ValueError(f"第 {index} 个操作类型不支持：{op_type}")
+            raise ValueError(f"{op_label} 操作类型不支持：{op_type}")
 
         if "path" not in op:
-            raise ValueError(f"第 {index} 个操作缺少 path")
+            raise ValueError(f"{op_label} 缺少 path")
 
         target = safe_join(self.root, op["path"])
 
         if op_type == "write_file":
             if "content" not in op:
-                raise ValueError(f"第 {index} 个 write_file 缺少 content")
+                raise ValueError(f"{op_label} 缺少 content")
 
             if_exists = op.get("if_exists", "error")
 
             if if_exists not in ("error", "overwrite", "skip"):
-                raise ValueError(f"第 {index} 个 write_file.if_exists 非法：{if_exists}")
+                raise ValueError(f"{op_label}.if_exists 非法：{if_exists}")
 
             if target.exists() and target.is_dir():
-                raise ValueError(f"第 {index} 个 write_file 目标是目录：{op['path']}")
+                raise ValueError(f"{op_label} 目标是目录：{op['path']}")
 
             if if_exists == "error" and target.exists():
-                raise ValueError(f"第 {index} 个 write_file 目标已存在：{op['path']}")
+                raise ValueError(f"{op_label} 目标已存在：{op['path']}")
 
         elif op_type == "append_text":
             if "content" not in op:
-                raise ValueError(f"第 {index} 个 append_text 缺少 content")
+                raise ValueError(f"{op_label} 缺少 content")
 
             if not target.exists():
-                raise ValueError(f"第 {index} 个 append_text 目标文件不存在：{op['path']}")
+                raise ValueError(f"{op_label} 目标文件不存在：{op['path']}")
 
             if target.is_dir():
-                raise ValueError(f"第 {index} 个 append_text 目标是目录：{op['path']}")
+                raise ValueError(f"{op_label} 目标是目录：{op['path']}")
 
         elif op_type == "replace_between":
             if "content" not in op:
-                raise ValueError(f"第 {index} 个 replace_between 缺少 content")
+                raise ValueError(f"{op_label} 缺少 content")
 
             for key in ("start_marker", "end_marker"):
                 if key not in op:
-                    raise ValueError(f"第 {index} 个 replace_between 缺少 {key}")
+                    raise ValueError(f"{op_label} 缺少 {key}")
 
             if not target.exists():
-                raise ValueError(f"第 {index} 个 replace_between 目标文件不存在：{op['path']}")
+                raise ValueError(f"{op_label} 目标文件不存在：{op['path']}")
 
             if target.is_dir():
-                raise ValueError(f"第 {index} 个 replace_between 目标是目录：{op['path']}")
+                raise ValueError(f"{op_label} 目标是目录：{op['path']}")
 
         elif op_type == "replace_exact":
             if "old" not in op:
-                raise ValueError(f"第 {index} 个 replace_exact 缺少 old")
+                raise ValueError(f"{op_label} 缺少 old")
 
             if "new" not in op:
-                raise ValueError(f"第 {index} 个 replace_exact 缺少 new")
+                raise ValueError(f"{op_label} 缺少 new")
 
             if not target.exists():
-                raise ValueError(f"第 {index} 个 replace_exact 目标文件不存在：{op['path']}")
+                raise ValueError(f"{op_label} 目标文件不存在：{op['path']}")
 
             if target.is_dir():
-                raise ValueError(f"第 {index} 个 replace_exact 目标是目录：{op['path']}")
+                raise ValueError(f"{op_label} 目标是目录：{op['path']}")
 
             expected_count = parse_required_positive_int(op.get("count"), "count")
             if expected_count > 1 and not self.allow_multi_replace_exact:
                 raise ValueError(
-                    f"第 {index} 个 replace_exact 要求替换 {expected_count} 处，"
+                    f"{op_label} 要求替换 {expected_count} 处，"
                     "但当前未勾选“允许多处精确替换”。"
                 )
 
         elif op_type in DUAL_PATH_OPS:
             if "new_path" not in op:
-                raise ValueError(f"第 {index} 个 {op_type} 缺少 new_path")
+                raise ValueError(f"{op_label} 缺少 new_path")
 
             source = target
             target = safe_join(self.root, op["new_path"])
             if_exists = op.get("if_exists", "error")
 
             if if_exists not in ("error", "overwrite", "skip"):
-                raise ValueError(f"第 {index} 个 {op_type}.if_exists 非法：{if_exists}")
+                raise ValueError(f"{op_label}.if_exists 非法：{if_exists}")
 
             source_is_file_op = op_type in ("rename_file", "move_file", "copy_file")
             source_is_dir_op = op_type in ("rename_dir", "move_dir", "copy_dir")
 
             if not source.exists():
-                raise ValueError(f"第 {index} 个 {op_type} 源路径不存在：{op['path']}")
+                raise ValueError(f"{op_label} 源路径不存在：{op['path']}")
 
             if source_is_file_op and not source.is_file():
-                raise ValueError(f"第 {index} 个 {op_type} 源路径不是文件：{op['path']}")
+                raise ValueError(f"{op_label} 源路径不是文件：{op['path']}")
 
             if source_is_dir_op and not source.is_dir():
-                raise ValueError(f"第 {index} 个 {op_type} 源路径不是目录：{op['path']}")
+                raise ValueError(f"{op_label} 源路径不是目录：{op['path']}")
 
             if op_type in ("rename_file", "rename_dir") and source.parent != target.parent:
-                raise ValueError(f"第 {index} 个 {op_type} 只能在同一父目录内改名")
+                raise ValueError(f"{op_label} 只能在同一父目录内改名")
 
             if source_is_dir_op and source.resolve() == self.root:
-                raise ValueError(f"第 {index} 个 {op_type} 不允许作用于项目根目录")
+                raise ValueError(f"{op_label} 不允许作用于项目根目录")
 
             if target.exists():
                 if if_exists == "error":
-                    raise ValueError(f"第 {index} 个 {op_type} 目标已存在：{op['new_path']}")
+                    raise ValueError(f"{op_label} 目标已存在：{op['new_path']}")
 
                 if source_is_file_op and not target.is_file():
-                    raise ValueError(f"第 {index} 个 {op_type} 目标已存在但不是文件：{op['new_path']}")
+                    raise ValueError(f"{op_label} 目标已存在但不是文件：{op['new_path']}")
 
                 if source_is_dir_op and not target.is_dir():
-                    raise ValueError(f"第 {index} 个 {op_type} 目标已存在但不是目录：{op['new_path']}")
+                    raise ValueError(f"{op_label} 目标已存在但不是目录：{op['new_path']}")
 
         elif op_type == "create_dir":
             if_exists = op.get("if_exists", "skip")
 
             if if_exists not in ("error", "skip"):
-                raise ValueError(f"第 {index} 个 create_dir.if_exists 非法：{if_exists}")
+                raise ValueError(f"{op_label}.if_exists 非法：{if_exists}")
 
             if target.resolve() == self.root:
-                raise ValueError(f"第 {index} 个 create_dir 不允许作用于项目根目录")
+                raise ValueError(f"{op_label} 不允许作用于项目根目录")
 
             if target.exists():
                 if not target.is_dir():
-                    raise ValueError(f"第 {index} 个 create_dir 目标已存在但不是目录：{op['path']}")
+                    raise ValueError(f"{op_label} 目标已存在但不是目录：{op['path']}")
 
                 if if_exists == "error":
-                    raise ValueError(f"第 {index} 个 create_dir 目标目录已存在：{op['path']}")
+                    raise ValueError(f"{op_label} 目标目录已存在：{op['path']}")
 
         elif op_type == "delete_file":
             if not self.allow_delete:
-                raise ValueError(f"第 {index} 个 delete_file 被拒绝：当前未勾选允许删除")
+                raise ValueError(f"{op_label} 被拒绝：当前未勾选允许删除")
 
             if not target.exists():
-                raise ValueError(f"第 {index} 个 delete_file 目标不存在：{op['path']}")
+                raise ValueError(f"{op_label} 目标不存在：{op['path']}")
 
             if target.is_dir():
-                raise ValueError(f"第 {index} 个 delete_file 不允许删除目录：{op['path']}")
+                raise ValueError(f"{op_label} 不允许删除目录：{op['path']}")
 
         elif op_type == "delete_dir":
             if not self.allow_delete:
-                raise ValueError(f"第 {index} 个 delete_dir 被拒绝：当前未勾选允许删除")
+                raise ValueError(f"{op_label} 被拒绝：当前未勾选允许删除")
 
             if target.resolve() == self.root:
-                raise ValueError(f"第 {index} 个 delete_dir 不允许删除项目根目录")
+                raise ValueError(f"{op_label} 不允许删除项目根目录")
 
             if not target.exists():
-                raise ValueError(f"第 {index} 个 delete_dir 目标不存在：{op['path']}")
+                raise ValueError(f"{op_label} 目标不存在：{op['path']}")
 
             if not target.is_dir():
-                raise ValueError(f"第 {index} 个 delete_dir 目标不是目录：{op['path']}")
+                raise ValueError(f"{op_label} 目标不是目录：{op['path']}")
 
     def check_one_op(self, op, index):
         op_type = op.get("op", "")
+        op_id = op.get("id", "")
         path = op.get("path", "")
+        op_label = self.op_label(op)
 
         try:
-            self.validate_op(op, index)
+            self.validate_op(op)
 
             target_path = normalize_rel_path(path)
             target = safe_join(self.root, target_path)
@@ -267,11 +287,11 @@ class PatchExecutor:
 
                 if s_count != 1 or e_count != 1:
                     raise ValueError(
-                        f"replace_between 锚点不唯一：start_count={s_count}, end_count={e_count}"
+                        f"{op_label} 锚点不唯一：start_count={s_count}, end_count={e_count}"
                     )
 
                 if text.find(start_marker) >= text.find(end_marker):
-                    raise ValueError("replace_between 起始锚点在结束锚点之后")
+                    raise ValueError(f"{op_label} 起始锚点在结束锚点之后")
 
             if op_type == "replace_exact":
                 text, enc = read_text_auto(target)
@@ -282,28 +302,26 @@ class PatchExecutor:
 
                 if actual_count != expected_count:
                     raise ValueError(
-                        f"replace_exact 命中次数不符：expected={expected_count}, actual={actual_count}"
+                        f"{op_label} 命中次数不符：expected={expected_count}, actual={actual_count}"
                     )
 
             return PatchOpCheckResult(
-                index=index,
+                op_id=op_id,
                 op_type=op_type,
                 path=target_path,
                 ok=True,
                 message="校验通过",
                 locator=make_op_locator(op),
-                old_first_line=first_non_empty_line(op.get("old", "")),
             )
 
         except Exception as e:
             return PatchOpCheckResult(
-                index=index,
+                op_id=op_id,
                 op_type=op_type,
                 path=path,
                 ok=False,
                 message=str(e),
                 locator=make_op_locator(op),
-                old_first_line=first_non_empty_line(op.get("old", "")),
             )
 
     def preview(self, patch):
@@ -341,16 +359,7 @@ class PatchExecutor:
                 global_errors.append(f"内容互斥：{item}")
 
             for item in global_errors:
-                check_results.append(
-                    PatchOpCheckResult(
-                        index=0,
-                        op_type="global_contract",
-                        path="全局修改包",
-                        ok=False,
-                        message=item,
-                        locator="全局路径互斥 / 内容互斥校验",
-                    )
-                )
+                check_results.append(make_result_for_global_error(item))
 
             if global_errors:
                 valid_ops = []
@@ -362,76 +371,18 @@ class PatchExecutor:
         valid_patch = dict(patch)
         valid_patch["operations"] = valid_ops
 
-        lines = []
-        lines.append("【Dry Run 预演结果】")
-        lines.append("协议版本：AI_FILE_PATCH_V2 动态 boundary 原文块协议")
-        lines.append(f"项目根目录：{self.root}")
-        lines.append(f"boundary：{patch.get('boundary')}")
-        lines.append(f"操作数量：{len(ops)}")
-        lines.append(f"校验成功：{success_count}")
-        lines.append(f"校验失败：{failed_count}")
+        preview_text = format_patch_preview(
+            root=self.root,
+            patch=patch,
+            check_results=check_results,
+            success_count=success_count,
+            failed_count=failed_count,
+            has_global_errors=has_global_errors,
+            backup_enabled=self.backup_enabled,
+            backup_root=self.backup_root,
+        )
 
-        if has_global_errors:
-            lines.append("全局冲突：存在，禁止执行任何 OP")
-        else:
-            lines.append("全局冲突：无")
-
-        if self.backup_enabled:
-            lines.append(f"备份目录：{self.backup_root}")
-        else:
-            lines.append("备份状态：未启用自动备份")
-
-        lines.append("")
-        lines.append("=" * 60)
-        lines.append("【校验成功】")
-        lines.append("=" * 60)
-
-        for item in check_results:
-            if item.ok:
-                lines.append(f"{item.index}. [通过] {item.op_type} {item.path}")
-
-        lines.append("")
-        lines.append("=" * 60)
-        lines.append("【校验失败】")
-        lines.append("=" * 60)
-
-        if failed_count == 0:
-            lines.append("无")
-        else:
-            for item in check_results:
-                if item.ok:
-                    continue
-
-                lines.append("")
-                display_index = item.index if item.index else "全局"
-                lines.append(f"{display_index}. [失败] {item.op_type} {item.path}")
-                lines.append("")
-                lines.append("失败原因：")
-                lines.append(item.message)
-                lines.append("")
-                lines.append("修改包定位：")
-                lines.append("请在修改包中搜索以下 OP 头：")
-                lines.append(item.locator)
-
-                if item.old_first_line:
-                    lines.append("")
-                    lines.append("或搜索 OLD 片段首个非空行：")
-                    lines.append(item.old_first_line)
-
-                lines.append("-" * 60)
-
-        lines.append("")
-
-        if failed_count == 0:
-            lines.append("Dry Run 全部校验通过。可以执行完整修改包。")
-        elif has_global_errors:
-            lines.append("Dry Run 存在全局冲突。为避免互相踩踏，当前禁止执行任何 OP，请修正修改包后重新预演。")
-        elif success_count > 0:
-            lines.append("Dry Run 存在失败项。执行时将只允许执行校验成功的 OP，失败 OP 会被跳过。")
-        else:
-            lines.append("Dry Run 全部失败。没有可执行的 OP。")
-
-        return "\n".join(lines), valid_patch, failed_count > 0, success_count, failed_count, has_global_errors
+        return preview_text, valid_patch, failed_count > 0, success_count, failed_count, has_global_errors
 
     def backup_file(self, target: Path):
         """
@@ -464,7 +415,7 @@ class PatchExecutor:
 
     def record_manifest_operation(
         self,
-        index,
+        op_id,
         op_type,
         rel_path,
         before_state,
@@ -478,7 +429,7 @@ class PatchExecutor:
         本函数只负责落 manifest，不再根据零散参数反推状态。
         """
         item = {
-            "index": index,
+            "id": op_id,
             "op": op_type,
             "path": str(rel_path).replace("\\", "/"),
             "before_state": {
@@ -496,7 +447,7 @@ class PatchExecutor:
 
     def record_dual_path_manifest_operation(
         self,
-        index,
+        op_id,
         op_type,
         source_rel,
         target_rel,
@@ -507,7 +458,7 @@ class PatchExecutor:
         extra=None,
     ):
         item = {
-            "index": index,
+            "id": op_id,
             "op": op_type,
             "path": str(source_rel).replace("\\", "/"),
             "new_path": str(target_rel).replace("\\", "/"),
@@ -550,15 +501,16 @@ class PatchExecutor:
 
         save_json(self.backup_root / "manifest.json", manifest)
 
-    def apply_write_file(self, index, op, target, rel_display):
+    def apply_write_file(self, op, target, rel_display):
         if_exists = op.get("if_exists", "error")
+        op_label = self.op_label(op)
 
         if target.exists():
             if if_exists == "skip":
                 before_state = make_path_state(target)
-                self.log(f"[跳过] 文件已存在且 if_exists=skip：{rel_display}")
+                self.log(f"[跳过] {op_label} 文件已存在且 if_exists=skip：{rel_display}")
                 self.record_manifest_operation(
-                    index,
+                    op["id"],
                     op["op"],
                     rel_display,
                     before_state,
@@ -568,7 +520,7 @@ class PatchExecutor:
                 return
 
             if if_exists == "error":
-                raise ValueError(f"write_file 目标已存在：{rel_display}")
+                raise ValueError(f"{op_label} write_file 目标已存在：{rel_display}")
 
             backup_path = self.backup_file(target)
             before_state = make_path_state(target, self.backup_root, backup_path)
@@ -578,9 +530,9 @@ class PatchExecutor:
             write_kind = "create"
 
         write_text_utf8(target, op["content"])
-        self.log(f"[完成] 写入文件：{rel_display}")
+        self.log(f"[完成] {op_label} 写入文件：{rel_display}")
         self.record_manifest_operation(
-            index,
+            op["id"],
             op["op"],
             rel_display,
             before_state,
@@ -588,21 +540,23 @@ class PatchExecutor:
             extra={"write_kind": write_kind},
         )
 
-    def apply_append_text(self, index, op, target, rel_display):
+    def apply_append_text(self, op, target, rel_display):
+        op_label = self.op_label(op)
         backup_path = self.backup_file(target)
         before_state = make_path_state(target, self.backup_root, backup_path)
         old_text, enc = read_text_auto(target)
         write_text_utf8(target, old_text + op["content"])
-        self.log(f"[完成] 追加文本：{rel_display}")
+        self.log(f"[完成] {op_label} 追加文本：{rel_display}")
         self.record_manifest_operation(
-            index,
+            op["id"],
             op["op"],
             rel_display,
             before_state,
             make_path_state(target),
         )
 
-    def apply_replace_between(self, index, op, target, rel_display):
+    def apply_replace_between(self, op, target, rel_display):
+        op_label = self.op_label(op)
         backup_path = self.backup_file(target)
         before_state = make_path_state(target, self.backup_root, backup_path)
         text, enc = read_text_auto(target)
@@ -615,7 +569,7 @@ class PatchExecutor:
 
         if s_count != 1 or e_count != 1:
             raise ValueError(
-                f"replace_between 锚点不唯一："
+                f"{op_label} replace_between 锚点不唯一："
                 f"start_count={s_count}, end_count={e_count}, path={rel_display}"
             )
 
@@ -623,20 +577,21 @@ class PatchExecutor:
         e_idx = text.find(end_marker)
 
         if s_idx >= e_idx:
-            raise ValueError(f"replace_between 起始锚点在结束锚点之后：{rel_display}")
+            raise ValueError(f"{op_label} replace_between 起始锚点在结束锚点之后：{rel_display}")
 
         new_text = text[:s_idx] + op["content"] + text[e_idx + len(end_marker):]
         write_text_utf8(target, new_text)
-        self.log(f"[完成] 替换锚点区间：{rel_display}")
+        self.log(f"[完成] {op_label} 替换锚点区间：{rel_display}")
         self.record_manifest_operation(
-            index,
+            op["id"],
             op["op"],
             rel_display,
             before_state,
             make_path_state(target),
         )
 
-    def apply_replace_exact(self, index, op, target, rel_display):
+    def apply_replace_exact(self, op, target, rel_display):
+        op_label = self.op_label(op)
         backup_path = self.backup_file(target)
         before_state = make_path_state(target, self.backup_root, backup_path)
         text, enc = read_text_auto(target)
@@ -649,23 +604,24 @@ class PatchExecutor:
 
         if actual_count != expected_count:
             raise ValueError(
-                f"replace_exact 命中次数不符："
+                f"{op_label} replace_exact 命中次数不符："
                 f"expected={expected_count}, actual={actual_count}, path={rel_display}"
             )
 
         new_text = normalized_text.replace(old, new, expected_count)
         write_text_utf8(target, new_text)
-        self.log(f"[完成] 精确替换 {expected_count} 处：{rel_display}")
+        self.log(f"[完成] {op_label} 精确替换 {expected_count} 处：{rel_display}")
         self.record_manifest_operation(
-            index,
+            op["id"],
             op["op"],
             rel_display,
             before_state,
             make_path_state(target),
         )
 
-    def apply_dual_path_op(self, index, op, source):
+    def apply_dual_path_op(self, op, source):
         op_type = op["op"]
+        op_label = self.op_label(op)
         target = safe_join(self.root, op["new_path"])
         source_rel_display = source.relative_to(self.root)
         target_rel_display = target.relative_to(self.root)
@@ -692,9 +648,9 @@ class PatchExecutor:
         )
 
         if target.exists() and if_exists == "skip":
-            self.log(f"[跳过] 目标已存在且 if_exists=skip：{target_rel_display}")
+            self.log(f"[跳过] {op_label} 目标已存在且 if_exists=skip：{target_rel_display}")
             self.record_dual_path_manifest_operation(
-                index,
+                op["id"],
                 op_type,
                 source_rel_display,
                 target_rel_display,
@@ -722,9 +678,9 @@ class PatchExecutor:
         else:
             shutil.move(str(source), str(target))
 
-        self.log(f"[完成] {op_type}：{source_rel_display} -> {target_rel_display}")
+        self.log(f"[完成] {op_label}：{source_rel_display} -> {target_rel_display}")
         self.record_dual_path_manifest_operation(
-            index,
+            op["id"],
             op_type,
             source_rel_display,
             target_rel_display,
@@ -735,13 +691,14 @@ class PatchExecutor:
             extra={"write_kind": write_kind},
         )
 
-    def apply_create_dir(self, index, op, target, rel_display):
+    def apply_create_dir(self, op, target, rel_display):
+        op_label = self.op_label(op)
         before_state = make_path_state(target)
 
         if target.exists():
-            self.log(f"[跳过] 目录已存在且 if_exists=skip：{rel_display}")
+            self.log(f"[跳过] {op_label} 目录已存在且 if_exists=skip：{rel_display}")
             self.record_manifest_operation(
-                index,
+                op["id"],
                 op["op"],
                 rel_display,
                 before_state,
@@ -751,9 +708,9 @@ class PatchExecutor:
             return
 
         target.mkdir(parents=True, exist_ok=True)
-        self.log(f"[完成] 创建目录：{rel_display}")
+        self.log(f"[完成] {op_label} 创建目录：{rel_display}")
         self.record_manifest_operation(
-            index,
+            op["id"],
             op["op"],
             rel_display,
             before_state,
@@ -761,88 +718,93 @@ class PatchExecutor:
             extra={"write_kind": "create"},
         )
 
-    def apply_delete_file(self, index, op, target, rel_display):
+    def apply_delete_file(self, op, target, rel_display):
+        op_label = self.op_label(op)
+
         if not self.allow_delete:
-            raise ValueError("删除操作被拒绝：未允许删除")
+            raise ValueError(f"{op_label} 删除操作被拒绝：未允许删除")
 
         if target.is_dir():
-            raise ValueError(f"delete_file 不允许删除目录：{rel_display}")
+            raise ValueError(f"{op_label} delete_file 不允许删除目录：{rel_display}")
 
         backup_path = self.backup_file(target)
         before_state = make_path_state(target, self.backup_root, backup_path)
         target.unlink()
-        self.log(f"[完成] 删除文件：{rel_display}")
+        self.log(f"[完成] {op_label} 删除文件：{rel_display}")
         self.record_manifest_operation(
-            index,
+            op["id"],
             op["op"],
             rel_display,
             before_state,
             make_path_state(target),
         )
 
-    def apply_delete_dir(self, index, op, target, rel_display):
+    def apply_delete_dir(self, op, target, rel_display):
+        op_label = self.op_label(op)
+
         if not self.allow_delete:
-            raise ValueError("删除目录操作被拒绝：未允许删除")
+            raise ValueError(f"{op_label} 删除目录操作被拒绝：未允许删除")
 
         if target.resolve() == self.root:
-            raise ValueError("delete_dir 不允许删除项目根目录")
+            raise ValueError(f"{op_label} delete_dir 不允许删除项目根目录")
 
         if not target.is_dir():
-            raise ValueError(f"delete_dir 目标不是目录：{rel_display}")
+            raise ValueError(f"{op_label} delete_dir 目标不是目录：{rel_display}")
 
         backup_path = self.backup_file(target)
         before_state = make_path_state(target, self.backup_root, backup_path)
         shutil.rmtree(target)
-        self.log(f"[完成] 删除文件夹：{rel_display}")
+        self.log(f"[完成] {op_label} 删除文件夹：{rel_display}")
         self.record_manifest_operation(
-            index,
+            op["id"],
             op["op"],
             rel_display,
             before_state,
             make_path_state(target),
         )
 
-    def apply_one_op(self, index, op):
+    def apply_one_op(self, op):
         op_type = op["op"]
+        op_id = op.get("id", "")
         path = normalize_rel_path(op["path"])
         target = safe_join(self.root, path)
         rel_display = target.relative_to(self.root)
 
-        self.log(f"---- 操作 {index}: {op_type} {rel_display} ----")
+        self.log(f'---- id="{op_id}" {op_type} {rel_display} ----')
 
         if op_type == "write_file":
-            self.apply_write_file(index, op, target, rel_display)
+            self.apply_write_file(op, target, rel_display)
             return
 
         if op_type == "append_text":
-            self.apply_append_text(index, op, target, rel_display)
+            self.apply_append_text(op, target, rel_display)
             return
 
         if op_type == "replace_between":
-            self.apply_replace_between(index, op, target, rel_display)
+            self.apply_replace_between(op, target, rel_display)
             return
 
         if op_type == "replace_exact":
-            self.apply_replace_exact(index, op, target, rel_display)
+            self.apply_replace_exact(op, target, rel_display)
             return
 
         if op_type in DUAL_PATH_OPS:
-            self.apply_dual_path_op(index, op, target)
+            self.apply_dual_path_op(op, target)
             return
 
         if op_type == "create_dir":
-            self.apply_create_dir(index, op, target, rel_display)
+            self.apply_create_dir(op, target, rel_display)
             return
 
         if op_type == "delete_file":
-            self.apply_delete_file(index, op, target, rel_display)
+            self.apply_delete_file(op, target, rel_display)
             return
 
         if op_type == "delete_dir":
-            self.apply_delete_dir(index, op, target, rel_display)
+            self.apply_delete_dir(op, target, rel_display)
             return
 
-        raise ValueError(f"未知操作类型：{op_type}")
+        raise ValueError(f'id="{op_id}" 未知操作类型：{op_type}')
 
     def write_execution_log_file(self):
         if not self.backup_enabled:
@@ -890,8 +852,8 @@ class PatchExecutor:
         self.log("")
 
         try:
-            for index, op in enumerate(patch["operations"], 1):
-                self.apply_one_op(index, op)
+            for op in patch["operations"]:
+                self.apply_one_op(op)
 
             self.write_patch_copy_and_manifest(patch)
 

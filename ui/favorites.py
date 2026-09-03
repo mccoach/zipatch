@@ -7,7 +7,7 @@ from core.message_utils import safe_show_error, safe_ask_yes_no
 from core.paths import center_window
 from core.text_io import get_text_value, replace_text_keep_undo
 from ui.theme import styled_frame, styled_entry
-from ui.window_manager import register_popup, unregister_popup
+from ui.window_manager import register_popup, unregister_popup, close_registered_popup
 
 
 def title_bar_button(parent, text, command, width=6, danger=False, accent=False, bold=False):
@@ -133,10 +133,11 @@ class FavoriteTextBoxController:
     """
     文本框收藏浮窗。
 
-    标题栏只显示一个“收藏”按钮。
-    点击后显示轻量浮窗：
-    - 第一行：添加当前文本为收藏 + 绿色加号；
-    - 第二行起：已有收藏项。
+    收藏浮窗的最终交互身份：
+    - 它是依附于文本框标题栏按钮的菜单型 Toplevel；
+    - 打开后进入全局弹窗栈并拿到焦点，保证 ESC 先关闭收藏浮窗；
+    - 不依赖 FocusOut 自动关闭，避免和按钮点击、文本替换、焦点恢复抢时序；
+    - 选择收藏项后，等待当前 Tk 按钮事件闭环结束，再关闭浮窗并把焦点交还目标文本框。
     """
 
     def __init__(
@@ -219,8 +220,7 @@ class FavoriteTextBoxController:
 
     def load_favorite(self, item):
         replace_text_keep_undo(self.text_widget, item.get("content", ""))
-        self.close_popup()
-        self.text_widget.focus_set()
+        self.parent.after_idle(self.text_widget.focus_set)
 
     def rename_favorite(self, item):
         old_name = item.get("name", "")
@@ -262,15 +262,13 @@ class FavoriteTextBoxController:
 
     def toggle_popup(self):
         if self.popup and self.popup.winfo_exists():
-            self.close_popup()
+            close_registered_popup(self.popup)
         else:
             self.show_popup()
 
-    def close_popup(self, event=None):
+    def close_popup(self):
         if self.popup and self.popup.winfo_exists():
-            unregister_popup(self.popup)
             self.popup.destroy()
-
         self.popup = None
         return "break"
 
@@ -279,7 +277,8 @@ class FavoriteTextBoxController:
             self.show_popup()
 
     def show_popup(self):
-        self.close_popup()
+        if self.popup and self.popup.winfo_exists():
+            close_registered_popup(self.popup, restore_focus=False)
 
         self.popup = tk.Toplevel(self.parent)
         self.popup.configure(
@@ -294,22 +293,6 @@ class FavoriteTextBoxController:
             self.popup.overrideredirect(True)
         except Exception:
             pass
-
-        try:
-            self.parent.update_idletasks()
-            x = self.favorite_button.winfo_rootx()
-            y = self.favorite_button.winfo_rooty() + self.favorite_button.winfo_height() + 2
-            self.popup.geometry(f"420x280+{x - 330}+{y}")
-        except Exception:
-            center_window(self.popup, 420, 280)
-
-        register_popup(
-            self.popup,
-            self.close_popup,
-            focus_on_register=False,
-            close_on_focus_out=False,
-            focus_guard_widgets=[self.favorite_button, self.text_widget],
-        )
 
         list_frame = tk.Frame(self.popup, bg=THEME["bg"])
         list_frame.pack(fill="both", expand=True)
@@ -326,10 +309,49 @@ class FavoriteTextBoxController:
                 fg=THEME["fg_dim"],
                 font=THEME["font_main"],
             ).pack(fill="x", padx=8, pady=12)
-            return
+        else:
+            for item in favorites:
+                self.create_favorite_row(list_frame, item)
 
-        for item in favorites:
-            self.create_favorite_row(list_frame, item)
+        self.position_popup()
+
+        register_popup(
+            self.popup,
+            self.close_popup,
+            focus_on_register=True,
+            close_on_focus_out=True,
+        )
+
+        self.popup.lift()
+        self.popup.focus_force()
+
+    def position_popup(self):
+        self.popup.update_idletasks()
+
+        popup_width = 420
+        popup_height = min(self.popup.winfo_reqheight(), 320)
+
+        button_x = self.favorite_button.winfo_rootx()
+        button_y = self.favorite_button.winfo_rooty()
+        button_width = self.favorite_button.winfo_width()
+        button_height = self.favorite_button.winfo_height()
+
+        screen_width = self.favorite_button.winfo_screenwidth()
+        screen_height = self.favorite_button.winfo_screenheight()
+
+        x = button_x + button_width - popup_width
+        y = button_y + button_height + 2
+
+        if x < 0:
+            x = 0
+
+        if x + popup_width > screen_width:
+            x = max(0, screen_width - popup_width - 8)
+
+        if y + popup_height > screen_height - 40:
+            y = max(0, button_y - popup_height - 2)
+
+        self.popup.geometry(f"{popup_width}x{popup_height}+{x}+{y}")
 
     def create_add_row(self, parent):
         row = styled_frame(parent)

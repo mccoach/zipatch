@@ -221,7 +221,7 @@ class BackupRestoreExecutor:
                     )
 
             self.restore_operations.append({
-                "index": op_item.get("index"),
+                "id": op_item.get("id", ""),
                 "op": op_item.get("op", ""),
                 "path": op_item.get("path", ""),
                 "new_path": op_item.get("new_path", ""),
@@ -258,7 +258,7 @@ class BackupRestoreExecutor:
             for item in self.restore_operations:
                 if item.get("mismatch"):
                     lines.append(
-                        f"- 原操作 {item.get('index')} {item.get('op')}：{item.get('issue')}"
+                        f'- 原操作 id="{item.get("id")}" {item.get("op")}：{item.get("issue")}'
                     )
 
         lines.append("")
@@ -329,7 +329,7 @@ class BackupRestoreExecutor:
             "backup_root": str(self.backup_root),
             "operations": [
                 {
-                    "index": item.get("index"),
+                    "id": item.get("id"),
                     "op": item.get("op"),
                     "path": item.get("path"),
                     "new_path": item.get("new_path"),
@@ -402,7 +402,7 @@ class BackupRestoreExecutor:
 
         try:
             for item in self.restore_operations:
-                self.log(f"---- 还原原操作 {item.get('index')}: {item.get('op')} ----")
+                self.log(f'---- 还原原操作 id="{item.get("id")}" {item.get("op")} ----')
 
                 for entry in item.get("entries", []):
                     self.restore_one_entry(entry)

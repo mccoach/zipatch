@@ -47,7 +47,7 @@ def iter_op_related_paths(op):
 
     if op.get("op") in DUAL_PATH_OPS:
         if "new_path" not in op:
-            raise ValueError(f"{op.get('op')} 缺少 new_path 参数")
+            raise ValueError(f'id="{op.get("id", "")}" {op.get("op")} 缺少 new_path 参数')
         yield normalize_contract_path(op.get("new_path", ""))
 
 
@@ -55,25 +55,26 @@ def collect_path_contract_errors(operations):
     errors = []
     items = []
 
-    for index, op in enumerate(operations, 1):
+    for op in operations:
         op_type = op.get("op", "")
+        op_id = op.get("id", "")
 
         try:
             paths = list(iter_op_related_paths(op))
         except Exception as e:
-            errors.append(f"第 {index} 个 {op_type} 路径参数非法：{e}")
+            errors.append(f'id="{op_id}" {op_type} 路径参数非法：{e}')
             continue
 
         if len(paths) == 2 and is_same_or_parent_path(paths[0], paths[1]):
             errors.append(
-                f"第 {index} 个 {op_type} 的 path 与 new_path 路径冲突："
+                f'id="{op_id}" {op_type} 的 path 与 new_path 路径冲突：'
                 f"{paths[0]} / {paths[1]}"
             )
 
         items.append({
-            "index": index,
             "op": op,
             "op_type": op_type,
+            "op_id": op_id,
             "paths": paths,
         })
 
@@ -86,8 +87,8 @@ def collect_path_contract_errors(operations):
                 for right_path in right["paths"]:
                     if is_same_or_parent_path(left_path, right_path):
                         errors.append(
-                            f"第 {left['index']} 个 {left['op_type']} 路径 {left_path} 与 "
-                            f"第 {right['index']} 个 {right['op_type']} 路径 {right_path} 冲突。"
+                            f'id="{left["op_id"]}" {left["op_type"]} 路径 {left_path} 与 '
+                            f'id="{right["op_id"]}" {right["op_type"]} 路径 {right_path} 冲突。'
                         )
 
     return errors
@@ -121,8 +122,9 @@ def collect_content_contract_errors(root, operations):
     errors = []
     ranges_by_path = {}
 
-    for index, op in enumerate(operations, 1):
+    for op in operations:
         op_type = op.get("op", "")
+        op_id = op.get("id", "")
 
         if op_type not in REPLACE_OPS:
             continue
@@ -137,7 +139,7 @@ def collect_content_contract_errors(root, operations):
                 old = normalize_text_newlines(op.get("old", ""))
 
                 if not old:
-                    errors.append(f"第 {index} 个 replace_exact 的 OLD 文本不能为空")
+                    errors.append(f'id="{op_id}" replace_exact 的 OLD 文本不能为空')
                     continue
 
                 expected_count = parse_required_positive_int(op.get("count"), "count")
@@ -145,7 +147,7 @@ def collect_content_contract_errors(root, operations):
 
                 if len(ranges) != expected_count:
                     errors.append(
-                        f"第 {index} 个 replace_exact 命中次数不符："
+                        f'id="{op_id}" replace_exact 命中次数不符：'
                         f"expected={expected_count}, actual={len(ranges)}, path={rel_path}"
                     )
                     continue
@@ -155,7 +157,7 @@ def collect_content_contract_errors(root, operations):
                 end_marker = op.get("end_marker", "")
 
                 if not start_marker or not end_marker:
-                    errors.append(f"第 {index} 个 replace_between 缺少 start_marker 或 end_marker")
+                    errors.append(f'id="{op_id}" replace_between 缺少 start_marker 或 end_marker')
                     continue
 
                 s_count = text.count(start_marker)
@@ -163,7 +165,7 @@ def collect_content_contract_errors(root, operations):
 
                 if s_count != 1 or e_count != 1:
                     errors.append(
-                        f"第 {index} 个 replace_between 锚点不唯一："
+                        f'id="{op_id}" replace_between 锚点不唯一：'
                         f"start_count={s_count}, end_count={e_count}, path={rel_path}"
                     )
                     continue
@@ -172,21 +174,23 @@ def collect_content_contract_errors(root, operations):
                 e_idx = text.find(end_marker)
 
                 if s_idx >= e_idx:
-                    errors.append(f"第 {index} 个 replace_between 起始锚点在结束锚点之后：{rel_path}")
+                    errors.append(
+                        f'id="{op_id}" replace_between 起始锚点在结束锚点之后：{rel_path}'
+                    )
                     continue
 
                 ranges = [(s_idx, e_idx + len(end_marker))]
 
             for start, end in ranges:
                 ranges_by_path.setdefault(rel_path, []).append({
-                    "index": index,
+                    "op_id": op_id,
                     "op_type": op_type,
                     "start": start,
                     "end": end,
                 })
 
         except Exception as e:
-            errors.append(f"第 {index} 个 {op_type} 内容互斥校验失败：{e}")
+            errors.append(f'id="{op_id}" {op_type} 内容互斥校验失败：{e}')
 
     for rel_path, ranges in ranges_by_path.items():
         ranges.sort(key=lambda item: (item["start"], item["end"]))
@@ -194,8 +198,8 @@ def collect_content_contract_errors(root, operations):
         for previous, current in zip(ranges, ranges[1:]):
             if current["start"] < previous["end"]:
                 errors.append(
-                    f"{rel_path} 中第 {previous['index']} 个 {previous['op_type']} "
-                    f"与第 {current['index']} 个 {current['op_type']} "
+                    f'{rel_path} 中 id="{previous["op_id"]}" {previous["op_type"]} '
+                    f'与 id="{current["op_id"]}" {current["op_type"]} '
                     "旧文本位置区间发生重叠。"
                 )
 

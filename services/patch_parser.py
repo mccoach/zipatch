@@ -40,6 +40,20 @@ def validate_boundary(boundary: str):
     if not boundary.startswith("AI_PATCH_BOUNDARY_"):
         raise ValueError("boundary 必须以 AI_PATCH_BOUNDARY_ 开头")
 
+    if not re.search(r"\d{14}", boundary):
+        raise ValueError("boundary 必须包含 14 位创建时间码 YYYYMMDDHHMMSS")
+
+
+def validate_op_id(op_id: str, line_no: int):
+    if not isinstance(op_id, str) or not op_id:
+        raise ValueError(f"第 {line_no} 行 OP id 不能为空")
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", op_id):
+        raise ValueError(
+            f"第 {line_no} 行 OP id 格式非法：{op_id}。"
+            "id 只能包含字母、数字、下划线和短横线"
+        )
+
 
 def is_patch_start_candidate(line: str):
     return line.strip().startswith("<<AI_FILE_PATCH_V2")
@@ -90,10 +104,20 @@ def parse_op_line(line: str, line_no: int):
         if not key:
             raise ValueError(f"第 {line_no} 行 OP 参数名不能为空：{token}")
 
+        if key in attrs:
+            if key == "id":
+                raise ValueError(f'第 {line_no} 行 OP 参数重复：id。请在修改包中搜索：id="{value}"')
+            raise ValueError(f"第 {line_no} 行 OP 参数重复：{key}")
+
         attrs[key] = value
 
+    if "id" not in attrs:
+        raise ValueError(f"第 {line_no} 行 OP 缺少 id 参数")
+
+    validate_op_id(attrs["id"], line_no)
+
     if "path" not in attrs:
-        raise ValueError(f"第 {line_no} 行 OP 缺少 path 参数")
+        raise ValueError(f'第 {line_no} 行 id="{attrs["id"]}" OP 缺少 path 参数')
 
     return attrs
 
@@ -105,42 +129,43 @@ def join_text_block(lines):
 def ensure_no_duplicate_block(op, key, line_no):
     if key in op:
         raise ValueError(
-            f"第 {line_no} 行重复出现文本块 {key}，"
+            f'第 {line_no} 行 id="{op.get("id", "")}" 重复出现文本块 {key}，'
             f"当前操作开始于第 {op.get('_line_no', '?')} 行"
         )
 
 
 def validate_completed_op(op, op_index):
     op_type = op["op"]
+    op_id = op["id"]
 
     if op_type in ("write_file", "append_text", "replace_between"):
         if "content" not in op:
-            raise ValueError(f"第 {op_index} 个操作 {op_type} 缺少 ---CONTENT 文本块")
+            raise ValueError(f'第 {op_index} 个 id="{op_id}" {op_type} 缺少 ---CONTENT 文本块')
 
         if "old" in op or "new" in op:
-            raise ValueError(f"第 {op_index} 个操作 {op_type} 不允许包含 ---OLD 或 ---NEW")
+            raise ValueError(f'第 {op_index} 个 id="{op_id}" {op_type} 不允许包含 ---OLD 或 ---NEW')
 
         if op_type == "replace_between" and "include_markers" in op:
-            raise ValueError("replace_between 已固定包含 start_marker 和 end_marker，不允许 include_markers 参数")
+            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_between 已固定包含 start_marker 和 end_marker，不允许 include_markers 参数')
 
     elif op_type == "replace_exact":
         if "old" not in op:
-            raise ValueError(f"第 {op_index} 个 replace_exact 缺少 ---OLD 文本块")
+            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_exact 缺少 ---OLD 文本块')
 
         if "new" not in op:
-            raise ValueError(f"第 {op_index} 个 replace_exact 缺少 ---NEW 文本块")
+            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_exact 缺少 ---NEW 文本块')
 
         if "count" not in op:
-            raise ValueError(f"第 {op_index} 个 replace_exact 必须显式声明 count")
+            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_exact 必须显式声明 count')
 
         parse_required_positive_int(op.get("count"), "count")
 
         if "content" in op:
-            raise ValueError("replace_exact 不允许包含 ---CONTENT 文本块")
+            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_exact 不允许包含 ---CONTENT 文本块')
 
     elif op_type in PATH_ONLY_OPS:
         if "content" in op or "old" in op or "new" in op:
-            raise ValueError(f"{op_type} 不允许包含正文文本块")
+            raise ValueError(f'第 {op_index} 个 id="{op_id}" {op_type} 不允许包含正文文本块')
 
 
 def parse_patch_v2(text: str):
@@ -152,6 +177,7 @@ def parse_patch_v2(text: str):
     state = "WAIT_START"
     boundary = None
     operations = []
+    seen_op_ids = set()
     current_op = None
     current_block_key = None
     current_block_lines = []
@@ -191,8 +217,8 @@ def parse_patch_v2(text: str):
             if stripped == PATCH_END:
                 if current_op is not None:
                     raise ValueError(
-                        f"第 {idx} 行遇到包结束标记，但当前操作尚未 ---END_OP："
-                        f"操作开始于第 {current_op.get('_line_no', '?')} 行"
+                        f'第 {idx} 行遇到包结束标记，但 id="{current_op.get("id", "")}" '
+                        f"操作尚未 ---END_OP：操作开始于第 {current_op.get('_line_no', '?')} 行"
                     )
 
                 seen_end = True
@@ -202,8 +228,8 @@ def parse_patch_v2(text: str):
             if stripped.startswith("---OP "):
                 if current_op is not None:
                     raise ValueError(
-                        f"第 {idx} 行出现新 OP，但上一个 OP 尚未 ---END_OP："
-                        f"上一个操作开始于第 {current_op.get('_line_no', '?')} 行"
+                        f'第 {idx} 行出现新 OP，但 id="{current_op.get("id", "")}" '
+                        f"上一个 OP 尚未 ---END_OP：上一个操作开始于第 {current_op.get('_line_no', '?')} 行"
                     )
 
                 current_op = parse_op_line(stripped, idx)
@@ -215,19 +241,20 @@ def parse_patch_v2(text: str):
 
                 block_key = PATCH_TEXT_BLOCK_STARTERS[stripped]
                 op_type = current_op["op"]
+                op_id = current_op["id"]
 
                 if op_type in PATH_ONLY_OPS:
-                    raise ValueError(f"第 {idx} 行 {op_type} 不允许包含文本块")
+                    raise ValueError(f'第 {idx} 行 id="{op_id}" {op_type} 不允许包含文本块')
 
                 if block_key == "content" and op_type not in (
                     "write_file",
                     "append_text",
                     "replace_between",
                 ):
-                    raise ValueError(f"第 {idx} 行 {op_type} 不允许使用 ---CONTENT")
+                    raise ValueError(f'第 {idx} 行 id="{op_id}" {op_type} 不允许使用 ---CONTENT')
 
                 if block_key in ("old", "new") and op_type != "replace_exact":
-                    raise ValueError(f"第 {idx} 行 {op_type} 不允许使用 {stripped}")
+                    raise ValueError(f'第 {idx} 行 id="{op_id}" {op_type} 不允许使用 {stripped}')
 
                 ensure_no_duplicate_block(current_op, block_key, idx)
 
@@ -242,6 +269,15 @@ def parse_patch_v2(text: str):
 
                 op_index = len(operations) + 1
                 validate_completed_op(current_op, op_index)
+
+                op_id = current_op["id"]
+                if op_id in seen_op_ids:
+                    raise ValueError(
+                        f'第 {op_index} 个操作 id 重复：id="{op_id}"。'
+                        f'请在修改包中搜索：id="{op_id}"'
+                    )
+
+                seen_op_ids.add(op_id)
                 operations.append(current_op)
                 current_op = None
                 continue
@@ -276,16 +312,18 @@ def parse_patch_v2(text: str):
 
     if state == "IN_BLOCK":
         raise ValueError(
-            f"文本块未用 boundary 单独成行结束。"
-            f"当前文本块：{current_block_key}；"
-            f"所属操作开始于第 {current_op.get('_line_no', '?') if current_op else '?'} 行；"
-            f"期望 boundary：{boundary}"
+            f'文本块未用 boundary 单独成行结束。'
+            f'当前文本块：{current_block_key}；'
+            f'所属操作 id="{current_op.get("id", "") if current_op else ""}"；'
+            f'所属操作开始于第 {current_op.get("_line_no", "?") if current_op else "?"} 行；'
+            f'期望 boundary：{boundary}'
         )
 
     if state == "STRUCT":
         if current_op is not None:
             raise ValueError(
-                f"修改包结束前仍有未关闭 OP：操作开始于第 {current_op.get('_line_no', '?')} 行，"
+                f'修改包结束前仍有未关闭 OP：id="{current_op.get("id", "")}"，'
+                f"操作开始于第 {current_op.get('_line_no', '?')} 行，"
                 f"缺少 ---END_OP 或包结束标记位置错误"
             )
 

@@ -22,13 +22,12 @@ class PatchApplyResult:
 
 @dataclass
 class PatchOpCheckResult:
-    index: int
+    op_id: str
     op_type: str
     path: str
     ok: bool
     message: str
     locator: str
-    old_first_line: str = ""
 
 
 @dataclass

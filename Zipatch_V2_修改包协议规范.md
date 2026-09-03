@@ -1,6 +1,6 @@
 # Zipatch V2 修改包协议规范
 
-当前版本：V2.7
+当前版本：V2.8
 
 本文档规定 AI 构建 Zipatch V2 修改包时必须遵守的格式、OP 选择、路径规则、内容定位规则和输出自检规则。
 
@@ -18,7 +18,7 @@ AI 输出修改包时，整个修改包必须放在一个 Markdown `text` 代码
 
 ```text
 <<AI_FILE_PATCH_V2 boundary="AI_PATCH_BOUNDARY_唯一边界字符串">>
----OP 操作类型 path="相对路径" 参数="..."
+---OP 操作类型 id="唯一OP标识" path="相对路径" 参数="..."
 ---CONTENT
 正文内容
 AI_PATCH_BOUNDARY_唯一边界字符串
@@ -31,8 +31,9 @@ AI_PATCH_BOUNDARY_唯一边界字符串
 1. 首个非空行必须是包头，最后必须是包尾，包尾后不得有非空内容；
 2. 一个修改包内允许一个或多个 OP，多个 OP 按书写顺序排列；
 3. 每个 OP 以 `---OP ...` 开始，以 `---END_OP` 结束；
-4. `---CONTENT`、`---OLD`、`---NEW` 后的正文必须由 `boundary` 单独成行结束；
-5. 正文直接写入文本块，不使用字符串转义。
+4. 每个 OP 必须在 `---OP` 行声明唯一 `id` 字段；
+5. `---CONTENT`、`---OLD`、`---NEW` 后的正文必须由 `boundary` 单独成行结束；
+6. 正文直接写入文本块，不使用字符串转义。
 
 包头：`<<AI_FILE_PATCH_V2 boundary="AI_PATCH_BOUNDARY_...">>`  
 包尾：`<</AI_FILE_PATCH_V2>>`
@@ -109,6 +110,50 @@ AI_PATCH_BOUNDARY_唯一边界字符串
 
 ---
 
+### 4.3 OP 唯一标识 id
+
+每个 OP 必须在 `---OP` 行声明 `id` 字段，用于执行器日志、失败提示和用户快速定位修改包中的具体 OP。
+
+通用格式：
+
+```text
+---OP 操作类型 id="唯一OP标识" path="相对路径" 参数="..."
+```
+
+示例：
+
+```text
+---OP replace_exact id="op018" path="ui/favorites.py" count="1"
+```
+
+要求：
+
+1. `id` 必填；
+2. 同一修改包内所有 OP 的 `id` 必须唯一；
+3. `id` 只能包含字母、数字、下划线和短横线；
+4. `id` 不得为空；
+5. `id` 建议长度为 3 到 80 个字符；
+6. 推荐使用递增编号格式：`op001`、`op002`、`op003`；
+7. 复杂修改包可使用编号加语义后缀，例如：`op018_fix_favorites_close_popup`；
+8. `id` 仅用于日志、报错和人工定位，不改变 OP 执行语义；
+9. 执行器校验或执行失败时，必须输出失败 OP 的 `id`；
+10. AI 输出修改包前必须检查所有 OP 的 `id` 是否缺失、重复或格式非法。
+
+执行失败时，定位提示应优先使用 `id`：
+
+```text
+18. [失败] id="op018" replace_exact path="ui/favorites.py"
+
+失败原因：
+replace_exact 命中次数不符：expected=1, actual=0
+
+修改包定位：
+请在修改包中搜索：
+id="op018"
+```
+
+---
+
 ## 5. 全局互斥规则
 
 ### 5.1 路径互斥
@@ -129,14 +174,16 @@ AI_PATCH_BOUNDARY_唯一边界字符串
 禁止：
 
 ```text
-delete_file path="a.md"
-copy_file path="template.md" new_path="a.md"
+---OP delete_file id="op001" path="a.md"
+---END_OP
+---OP copy_file id="op002" path="template.md" new_path="a.md"
+---END_OP
 ```
 
 如需覆盖，应使用单个目标类 OP：
 
 ```text
----OP copy_file path="template.md" new_path="a.md" if_exists="overwrite"
+---OP copy_file id="op001" path="template.md" new_path="a.md" if_exists="overwrite"
 ---END_OP
 ```
 
@@ -195,35 +242,35 @@ copy_file path="template.md" new_path="a.md"
 ### 7.2 write_file
 
 ```text
----OP write_file path="相对路径" if_exists="error"
+---OP write_file id="op001" path="相对路径" if_exists="error"
 ---CONTENT
 完整文件内容
 AI_PATCH_BOUNDARY_...
 ---END_OP
 ```
 
-规则：`path` 必填；目标不存在时新建文件；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则；目标存在且是目录时失败。
+规则：`path` 必填；`id` 必填且在同一修改包内唯一；目标不存在时新建文件；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则；目标存在且是目录时失败。
 
 ---
 
 ### 7.3 append_text
 
 ```text
----OP append_text path="相对路径"
+---OP append_text id="op001" path="相对路径"
 ---CONTENT
 追加内容
 AI_PATCH_BOUNDARY_...
 ---END_OP
 ```
 
-规则：`path` 必填；目标必须是已存在文件；固定追加到文件末尾。
+规则：`path` 必填；`id` 必填且在同一修改包内唯一；目标必须是已存在文件；固定追加到文件末尾。
 
 ---
 
 ### 7.4 replace_exact
 
 ```text
----OP replace_exact path="相对路径" count="1"
+---OP replace_exact id="op001" path="相对路径" count="1"
 ---OLD
 旧文本
 AI_PATCH_BOUNDARY_...
@@ -236,18 +283,19 @@ AI_PATCH_BOUNDARY_...
 规则：
 
 1. `path` 必填，目标必须是已存在文件；
-2. `count` 必填，且必须是大于等于 `1` 的整数；
-3. `---OLD` 必须与目标文件当前文本精确匹配；
-4. 实际命中次数必须等于 `count`；
-5. `count > 1` 表示替换全部命中的多处旧文本；
-6. 同文件多个 replace 类 OP 的旧文本位置区间不得重叠。
+2. `id` 必填且在同一修改包内唯一；
+3. `count` 必填，且必须是大于等于 `1` 的整数；
+4. `---OLD` 必须与目标文件当前文本精确匹配；
+5. 实际命中次数必须等于 `count`；
+6. `count > 1` 表示替换全部命中的多处旧文本；
+7. 同文件多个 replace 类 OP 的旧文本位置区间不得重叠。
 
 ---
 
 ### 7.5 replace_between
 
 ```text
----OP replace_between path="相对路径" start_marker="起始锚点" end_marker="结束锚点"
+---OP replace_between id="op001" path="相对路径" start_marker="起始锚点" end_marker="结束锚点"
 ---CONTENT
 新区间完整内容
 AI_PATCH_BOUNDARY_...
@@ -257,33 +305,34 @@ AI_PATCH_BOUNDARY_...
 规则：
 
 1. `path` 必填，目标必须是已存在文件；
-2. `start_marker` 和 `end_marker` 必填，且在目标文件中都必须唯一；
-3. 起始锚点必须位于结束锚点之前；
-4. 替换区间固定包含 `start_marker` 和 `end_marker`；
-5. `---CONTENT` 必须是替换后的完整区间内容；
-6. 如需保留前后锚点，必须在 `---CONTENT` 中显式写回。
+2. `id` 必填且在同一修改包内唯一；
+3. `start_marker` 和 `end_marker` 必填，且在目标文件中都必须唯一；
+4. 起始锚点必须位于结束锚点之前；
+5. 替换区间固定包含 `start_marker` 和 `end_marker`；
+6. `---CONTENT` 必须是替换后的完整区间内容；
+7. 如需保留前后锚点，必须在 `---CONTENT` 中显式写回。
 
 ---
 
 ### 7.6 delete_file
 
 ```text
----OP delete_file path="相对文件路径" reason="删除原因"
+---OP delete_file id="op001" path="相对文件路径" reason="删除原因"
 ---END_OP
 ```
 
-规则：`path` 必填；`reason` 可选，建议填写；目标必须是已存在文件；不允许删除目录。
+规则：`path` 必填；`id` 必填且在同一修改包内唯一；`reason` 可选，建议填写；目标必须是已存在文件；不允许删除目录。
 
 ---
 
 ### 7.7 delete_dir
 
 ```text
----OP delete_dir path="相对目录路径" reason="删除原因"
+---OP delete_dir id="op001" path="相对目录路径" reason="删除原因"
 ---END_OP
 ```
 
-规则：`path` 必填；`reason` 可选，建议填写；目标必须是已存在目录；不允许删除项目根目录；表示删除该目录本身及其全部子内容；不需要逐个列出子文件。
+规则：`path` 必填；`id` 必填且在同一修改包内唯一；`reason` 可选，建议填写；目标必须是已存在目录；不允许删除项目根目录；表示删除该目录本身及其全部子内容；不需要逐个列出子文件。
 
 ---
 
@@ -292,29 +341,29 @@ AI_PATCH_BOUNDARY_...
 #### rename_file
 
 ```text
----OP rename_file path="docs/old.md" new_path="docs/new.md" if_exists="error"
+---OP rename_file id="op001" path="docs/old.md" new_path="docs/new.md" if_exists="error"
 ---END_OP
 ```
 
-规则：`path` 必须存在且是文件；`path` 与 `new_path` 必须同父目录；`if_exists` 使用目标类通用规则。
+规则：`id` 必填且在同一修改包内唯一；`path` 必须存在且是文件；`path` 与 `new_path` 必须同父目录；`if_exists` 使用目标类通用规则。
 
 #### move_file
 
 ```text
----OP move_file path="draft/a.md" new_path="final/a.md" if_exists="error"
+---OP move_file id="op001" path="draft/a.md" new_path="final/a.md" if_exists="error"
 ---END_OP
 ```
 
-规则：`path` 必须存在且是文件；允许跨目录和改名；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则。
+规则：`id` 必填且在同一修改包内唯一；`path` 必须存在且是文件；允许跨目录和改名；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则。
 
 #### copy_file
 
 ```text
----OP copy_file path="template.md" new_path="a.md" if_exists="error"
+---OP copy_file id="op001" path="template.md" new_path="a.md" if_exists="error"
 ---END_OP
 ```
 
-规则：`path` 必须存在且是文件；源文件不变；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则。
+规则：`id` 必填且在同一修改包内唯一；`path` 必须存在且是文件；源文件不变；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则。
 
 ---
 
@@ -323,38 +372,38 @@ AI_PATCH_BOUNDARY_...
 #### rename_dir
 
 ```text
----OP rename_dir path="docs/old" new_path="docs/new" if_exists="error"
+---OP rename_dir id="op001" path="docs/old" new_path="docs/new" if_exists="error"
 ---END_OP
 ```
 
-规则：`path` 必须存在且是目录；`path` 与 `new_path` 必须同父目录；不允许作用于项目根目录；`if_exists` 使用目标类通用规则。
+规则：`id` 必填且在同一修改包内唯一；`path` 必须存在且是目录；`path` 与 `new_path` 必须同父目录；不允许作用于项目根目录；`if_exists` 使用目标类通用规则。
 
 #### move_dir
 
 ```text
----OP move_dir path="old/topic" new_path="new/topic" if_exists="error"
+---OP move_dir id="op001" path="old/topic" new_path="new/topic" if_exists="error"
 ---END_OP
 ```
 
-规则：`path` 必须存在且是目录；不允许作用于项目根目录；允许跨目录和改名；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则。
+规则：`id` 必填且在同一修改包内唯一；`path` 必须存在且是目录；不允许作用于项目根目录；允许跨目录和改名；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则。
 
 #### copy_dir
 
 ```text
----OP copy_dir path="template_project" new_path="project_a" if_exists="error"
+---OP copy_dir id="op001" path="template_project" new_path="project_a" if_exists="error"
 ---END_OP
 ```
 
-规则：`path` 必须存在且是目录；源目录不变；不允许复制项目根目录；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则。
+规则：`id` 必填且在同一修改包内唯一；`path` 必须存在且是目录；源目录不变；不允许复制项目根目录；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则。
 
 #### create_dir
 
 ```text
----OP create_dir path="docs/new" if_exists="skip"
+---OP create_dir id="op001" path="docs/new" if_exists="skip"
 ---END_OP
 ```
 
-规则：`path` 必填；自动创建多级目录；不允许作用于项目根目录；`if_exists` 仅支持 `error|skip`，默认 `skip`；路径已存在但不是目录时失败。
+规则：`path` 必填；`id` 必填且在同一修改包内唯一；自动创建多级目录；不允许作用于项目根目录；`if_exists` 仅支持 `error|skip`，默认 `skip`；路径已存在但不是目录时失败。
 
 ---
 
@@ -375,7 +424,34 @@ AI_PATCH_BOUNDARY_...
 
 ---
 
-## 9. 输出前自检
+## 9. 失败定位规则
+
+执行器在校验或执行某个 OP 失败时，必须输出失败 OP 的 `id`，以便用户快速定位修改包中的具体条目。
+
+要求：
+
+1. 失败提示必须包含失败 OP 的 `id`；
+2. 失败提示应包含 OP 类型和主要路径；
+3. 定位说明应优先提示用户搜索 `id="..."`；
+4. 不要求输出 OLD 片段、CONTENT 片段或正文摘要；
+5. 不应依赖 OLD 首行、锚点文本或 OP 头同质内容作为主要定位方式。
+
+推荐格式：
+
+```text
+18. [失败] id="op018" replace_exact path="ui/favorites.py"
+
+失败原因：
+replace_exact 命中次数不符：expected=1, actual=0
+
+修改包定位：
+请在修改包中搜索：
+id="op018"
+```
+
+---
+
+## 10. 输出前自检
 
 输出 V2 修改包前必须检查：
 
@@ -386,6 +462,9 @@ AI_PATCH_BOUNDARY_...
 | 包头/包尾 | 格式完整，包尾后无非空内容 |
 | boundary | 足够长、唯一、正文中不单独成行出现，并包含 14 位时间码 |
 | OP | 每个 OP 都有 `---END_OP` |
+| OP id | 每个 OP 必须声明 `id` |
+| id 唯一性 | 同一修改包内所有 `id` 不得重复 |
+| id 格式 | `id` 只能包含字母、数字、下划线和短横线，且非空 |
 | 正文块 | 每个正文块都由 boundary 单独成行结束 |
 | path/new_path | 相对路径；不含盘符、`..`、通配符；不逃逸项目根目录；按当前项目根目录计算 |
 | 项目根目录 | 不得通过修改包重命名、移动、删除或改变项目根目录本身 |
@@ -397,17 +476,18 @@ AI_PATCH_BOUNDARY_...
 | replace_exact | 显式声明 count；OLD 基于执行前当前文件精确命中 |
 | replace_between | 起止锚点基于执行前当前文件唯一命中且顺序正确；CONTENT 是包含锚点的完整新区间 |
 | 删除 OP | 只在明确确认删除时使用 |
+| 失败定位 | 执行器错误信息必须输出失败 OP 的 `id` |
 | 备份路径 | 修改包不声明备份路径 |
 
 ---
 
-## 10. 示例
+## 11. 示例
 
 ```text
 <<AI_FILE_PATCH_V2 boundary="AI_PATCH_BOUNDARY_EXAMPLE_20260713004354_A1B2C3D4E5F6">>
----OP copy_file path="templates/readme.md" new_path="README.md" if_exists="skip"
+---OP copy_file id="op001" path="templates/readme.md" new_path="README.md" if_exists="skip"
 ---END_OP
----OP replace_exact path="docs/spec.md" count="1"
+---OP replace_exact id="op002" path="docs/spec.md" count="1"
 ---OLD
 旧标题
 AI_PATCH_BOUNDARY_EXAMPLE_20260713004354_A1B2C3D4E5F6

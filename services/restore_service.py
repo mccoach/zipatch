@@ -26,48 +26,27 @@ class RestoreResult:
 
 def parse_merged_blocks(full_text, start_marker, end_marker):
     """
-    兼容原来的三种解析策略：
-    1. 开始标记 + 结束标记；
-    2. 仅开始标记；
-    3. 仅结束标记。
+    解析标准合并文件块。
+
+    唯一支持格式：
+    ---第N个文件---
+    文件路径
+    开始标记
+    文件内容
+    结束标记
     """
-    if start_marker and start_marker in full_text and end_marker and end_marker in full_text:
-        pattern = re.compile(
-            r"---第\d+个文件---\s*(.*?)\s*"
-            + re.escape(start_marker)
-            + r"\s*(.*?)\s*"
-            + re.escape(end_marker),
-            re.DOTALL,
-        )
-        matches = pattern.findall(full_text)
+    if not start_marker or not end_marker:
+        return [], "标准开始和结束标记"
 
-        if matches:
-            return matches, "开始和结束标记"
+    pattern = re.compile(
+        r"---第\d+个文件---\s*(.*?)\s*"
+        + re.escape(start_marker)
+        + r"\s*(.*?)\s*"
+        + re.escape(end_marker),
+        re.DOTALL,
+    )
 
-    if start_marker and start_marker in full_text:
-        pattern = re.compile(
-            r"---第\d+个文件---\s*(.*?)\s*"
-            + re.escape(start_marker)
-            + r"\s*(.*?)(?=---第\d+个文件---|$)",
-            re.DOTALL,
-        )
-        matches = pattern.findall(full_text)
-
-        if matches:
-            return matches, "仅开始标记"
-
-    if end_marker and end_marker in full_text:
-        pattern = re.compile(
-            r"---第\d+个文件---\s*(.*?)\s*(.*?)"
-            + re.escape(end_marker),
-            re.DOTALL,
-        )
-        matches = pattern.findall(full_text)
-
-        if matches:
-            return matches, "仅结束标记"
-
-    return [], "无"
+    return pattern.findall(full_text), "标准开始和结束标记"
 
 
 def resolve_restore_path(original_path_str, target_root_folder):

@@ -800,7 +800,7 @@ class PatchPanel(BasePanel):
                         break
                     continue
 
-                if value in ("修改包定位：", "请在修改包中搜索以下 OP 头："):
+                if value in ("修改包定位：", "请在修改包中搜索：", "请在修改包中搜索以下 OP 头："):
                     break
 
                 collected.append(value)

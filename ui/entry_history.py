@@ -3,7 +3,7 @@
 import tkinter as tk
 
 from core.constants import THEME
-from ui.window_manager import register_popup, unregister_popup
+from ui.window_manager import register_popup, unregister_popup, is_descendant_or_self
 
 
 DEFAULT_ENTRY_HISTORY_MAX_ITEMS = 10
@@ -334,11 +334,8 @@ class EntryHistoryPlugin:
         if focused is self.entry:
             return
 
-        try:
-            if focused is not None and str(focused).startswith(str(self.popup)):
-                return
-        except Exception:
-            pass
+        if is_descendant_or_self(focused, self.popup):
+            return
 
         self.close_popup()
 

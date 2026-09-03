@@ -276,7 +276,7 @@ def close_text_edit_dialog_with_confirm(dialog, text_widgets, save_callback):
         )
 
         if result is None:
-            return "break"
+            return False
 
         if result and save_callback:
             save_callback()
