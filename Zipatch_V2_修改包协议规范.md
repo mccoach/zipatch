@@ -28,14 +28,14 @@ AI_PATCH_BOUNDARY_唯一边界字符串
 
 要求：
 
-1. 首个非空行必须是包头，最后必须是包尾，包尾后不得有非空内容；
+1. 首个非空行必须是包头独占一行，最后非空行必须是包尾独占一行，包头、包尾行内以及包头行前、包尾行后不得出现不属于包头、包尾的其他非空内容；
 2. 一个修改包内允许一个或多个 OP，多个 OP 按书写顺序排列；
 3. 每个 OP 以 `---OP ...` 开始，以 `---END_OP` 结束；
 4. 每个 OP 必须在 `---OP` 行声明唯一 `id` 字段；
 5. `---CONTENT`、`---OLD`、`---NEW` 后的正文必须由 `boundary` 单独成行结束；
-6. 正文直接写入文本块，不使用字符串转义。
+6. 正文直接写入文本块，不使用字符串转义。外层 Markdown 闭合围栏不属于修改包载荷，必须在包头行前和包尾行后另起一行书写，闭合围栏符号不得混入包头、包尾行内。
 
-包头：`<<AI_FILE_PATCH_V2 boundary="AI_PATCH_BOUNDARY_...">>`  
+包头：`<<AI_FILE_PATCH_V2 boundary="AI_PATCH_BOUNDARY_...">>`
 包尾：`<</AI_FILE_PATCH_V2>>`
 
 ---
@@ -88,8 +88,6 @@ AI_PATCH_BOUNDARY_唯一边界字符串
 - 内容类：`append_text`、`replace_exact`、`replace_between`
 - 目标类：`write_file`、`rename_file`、`move_file`、`copy_file`、`rename_dir`、`move_dir`、`copy_dir`，支持 `if_exists="error|overwrite|skip"`，默认 `error`
 
----
-
 ### 4.2 OP 总览
 
 | OP | 用途 |
@@ -107,8 +105,6 @@ AI_PATCH_BOUNDARY_唯一边界字符串
 | `move_dir` | 移动文件夹，可跨目录，可改名 |
 | `copy_dir` | 复制文件夹 |
 | `create_dir` | 创建文件夹 |
-
----
 
 ### 4.3 OP 唯一标识 id
 
@@ -187,8 +183,6 @@ id="op018"
 ---END_OP
 ```
 
----
-
 ### 5.2 内容互斥
 
 内容互斥只适用于同一文件内的 `replace_exact` 和 `replace_between`。
@@ -207,7 +201,7 @@ id="op018"
 
 ## 6. if_exists
 
-目标类 OP 支持 `if_exists="error|overwrite|skip"`，默认 `error`。  
+目标类 OP 支持 `if_exists="error|overwrite|skip"`，默认 `error`。
 `create_dir` 仅支持 `if_exists="error|skip"`，默认 `skip`。
 
 含义：
@@ -237,8 +231,6 @@ id="op018"
 - 使用 `---OLD` 和 `---NEW`：`replace_exact`
 - 不允许正文块：`delete_file`、`delete_dir`、`rename_file`、`move_file`、`copy_file`、`rename_dir`、`move_dir`、`copy_dir`、`create_dir`
 
----
-
 ### 7.2 write_file
 
 ```text
@@ -251,8 +243,6 @@ AI_PATCH_BOUNDARY_...
 
 规则：`path` 必填；`id` 必填且在同一修改包内唯一；目标不存在时新建文件；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则；目标存在且是目录时失败。
 
----
-
 ### 7.3 append_text
 
 ```text
@@ -264,8 +254,6 @@ AI_PATCH_BOUNDARY_...
 ```
 
 规则：`path` 必填；`id` 必填且在同一修改包内唯一；目标必须是已存在文件；固定追加到文件末尾。
-
----
 
 ### 7.4 replace_exact
 
@@ -290,8 +278,6 @@ AI_PATCH_BOUNDARY_...
 6. `count > 1` 表示替换全部命中的多处旧文本；
 7. 同文件多个 replace 类 OP 的旧文本位置区间不得重叠。
 
----
-
 ### 7.5 replace_between
 
 ```text
@@ -312,8 +298,6 @@ AI_PATCH_BOUNDARY_...
 6. `---CONTENT` 必须是替换后的完整区间内容；
 7. 如需保留前后锚点，必须在 `---CONTENT` 中显式写回。
 
----
-
 ### 7.6 delete_file
 
 ```text
@@ -323,8 +307,6 @@ AI_PATCH_BOUNDARY_...
 
 规则：`path` 必填；`id` 必填且在同一修改包内唯一；`reason` 可选，建议填写；目标必须是已存在文件；不允许删除目录。
 
----
-
 ### 7.7 delete_dir
 
 ```text
@@ -333,8 +315,6 @@ AI_PATCH_BOUNDARY_...
 ```
 
 规则：`path` 必填；`id` 必填且在同一修改包内唯一；`reason` 可选，建议填写；目标必须是已存在目录；不允许删除项目根目录；表示删除该目录本身及其全部子内容；不需要逐个列出子文件。
-
----
 
 ### 7.8 文件路径 OP
 
@@ -364,8 +344,6 @@ AI_PATCH_BOUNDARY_...
 ```
 
 规则：`id` 必填且在同一修改包内唯一；`path` 必须存在且是文件；源文件不变；目标父目录不存在时自动创建；`if_exists` 使用目标类通用规则。
-
----
 
 ### 7.9 目录路径 OP
 
@@ -415,7 +393,7 @@ AI_PATCH_BOUNDARY_...
 
 1. 不使用 `---`、空行、常见短句作为锚点；
 2. 优先使用稳定标题、函数定义、类定义或唯一上下文；
-3. `replace_exact` 的 `---OLD` 必须与执行前原文完全一致；
+3. `replace_exact` 的 `---OLD` 必须与执行前原文精确匹配；
 4. `replace_between` 的起止锚点必须在执行前原文中唯一，结束锚点优先使用下一个同级标题或稳定结构标记；
 5. 禁止依赖 OP 顺序副作用让后续 OP 定位成功；
 6. 同一文件内多个替换 OP 的 OLD、起始锚点和结束锚点，都必须能在执行前当前文件中独立命中；

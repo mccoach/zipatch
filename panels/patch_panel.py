@@ -300,7 +300,7 @@ class PatchPanel(BasePanel):
 
         self.apply_button = styled_button(
             btn_row,
-            "执行修改",
+            "预演并执行",
             self.apply,
             width=12,
             danger=True,
@@ -568,7 +568,7 @@ class PatchPanel(BasePanel):
         if is_restore:
             self.mode_hint.config(text="当前为备份还原模式，请谨慎操作")
             self.preview_button.config(text="预演还原")
-            self.apply_button.config(text="执行还原")
+            self.apply_button.config(text="预演并还原")
 
             hide_path_row(backup_dir_row)
             show_path_row(restore_source_row)
@@ -582,7 +582,7 @@ class PatchPanel(BasePanel):
         else:
             self.mode_hint.config(text="")
             self.preview_button.config(text="Dry Run 预演")
-            self.apply_button.config(text="执行修改")
+            self.apply_button.config(text="预演并执行")
 
             hide_path_row(restore_source_row)
             show_path_row(backup_dir_row)
@@ -1141,7 +1141,24 @@ class PatchPanel(BasePanel):
             parent=self.root,
         )
 
-    def preview(self):
+    def preview(self, for_execution=False):
+        """
+        执行当前模式的 Dry Run。
+
+        for_execution=False：
+        - 作为独立预演按钮使用；
+        - 预演成功后显示原有成功提示；
+        - 不继续执行。
+
+        for_execution=True：
+        - 作为“预演并执行/还原”的前置安全校验；
+        - 预演失败时显示与独立预演完全相同的错误提示并停止；
+        - 预演完全通过时不显示额外成功提示，直接进入原执行确认流程。
+
+        返回值：
+        - True：预演完成且允许进入执行确认；
+        - False：预演失败或存在校验错误，必须停止。
+        """
         try:
             cfg = self.collect_config()
 
@@ -1176,8 +1193,15 @@ class PatchPanel(BasePanel):
 
                 self.set_status("备份还原预演完成")
                 self.log("备份还原 Dry Run 完成")
-                safe_show_info("Dry Run 完成", "备份还原校验完成，请查看预演结果。", parent=self.root)
-                return
+
+                if not for_execution:
+                    safe_show_info(
+                        "Dry Run 完成",
+                        "备份还原校验完成，请查看预演结果。",
+                        parent=self.root,
+                    )
+
+                return True
 
             patch_text = validate_required_path(cfg["patch_text"], "修改包内容")
 
@@ -1207,23 +1231,27 @@ class PatchPanel(BasePanel):
             self.log("修改包 Dry Run 预演完成")
 
             if result.failed_count == 0:
-                safe_show_info(
-                    "Dry Run 完成",
-                    "V2 修改包全部校验通过。请查看预演结果，确认无误后再执行。",
-                    parent=self.root,
-                )
-            else:
-                safe_show_error(
-                    "Dry Run 存在失败项",
-                    "修改包存在校验失败项，请先查看并修正。\n\n"
-                    f"校验成功：{result.success_count}\n"
-                    f"校验失败：{result.failed_count}\n"
-                    f"全局冲突：{'有' if result.has_global_errors else '无'}\n\n"
-                    "失败原因摘要：\n"
-                    f"{self.extract_preview_failure_summary(result.preview_text)}\n\n"
-                    "完整详情请查看右侧结果区。",
-                    parent=self.root,
-                )
+                if not for_execution:
+                    safe_show_info(
+                        "Dry Run 完成",
+                        "V2 修改包全部校验通过。请查看预演结果，确认无误后再执行。",
+                        parent=self.root,
+                    )
+
+                return True
+
+            safe_show_error(
+                "Dry Run 存在失败项",
+                "修改包存在校验失败项，请先查看并修正。\n\n"
+                f"校验成功：{result.success_count}\n"
+                f"校验失败：{result.failed_count}\n"
+                f"全局冲突：{'有' if result.has_global_errors else '无'}\n\n"
+                "失败原因摘要：\n"
+                f"{self.extract_preview_failure_summary(result.preview_text)}\n\n"
+                "完整详情请查看右侧结果区。",
+                parent=self.root,
+            )
+            return False
 
         except Exception as e:
             self.preview_apply_patch = None
@@ -1239,8 +1267,12 @@ class PatchPanel(BasePanel):
             self.set_status("Dry Run 失败")
             self.log(f"修改包 Dry Run 失败：{e}")
             safe_show_error("Dry Run 失败", str(e), parent=self.root)
+            return False
 
     def apply(self):
+        if not self.preview(for_execution=True):
+            return
+
         try:
             cfg = self.collect_config()
 
@@ -1290,21 +1322,10 @@ class PatchPanel(BasePanel):
                 )
 
             if self.preview_has_errors:
-                if self.preview_success_count <= 0:
-                    raise ValueError("当前 Dry Run 没有任何校验成功的 OP，不能执行。")
-
-                ok = safe_ask_yes_no(
-                    "部分执行确认",
-                    f"当前修改包有部分 OP 校验失败。\n\n"
-                    f"校验成功：{self.preview_success_count}\n"
-                    f"校验失败：{self.preview_failed_count}\n\n"
-                    f"将只执行校验成功的 OP，失败 OP 会被跳过。\n\n"
-                    f"确认继续？",
-                    parent=self.root,
+                raise ValueError(
+                    "当前 Dry Run 存在校验失败项，不能执行任何 OP。\n\n"
+                    "请先修正修改包，再重新点击【预演并执行】。"
                 )
-
-                if not ok:
-                    return
 
             if not self.confirm_apply_execution(cfg):
                 return
