@@ -1240,15 +1240,34 @@ class PatchPanel(BasePanel):
 
                 return True
 
-            safe_show_error(
-                "Dry Run 存在失败项",
+            failure_message = (
                 "修改包存在校验失败项，请先查看并修正。\n\n"
                 f"校验成功：{result.success_count}\n"
                 f"校验失败：{result.failed_count}\n"
                 f"全局冲突：{'有' if result.has_global_errors else '无'}\n\n"
                 "失败原因摘要：\n"
                 f"{self.extract_preview_failure_summary(result.preview_text)}\n\n"
-                "完整详情请查看右侧结果区。",
+                "完整详情请查看右侧结果区。"
+            )
+
+            if (
+                for_execution
+                and not result.has_global_errors
+                and result.success_count > 0
+            ):
+                return safe_ask_yes_no(
+                    "部分执行确认",
+                    failure_message
+                    + "\n\n当前错误不属于致命全局冲突。"
+                    + "\n可以跳过校验失败的 OP，只执行校验成功的 OP。"
+                    + "\n\n是否继续执行校验成功的 OP？",
+                    parent=self.root,
+                    icon="warning",
+                )
+
+            safe_show_error(
+                "Dry Run 存在失败项",
+                failure_message,
                 parent=self.root,
             )
             return False
@@ -1319,12 +1338,6 @@ class PatchPanel(BasePanel):
                 raise ValueError(
                     "当前 Dry Run 存在路径互斥或内容互斥等全局冲突，不能执行任何 OP。\n\n"
                     "请先修正修改包并重新 Dry Run。"
-                )
-
-            if self.preview_has_errors:
-                raise ValueError(
-                    "当前 Dry Run 存在校验失败项，不能执行任何 OP。\n\n"
-                    "请先修正修改包，再重新点击【预演并执行】。"
                 )
 
             if not self.confirm_apply_execution(cfg):

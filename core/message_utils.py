@@ -22,9 +22,20 @@ def safe_show_error(title, message, parent=None):
         print(f"[ERROR] {title}: {message}", file=sys.stderr)
 
 
-def safe_ask_yes_no(title, message, parent=None):
+def safe_ask_yes_no(title, message, parent=None, icon="question"):
+    """
+    显示系统原生 yes/no 确认弹窗。
+
+    icon 只控制系统原生图标，不改变弹窗类型、按钮或返回值。
+    支持 Tk 原生图标：question、info、warning、error。
+    """
     try:
-        return messagebox.askyesno(title, message, parent=parent)
+        return messagebox.askyesno(
+            title,
+            message,
+            parent=parent,
+            icon=icon,
+        )
     except TclError:
         print(f"[CONFIRM] {title}: {message}")
         return False
@@ -34,9 +45,16 @@ def safe_ask_risk_confirm(title, message, parent=None, danger=False):
     """
     执行前风险确认弹窗。
 
-    danger 仅保留为调用语义参数，当前统一使用系统原生 yes/no 弹窗。
+    保持系统原生 yes/no 弹窗及原有返回值不变，只按风险状态区分图标：
+    - 普通可执行确认：info；
+    - 高风险可执行确认：warning。
     """
-    return safe_ask_yes_no(title, message, parent=parent)
+    return safe_ask_yes_no(
+        title,
+        message,
+        parent=parent,
+        icon="warning" if danger else "info",
+    )
 
 
 def resolve_output_file_conflict(output_file, force_overwrite, parent=None):

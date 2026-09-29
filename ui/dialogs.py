@@ -315,7 +315,7 @@ def edit_exclude_settings(
 
     tk.Label(
         dialog,
-        text="支持换行、英文逗号、中文逗号、空格分隔；扩展名不写点号会自动补点号。注意：像 .gitignore 这类完整特殊文件名应写入“排除文件名”，不要写入“排除扩展名”。快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做。",
+        text="其他说明：支持换行、英文逗号、中文逗号、空格分隔；在名单行或名单项前添加半角分号 ; 可临时取消该项，例如 ;tests，移除分号即可恢复。扩展名不写点号会自动补点号。注意：像 .gitignore 这类完整特殊文件名应写入“排除文件名”，不要写入“排除扩展名”。快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做。",
         bg=THEME["bg"],
         fg=THEME["fg_dim"],
         font=THEME["font_main"],

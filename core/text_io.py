@@ -50,26 +50,50 @@ def write_text_utf8(path: Path, text: str):
     path.write_text(text, encoding="utf-8", newline="")
 
 
+def is_temporarily_disabled_list_line(value):
+    """
+    判断名单行是否被半角分号临时取消。
+
+    规则：
+    - 忽略行首空白后，以半角分号 ; 开头的整行不参与业务处理；
+    - 原始文本不会被删除，移除分号后即可恢复；
+    - 该规则由所有名单类文本解析入口共同复用。
+    """
+    return (value or "").lstrip().startswith(";")
+
+
 def parse_list_text(text, normalize_ext=False):
     """
     把用户输入的排除名单解析成列表。
+
     支持：
     - 换行
     - 英文逗号
     - 中文逗号
     - 空格
+    - 使用半角分号 ; 临时取消整行或单个名单项
+
+    示例：
+    - ;tests：临时取消 tests；
+    - .git, ;tests, dist：只启用 .git 和 dist。
     """
     if not text:
         return []
 
-    parts = re.split(r"[\s,，]+", text)
+    active_lines = [
+        raw_line
+        for raw_line in text.splitlines()
+        if not is_temporarily_disabled_list_line(raw_line)
+    ]
+
+    parts = re.split(r"[\s,，]+", "\n".join(active_lines))
     result = []
     seen = set()
 
     for item in parts:
         value = item.strip()
 
-        if not value:
+        if not value or value.startswith(";"):
             continue
 
         if normalize_ext and not value.startswith("."):

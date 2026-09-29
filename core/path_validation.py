@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.text_io import is_temporarily_disabled_list_line
+
 
 @dataclass
 class PathValidationResult:
@@ -283,6 +285,10 @@ def validate_path_list(
 
     for raw_line in (list_text or "").splitlines():
         if not raw_line.strip():
+            continue
+
+        if is_temporarily_disabled_list_line(raw_line):
+            normalized_lines.append(raw_line.strip())
             continue
 
         result = validate_existing_path(
