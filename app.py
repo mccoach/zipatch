@@ -3,20 +3,20 @@
 import sys
 import tkinter as tk
 
-from core.config import load_user_config, save_user_config, normalize_feature_order
+from core.config import load_user_config, normalize_feature_order, save_user_config
 from core.constants import THEME
 from core.message_utils import safe_show_error
 from core.paths import center_window, get_asset_path, raise_and_focus
 from core.time_utils import current_log_time
 from feature_registry import get_feature_registry
 from ui.dialogs import create_managed_text_box
+from ui.feature_tabs import DraggableFeatureTabs
 from ui.theme import (
     apply_global_theme,
+    styled_button,
     styled_frame,
     styled_label_frame,
-    styled_button,
 )
-from ui.feature_tabs import DraggableFeatureTabs
 from ui.window_manager import register_popup, unregister_popup
 
 
@@ -89,7 +89,7 @@ class ZipatchApp:
             pass
 
     def build_ui(self):
-        self.root.title("智派-文本代码修改合并助手 Zipatch v1.6.0-20260929")
+        self.root.title("智派-文本代码修改合并助手 Zipatch v3.0.0-20260930")
         self.apply_window_icon()
         self.root.resizable(True, True)
         center_window(self.root, 1080, 800)

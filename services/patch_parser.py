@@ -4,12 +4,19 @@ import re
 import shlex
 
 from core.constants import (
+    PATCH_PROTOCOL_NAME,
+    PATCH_BOUNDARY_PREFIX,
+    PATCH_START_PREFIX,
     PATCH_END,
     SUPPORTED_PATCH_OPS,
     PATCH_TEXT_BLOCK_STARTERS,
 )
 from core.text_io import split_lines_keep_text
-from services.patch_ops import PATH_ONLY_OPS, parse_required_positive_int
+from services.patch_ops import (
+    OP_ALLOWED_HEAD_PARAMS,
+    OP_REQUIRED_TEXT_BLOCKS,
+    parse_required_positive_int,
+)
 
 
 def validate_boundary(boundary: str):
@@ -19,8 +26,6 @@ def validate_boundary(boundary: str):
     if len(boundary) < 32:
         raise ValueError("boundary 太短，至少需要 32 个字符")
 
-    if len(boundary) > 160:
-        raise ValueError("boundary 太长，建议不超过 160 个字符")
 
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", boundary):
         raise ValueError("boundary 只能包含字母、数字、下划线、短横线和点")
@@ -28,17 +33,15 @@ def validate_boundary(boundary: str):
     forbidden = {
         PATCH_END,
         "---OP",
-        "---CONTENT",
-        "---OLD",
-        "---NEW",
+        *PATCH_TEXT_BLOCK_STARTERS.keys(),
         "---END_OP",
     }
 
     if boundary in forbidden:
         raise ValueError(f"boundary 不能等于协议关键字：{boundary}")
 
-    if not boundary.startswith("AI_PATCH_BOUNDARY_"):
-        raise ValueError("boundary 必须以 AI_PATCH_BOUNDARY_ 开头")
+    if not boundary.startswith(PATCH_BOUNDARY_PREFIX):
+        raise ValueError(f"boundary 必须以 {PATCH_BOUNDARY_PREFIX} 开头")
 
     if not re.search(r"\d{14}", boundary):
         raise ValueError("boundary 必须包含 14 位创建时间码 YYYYMMDDHHMMSS")
@@ -56,17 +59,23 @@ def validate_op_id(op_id: str, line_no: int):
 
 
 def is_patch_start_candidate(line: str):
-    return line.strip().startswith("<<AI_FILE_PATCH_V2")
+    return line.strip().startswith(PATCH_START_PREFIX)
 
 
 def parse_start_line(line: str):
-    pattern = r'^<<AI_FILE_PATCH_V2\s+boundary="([^"]+)">>$'
+    pattern = (
+        rf'^<<{re.escape(PATCH_PROTOCOL_NAME)}\s+'
+        r'boundary="([^"]+)">>$'
+    )
     match = re.match(pattern, line.strip())
 
     if not match:
+        expected = (
+            f'<<{PATCH_PROTOCOL_NAME} '
+            f'boundary="{PATCH_BOUNDARY_PREFIX}...">>'
+        )
         raise ValueError(
-            "V2 修改包首行格式非法。应为："
-            '<<AI_FILE_PATCH_V2 boundary="AI_PATCH_BOUNDARY_...">>'
+            f"V3 修改包首行格式非法。应为：{expected}"
         )
 
     boundary = match.group(1)
@@ -78,7 +87,7 @@ def parse_start_line(line: str):
 def parse_op_line(line: str, line_no: int):
     try:
         parts = shlex.split(line, posix=True)
-    except Exception as e:
+    except ValueError as e:
         raise ValueError(f"第 {line_no} 行 OP 头解析失败：{e}")
 
     if len(parts) < 2 or parts[0] != "---OP":
@@ -106,7 +115,10 @@ def parse_op_line(line: str, line_no: int):
 
         if key in attrs:
             if key == "id":
-                raise ValueError(f'第 {line_no} 行 OP 参数重复：id。请在修改包中搜索：id="{value}"')
+                raise ValueError(
+                    f'第 {line_no} 行 OP 参数重复：id。'
+                    f'请在修改包中搜索：id="{value}"'
+                )
             raise ValueError(f"第 {line_no} 行 OP 参数重复：{key}")
 
         attrs[key] = value
@@ -116,8 +128,17 @@ def parse_op_line(line: str, line_no: int):
 
     validate_op_id(attrs["id"], line_no)
 
-    if "path" not in attrs:
-        raise ValueError(f'第 {line_no} 行 id="{attrs["id"]}" OP 缺少 path 参数')
+    allowed_params = OP_ALLOWED_HEAD_PARAMS[op_type]
+    actual_params = set(attrs) - {"op", "_line_no"}
+    unknown_params = actual_params - allowed_params
+
+    if unknown_params:
+        names = "、".join(sorted(unknown_params))
+        raise ValueError(
+            f'第 {line_no} 行 id="{attrs["id"]}" {op_type} '
+            f"包含不允许的 OP 头参数：{names}。"
+            "路径、目标路径和源码锚点必须使用对应的 boundary 文本块。"
+        )
 
     return attrs
 
@@ -134,43 +155,80 @@ def ensure_no_duplicate_block(op, key, line_no):
         )
 
 
+def validate_required_source_text(op, key, block_name, op_index):
+    if key not in op:
+        return
+
+    if op[key] == "":
+        raise ValueError(
+            f'第 {op_index} 个 id="{op["id"]}" {op["op"]} '
+            f"的 {block_name} 文本块不能为空"
+        )
+
+
 def validate_completed_op(op, op_index):
     op_type = op["op"]
     op_id = op["id"]
 
-    if op_type in ("write_file", "append_text", "replace_between"):
-        if "content" not in op:
-            raise ValueError(f'第 {op_index} 个 id="{op_id}" {op_type} 缺少 ---CONTENT 文本块')
+    required_blocks = OP_REQUIRED_TEXT_BLOCKS[op_type]
+    present_blocks = {
+        block_key
+        for block_key in PATCH_TEXT_BLOCK_STARTERS.values()
+        if block_key in op
+    }
 
-        if "old" in op or "new" in op:
-            raise ValueError(f'第 {op_index} 个 id="{op_id}" {op_type} 不允许包含 ---OLD 或 ---NEW')
+    missing_blocks = required_blocks - present_blocks
+    unexpected_blocks = present_blocks - required_blocks
 
-        if op_type == "replace_between" and "include_markers" in op:
-            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_between 已固定包含 start_marker 和 end_marker，不允许 include_markers 参数')
+    if missing_blocks:
+        block_names = "、".join(
+            key
+            for marker, key in PATCH_TEXT_BLOCK_STARTERS.items()
+            if key in missing_blocks
+        )
+        raise ValueError(
+            f'第 {op_index} 个 id="{op_id}" {op_type} '
+            f"缺少必要文本块：{block_names}"
+        )
 
-    elif op_type == "replace_exact":
-        if "old" not in op:
-            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_exact 缺少 ---OLD 文本块')
+    if unexpected_blocks:
+        block_names = "、".join(
+            key
+            for marker, key in PATCH_TEXT_BLOCK_STARTERS.items()
+            if key in unexpected_blocks
+        )
+        raise ValueError(
+            f'第 {op_index} 个 id="{op_id}" {op_type} '
+            f"包含不允许的文本块：{block_names}"
+        )
 
-        if "new" not in op:
-            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_exact 缺少 ---NEW 文本块')
+    validate_required_source_text(op, "path", "---PATH", op_index)
+    validate_required_source_text(op, "new_path", "---NEW_PATH", op_index)
+    validate_required_source_text(
+        op,
+        "start_marker",
+        "---START_MARKER",
+        op_index,
+    )
+    validate_required_source_text(
+        op,
+        "end_marker",
+        "---END_MARKER",
+        op_index,
+    )
+    validate_required_source_text(op, "old", "---OLD", op_index)
 
-        if "count" not in op:
-            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_exact 必须显式声明 count')
-
+    if op_type == "replace_exact":
         parse_required_positive_int(op.get("count"), "count")
 
-        if "content" in op:
-            raise ValueError(f'第 {op_index} 个 id="{op_id}" replace_exact 不允许包含 ---CONTENT 文本块')
 
-    elif op_type in PATH_ONLY_OPS:
-        if "content" in op or "old" in op or "new" in op:
-            raise ValueError(f'第 {op_index} 个 id="{op_id}" {op_type} 不允许包含正文文本块')
-
-
-def parse_patch_v2(text: str):
+def parse_patch_v3(text: str):
     """
-    V2 状态机解析器。
+    V3 状态机解析器。
+
+    所有取自文件系统或源代码、必须保持原文语义的执行要素，
+    都通过 boundary 文本块读取。OP 头只保留受严格字符集、整数
+    或枚举约束的结构参数。
     """
     lines = split_lines_keep_text(text)
 
@@ -201,8 +259,9 @@ def parse_patch_v2(text: str):
                 continue
 
             raise ValueError(
-                f"第 {idx} 行不是 V2 修改包开始行。"
-                f"首个非空行必须是 <<AI_FILE_PATCH_V2 boundary=\"...\">>"
+                f"第 {idx} 行不是 V3 修改包开始行。"
+                f"首个非空行必须是 <<{PATCH_PROTOCOL_NAME} "
+                f'boundary="{PATCH_BOUNDARY_PREFIX}...">>'
             )
 
         if state == "STRUCT":
@@ -218,7 +277,8 @@ def parse_patch_v2(text: str):
                 if current_op is not None:
                     raise ValueError(
                         f'第 {idx} 行遇到包结束标记，但 id="{current_op.get("id", "")}" '
-                        f"操作尚未 ---END_OP：操作开始于第 {current_op.get('_line_no', '?')} 行"
+                        f"操作尚未 ---END_OP："
+                        f"操作开始于第 {current_op.get('_line_no', '?')} 行"
                     )
 
                 seen_end = True
@@ -229,7 +289,8 @@ def parse_patch_v2(text: str):
                 if current_op is not None:
                     raise ValueError(
                         f'第 {idx} 行出现新 OP，但 id="{current_op.get("id", "")}" '
-                        f"上一个 OP 尚未 ---END_OP：上一个操作开始于第 {current_op.get('_line_no', '?')} 行"
+                        f"上一个 OP 尚未 ---END_OP："
+                        f"上一个操作开始于第 {current_op.get('_line_no', '?')} 行"
                     )
 
                 current_op = parse_op_line(stripped, idx)
@@ -242,19 +303,13 @@ def parse_patch_v2(text: str):
                 block_key = PATCH_TEXT_BLOCK_STARTERS[stripped]
                 op_type = current_op["op"]
                 op_id = current_op["id"]
+                allowed_blocks = OP_REQUIRED_TEXT_BLOCKS[op_type]
 
-                if op_type in PATH_ONLY_OPS:
-                    raise ValueError(f'第 {idx} 行 id="{op_id}" {op_type} 不允许包含文本块')
-
-                if block_key == "content" and op_type not in (
-                    "write_file",
-                    "append_text",
-                    "replace_between",
-                ):
-                    raise ValueError(f'第 {idx} 行 id="{op_id}" {op_type} 不允许使用 ---CONTENT')
-
-                if block_key in ("old", "new") and op_type != "replace_exact":
-                    raise ValueError(f'第 {idx} 行 id="{op_id}" {op_type} 不允许使用 {stripped}')
+                if block_key not in allowed_blocks:
+                    raise ValueError(
+                        f'第 {idx} 行 id="{op_id}" {op_type} '
+                        f"不允许使用 {stripped}"
+                    )
 
                 ensure_no_duplicate_block(current_op, block_key, idx)
 
@@ -271,6 +326,7 @@ def parse_patch_v2(text: str):
                 validate_completed_op(current_op, op_index)
 
                 op_id = current_op["id"]
+
                 if op_id in seen_op_ids:
                     raise ValueError(
                         f'第 {op_index} 个操作 id 重复：id="{op_id}"。'
@@ -284,7 +340,8 @@ def parse_patch_v2(text: str):
 
             raise ValueError(
                 f"第 {idx} 行结构区出现非法内容：{line}\n"
-                "结构区只允许空行、---OP、---CONTENT、---OLD、---NEW、---END_OP、包结束标记。"
+                "结构区只允许空行、---OP、协议定义的文本块、"
+                "---END_OP 和包结束标记。"
             )
 
         if state == "IN_BLOCK":
@@ -292,7 +349,9 @@ def parse_patch_v2(text: str):
                 if current_op is None or current_block_key is None:
                     raise ValueError(f"第 {idx} 行内部状态错误：文本块无所属 OP")
 
-                current_op[current_block_key] = join_text_block(current_block_lines)
+                current_op[current_block_key] = join_text_block(
+                    current_block_lines
+                )
                 current_block_key = None
                 current_block_lines = []
                 state = "STRUCT"
@@ -308,15 +367,16 @@ def parse_patch_v2(text: str):
             raise ValueError(f"第 {idx} 行包结束标记之后仍有非空内容：{line}")
 
     if state == "WAIT_START":
-        raise ValueError("未找到 V2 修改包开始标记")
+        raise ValueError("未找到 V3 修改包开始标记")
 
     if state == "IN_BLOCK":
         raise ValueError(
-            f'文本块未用 boundary 单独成行结束。'
-            f'当前文本块：{current_block_key}；'
+            "文本块未用 boundary 单独成行结束。"
+            f"当前文本块：{current_block_key}；"
             f'所属操作 id="{current_op.get("id", "") if current_op else ""}"；'
-            f'所属操作开始于第 {current_op.get("_line_no", "?") if current_op else "?"} 行；'
-            f'期望 boundary：{boundary}'
+            f"所属操作开始于第 "
+            f'{current_op.get("_line_no", "?") if current_op else "?"} 行；'
+            f"期望 boundary：{boundary}"
         )
 
     if state == "STRUCT":
@@ -324,7 +384,7 @@ def parse_patch_v2(text: str):
             raise ValueError(
                 f'修改包结束前仍有未关闭 OP：id="{current_op.get("id", "")}"，'
                 f"操作开始于第 {current_op.get('_line_no', '?')} 行，"
-                f"缺少 ---END_OP 或包结束标记位置错误"
+                "缺少 ---END_OP 或包结束标记位置错误"
             )
 
         if not seen_end:
@@ -334,7 +394,7 @@ def parse_patch_v2(text: str):
         raise ValueError("修改包中没有任何操作")
 
     return {
-        "version": "2.0",
+        "version": "3.0",
         "boundary": boundary,
         "operations": operations,
     }

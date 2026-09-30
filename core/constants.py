@@ -104,7 +104,11 @@ SKIPPED_LOG_FILENAME = "_RESTORE_SKIPPED_FILES_.log"
 
 # --- 修改包执行器协议常量 ---
 
-PATCH_END = "<</AI_FILE_PATCH_V2>>"
+PATCH_PROTOCOL_NAME = "ZIPATCH_V3"
+PATCH_BOUNDARY_PREFIX = "ZIPATCH_BOUNDARY_"
+PATCH_START_PREFIX = f"<<{PATCH_PROTOCOL_NAME}"
+PATCH_END = f"<</{PATCH_PROTOCOL_NAME}>>"
+PATCH_PROTOCOL_DESCRIPTION = f"{PATCH_PROTOCOL_NAME} 动态 boundary 原文块协议"
 
 SUPPORTED_PATCH_OPS = {
     "write_file",
@@ -123,6 +127,10 @@ SUPPORTED_PATCH_OPS = {
 }
 
 PATCH_TEXT_BLOCK_STARTERS = {
+    "---PATH": "path",
+    "---NEW_PATH": "new_path",
+    "---START_MARKER": "start_marker",
+    "---END_MARKER": "end_marker",
     "---CONTENT": "content",
     "---OLD": "old",
     "---NEW": "new",

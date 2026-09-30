@@ -21,7 +21,7 @@ DUAL_PATH_OPS = {
     "copy_dir",
 }
 
-PATH_ONLY_OPS = {
+NON_CONTENT_OPS = {
     "delete_file",
     "delete_dir",
     "rename_file",
@@ -33,6 +33,43 @@ PATH_ONLY_OPS = {
     "create_dir",
 }
 
+OP_ALLOWED_HEAD_PARAMS = {
+    "write_file": {"id", "if_exists"},
+    "append_text": {"id"},
+    "replace_between": {"id"},
+    "replace_exact": {"id", "count"},
+    "delete_file": {"id"},
+    "delete_dir": {"id"},
+    "rename_file": {"id", "if_exists"},
+    "move_file": {"id", "if_exists"},
+    "copy_file": {"id", "if_exists"},
+    "rename_dir": {"id", "if_exists"},
+    "move_dir": {"id", "if_exists"},
+    "copy_dir": {"id", "if_exists"},
+    "create_dir": {"id", "if_exists"},
+}
+
+OP_REQUIRED_TEXT_BLOCKS = {
+    "write_file": {"path", "content"},
+    "append_text": {"path", "content"},
+    "replace_between": {
+        "path",
+        "start_marker",
+        "end_marker",
+        "content",
+    },
+    "replace_exact": {"path", "old", "new"},
+    "delete_file": {"path"},
+    "delete_dir": {"path"},
+    "rename_file": {"path", "new_path"},
+    "move_file": {"path", "new_path"},
+    "copy_file": {"path", "new_path"},
+    "rename_dir": {"path", "new_path"},
+    "move_dir": {"path", "new_path"},
+    "copy_dir": {"path", "new_path"},
+    "create_dir": {"path"},
+}
+
 
 def parse_required_positive_int(value, name="整数"):
     if value is None:
@@ -40,7 +77,7 @@ def parse_required_positive_int(value, name="整数"):
 
     try:
         number = int(str(value).strip())
-    except Exception:
+    except (TypeError, ValueError):
         raise ValueError(f"{name} 非法：{value}")
 
     if number < 1:

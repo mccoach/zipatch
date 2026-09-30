@@ -155,7 +155,7 @@ class PatchPanel(BasePanel):
         )
         add_tooltip(
             mode_row.winfo_children()[-1],
-            "执行 AI V2 修改包。必须先 Dry Run 预演，确认校验结果后再执行。",
+            "执行 Zipatch V3 修改包。必须先 Dry Run 预演，确认校验结果后再执行。",
         )
         mode_row.winfo_children()[-1].pack(side="left", padx=(0, 24))
 
@@ -253,7 +253,7 @@ class PatchPanel(BasePanel):
 
         self.patch_text = create_managed_text_box(
             parent=left,
-            label_text="粘贴 AI V2 修改包",
+            label_text="粘贴 Zipatch V3 修改包",
             initial_value=self.cfg.get("patch_text", ""),
             height=22,
             mono=True,
@@ -443,7 +443,7 @@ class PatchPanel(BasePanel):
         file_path = filedialog.askopenfilename(
             title="选择修改包协议规范 Markdown 源文档",
             initialdir=initial_dir,
-            initialfile=Path(current_path).name if current_path else "Zipatch_V2_修改包协议规范.md",
+            initialfile=Path(current_path).name if current_path else "Zipatch_V3_修改包协议规范.md",
             filetypes=[
                 ("Markdown Documents", "*.md"),
                 ("All Files", "*.*"),
@@ -777,47 +777,6 @@ class PatchPanel(BasePanel):
             return "备份还原"
         return "执行修改"
 
-    def extract_preview_failure_summary(self, preview_text, max_items=3):
-        """
-        从 Dry Run 结果文本中提取失败原因摘要，用于弹窗快速提示。
-
-        完整详情仍以右侧结果区为准；弹窗只承担“当前阶段关键错误不丢失”的提示职责。
-        """
-        reasons = []
-        lines = (preview_text or "").splitlines()
-
-        for index, line in enumerate(lines):
-            if line.strip() != "失败原因：":
-                continue
-
-            collected = []
-
-            for item in lines[index + 1:]:
-                value = item.strip()
-
-                if not value:
-                    if collected:
-                        break
-                    continue
-
-                if value in ("修改包定位：", "请在修改包中搜索：", "请在修改包中搜索以下 OP 头："):
-                    break
-
-                collected.append(value)
-
-            if collected:
-                reasons.append(" ".join(collected))
-
-            if len(reasons) >= max_items:
-                break
-
-        if not reasons:
-            return "请查看右侧结果区中的校验失败详情。"
-
-        return "\n".join(
-            f"{index}. {reason}"
-            for index, reason in enumerate(reasons, 1)
-        )
 
     def append_result(self, title, text):
         old_text = get_text_value(self.result_text).rstrip()
@@ -1234,21 +1193,27 @@ class PatchPanel(BasePanel):
                 if not for_execution:
                     safe_show_info(
                         "Dry Run 完成",
-                        "V2 修改包全部校验通过。请查看预演结果，确认无误后再执行。",
+                        "V3 修改包全部校验通过。请查看预演结果，确认无误后再执行。",
                         parent=self.root,
                     )
 
                 return True
 
-            failure_message = (
-                "修改包存在校验失败项，请先查看并修正。\n\n"
-                f"校验成功：{result.success_count}\n"
-                f"校验失败：{result.failed_count}\n"
-                f"全局冲突：{'有' if result.has_global_errors else '无'}\n\n"
-                "失败原因摘要：\n"
-                f"{self.extract_preview_failure_summary(result.preview_text)}\n\n"
-                "完整详情请查看右侧结果区。"
-            )
+            if result.has_global_errors:
+                failure_message = (
+                    "Dry Run 未通过。\n\n"
+                    "全局校验：不通过\n"
+                    "最终可执行 OP：0\n\n"
+                    "完整详情请查看右侧【预演 / 执行结果】。"
+                )
+            else:
+                failure_message = (
+                    "Dry Run 部分通过。\n\n"
+                    f"单项校验通过：{result.success_count}\n"
+                    f"单项校验失败：{result.failed_count}\n"
+                    f"最终可执行 OP：{result.success_count}\n\n"
+                    "完整详情请查看右侧【预演 / 执行结果】。"
+                )
 
             if (
                 for_execution
@@ -1258,9 +1223,7 @@ class PatchPanel(BasePanel):
                 return safe_ask_yes_no(
                     "部分执行确认",
                     failure_message
-                    + "\n\n当前错误不属于致命全局冲突。"
-                    + "\n可以跳过校验失败的 OP，只执行校验成功的 OP。"
-                    + "\n\n是否继续执行校验成功的 OP？",
+                    + "\n\n是否跳过失败的 OP，只执行通过单项校验的 OP？",
                     parent=self.root,
                     icon="warning",
                 )
@@ -1285,7 +1248,12 @@ class PatchPanel(BasePanel):
 
             self.set_status("Dry Run 失败")
             self.log(f"修改包 Dry Run 失败：{e}")
-            safe_show_error("Dry Run 失败", str(e), parent=self.root)
+            safe_show_error(
+                "Dry Run 失败",
+                "Dry Run 未能完成。\n\n"
+                "完整错误信息请查看右侧【预演 / 执行结果】。",
+                parent=self.root,
+            )
             return False
 
     def apply(self):
@@ -1379,4 +1347,9 @@ class PatchPanel(BasePanel):
 
             self.set_status("修改包执行失败")
             self.log(f"修改包执行失败：{e}")
-            safe_show_error("执行失败", str(e), parent=self.root)
+            safe_show_error(
+                "执行失败",
+                "修改包执行未能完成。\n\n"
+                "完整错误信息请查看右侧【预演 / 执行结果】。",
+                parent=self.root,
+            )

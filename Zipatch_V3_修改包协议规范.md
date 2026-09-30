@@ -1,20 +1,4 @@
-# -*- coding: utf-8 -*-
-
-"""
-内置修改包协议规范文档。
-
-说明：
-- 本文件由开发模式下的“从 Markdown 更新”功能自动生成；
-- 本文件是运行时唯一读取源；
-- 程序封装为 exe 后仍可稳定读取；
-- 请不要手工编辑本文件，请维护 Markdown 源文档后重新同步。
-"""
-
-PATCH_PROTOCOL_DOC_SOURCE_PATH = 'E:\\AppProject\\Zipatch\\Zipatch_V3_修改包协议规范.md'
-PATCH_PROTOCOL_DOC_SOURCE_SHA256 = ''
-PATCH_PROTOCOL_DOC_UPDATED_AT = '2026-09-30 16:57:58'
-
-PATCH_PROTOCOL_DOC_TEXT = r'''# Zipatch V3 修改包协议规范
+# Zipatch V3 修改包协议规范
 
 当前版本：V3.0
 
@@ -790,4 +774,3 @@ ZIPATCH_BOUNDARY_EXAMPLE_20260930164800_A1B2C3D4E5F6
 ---END_OP
 <</ZIPATCH_V3>>
 ```
-'''

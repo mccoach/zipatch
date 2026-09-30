@@ -5,7 +5,7 @@
 
 
 # ============================================================
-# 1. Python cache / bytecode
+# 1. Python cache / compiled bytecode
 # ============================================================
 
 __pycache__/
@@ -34,6 +34,7 @@ virtualenv/
 build/
 dist/
 downloads/
+develop-eggs/
 eggs/
 .eggs/
 parts/
@@ -41,6 +42,7 @@ sdist/
 var/
 wheels/
 share/python-wheels/
+pip-wheel-metadata/
 
 *.egg-info/
 .installed.cfg
@@ -49,7 +51,7 @@ MANIFEST
 
 
 # ============================================================
-# 4. PyInstaller / executable packaging artifacts
+# 4. PyInstaller artifacts
 # ============================================================
 
 *.spec
@@ -59,32 +61,39 @@ MANIFEST
 *.pyz
 *.pyzw
 
-# PyInstaller temporary/build output
-*.log
-*.tmp
-*.temp
-
 
 # ============================================================
-# 5. Test / coverage / type-check cache
+# 5. Test / coverage artifacts
 # ============================================================
 
 .pytest_cache/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 .tox/
 .nox/
+.hypothesis/
+junit.xml
+test-results/
+
+
+# ============================================================
+# 6. Linter / formatter / type-check caches
+# ============================================================
+
 .cache/
 .mypy_cache/
 .pyre/
 .pytype/
+.pyright/
 .ruff_cache/
-.hypothesis/
+.dmypy.json
+dmypy.json
 
 
 # ============================================================
-# 6. IDE / editor files
+# 7. IDE / editor files
 # ============================================================
 
 .vscode/
@@ -96,15 +105,17 @@ htmlcov/
 *.swp
 *.swo
 *~
+.vim/
 
 
 # ============================================================
-# 7. OS generated files
+# 8. OS-generated files
 # ============================================================
 
 .DS_Store
 .AppleDouble
 .LSOverride
+._*
 
 Thumbs.db
 Thumbs.db:encryptable
@@ -115,19 +126,24 @@ $RECYCLE.BIN/
 
 
 # ============================================================
-# 8. Logs / runtime output
+# 9. Logs / temporary runtime output
 # ============================================================
 
 logs/
 log/
+tmp/
+temp/
+
 *.log
 *.out
 *.err
 *.trace
+*.tmp
+*.temp
 
 
 # ============================================================
-# 9. Local config / secrets / environment files
+# 10. Local configuration / secrets
 # ============================================================
 
 .env
@@ -135,47 +151,57 @@ log/
 *.env
 *.local
 *.secret
+
 secrets.json
 secret.json
 credentials.json
 token.json
 
+# Local Python version selection
+.python-version
+
 
 # ============================================================
-# 10. App local data / user generated runtime files
+# 11. Zipatch local application data
 # ============================================================
 
-# 如果这些文件是用户本机运行时产生的配置或历史记录，保护隐私信息，建议忽略。
-# zipatch_config.json 保存本机路径、历史输入、收藏、修改包内容和运行结果，不应提交。
+# 保存本机路径、历史输入、收藏、修改包内容和执行结果，
+# 属于用户本地数据，不应提交到仓库。
 zipatch_config.json
 
-# Shared config template
+# 如以后添加可共享的配置模板，应允许提交。
 !zipatch_config.example.json
 
+
+# ============================================================
+# 12. Backup / recovery files
+# ============================================================
+
 *.bak
+*.bak1
+*.bak2
 *.backup
 *.orig
 *.old
 
 backup/
 backups/
-tmp/
-temp/
-.cache/
 
 
 # ============================================================
-# 11. Database / local storage
+# 13. Databases / local storage
 # ============================================================
 
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 *.db
 *.db-journal
 
 
 # ============================================================
-# 12. Archives / compressed files
+# 14. Archives / compressed files
 # ============================================================
 
 *.zip
@@ -184,22 +210,29 @@ temp/
 *.tar
 *.tar.gz
 *.tgz
+*.gz
 
 
 # ============================================================
-# 13. Installer / binary outputs
+# 15. Installer / binary outputs
 # ============================================================
 
 *.exe
 *.msi
 *.dmg
-*.pkg
 *.app
 *.AppImage
 
 
 # ============================================================
-# 14. Keep project source and resources
+# 16. Notebook artifacts
+# ============================================================
+
+.ipynb_checkpoints/
+
+
+# ============================================================
+# 17. Keep project source and resources
 # ============================================================
 
 # Explicitly keep source files
@@ -215,5 +248,5 @@ temp/
 !assets/*.png
 wechat_qr.png
 
-# Local archives / AI patch backups
+# Zipatch 自动生成的修改包备份和本地归档
 99_归档/

@@ -5,7 +5,7 @@ from pathlib import Path
 from services.patch_backup import resolve_backup_base_dir
 from services.patch_executor import PatchExecutor
 from services.patch_models import PatchPreviewResult, PatchApplyResult
-from services.patch_parser import parse_patch_v2
+from services.patch_parser import parse_patch_v3
 from services.patch_restore import (
     apply_backup_restore_with_executor,
     preview_backup_restore_with_executor,
@@ -26,9 +26,9 @@ def preview_patch(
         raise ValueError(f"项目根目录不存在或不是目录：{project_root}")
 
     if not patch_text.strip():
-        raise ValueError("请先粘贴 AI V2 修改包")
+        raise ValueError("请先粘贴 Zipatch V3 修改包")
 
-    patch = parse_patch_v2(patch_text)
+    patch = parse_patch_v3(patch_text)
 
     executor = PatchExecutor(
         root,

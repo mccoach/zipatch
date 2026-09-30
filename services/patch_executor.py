@@ -4,7 +4,7 @@ import re
 import shutil
 from pathlib import Path
 
-from core.constants import SUPPORTED_PATCH_OPS
+from core.constants import PATCH_PROTOCOL_DESCRIPTION, SUPPORTED_PATCH_OPS
 from core.path_validation import safe_join, normalize_rel_path
 from core.text_io import read_text_auto, write_text_utf8
 from services.patch_backup import (
@@ -97,8 +97,8 @@ class PatchExecutor:
         if not isinstance(patch, dict):
             raise ValueError("内部修改包对象非法")
 
-        if patch.get("version") != "2.0":
-            raise ValueError("仅支持 V2 动态 boundary 修改包")
+        if patch.get("version") != "3.0":
+            raise ValueError("仅支持 V3 动态 boundary 修改包")
 
         ops = patch.get("operations")
 
@@ -328,8 +328,8 @@ class PatchExecutor:
         if not isinstance(patch, dict):
             raise ValueError("内部修改包对象非法")
 
-        if patch.get("version") != "2.0":
-            raise ValueError("仅支持 V2 动态 boundary 修改包")
+        if patch.get("version") != "3.0":
+            raise ValueError("仅支持 V3 动态 boundary 修改包")
 
         ops = patch.get("operations")
 
@@ -840,7 +840,7 @@ class PatchExecutor:
             self.backup_root.mkdir(parents=True, exist_ok=True)
 
         self.log("【开始执行修改包】")
-        self.log("协议版本：AI_FILE_PATCH_V2 动态 boundary 原文块协议")
+        self.log(f"协议版本：{PATCH_PROTOCOL_DESCRIPTION}")
         self.log(f"项目根目录：{self.root}")
 
         if self.backup_enabled:

@@ -350,21 +350,25 @@ def normalize_rel_path(rel_path: str):
 
     这是修改包内相对路径安全规则的唯一入口：
     - path 必须是非空字符串；
+    - 路径原文来自 boundary 文本块，不擅自清除首尾空白；
     - 禁止绝对路径；
     - 禁止 Windows 盘符路径；
     - 禁止 .. 路径穿越；
     - 内部统一使用 / 作为协议路径分隔符。
     """
-    if not isinstance(rel_path, str) or not rel_path.strip():
+    if not isinstance(rel_path, str) or not rel_path:
         raise ValueError("path 必须是非空字符串")
 
-    rel_path = rel_path.replace("\\", "/").strip()
+    rel_path = rel_path.replace("\\", "/")
 
     if rel_path.startswith("/") or rel_path.startswith("\\"):
         raise ValueError(f"不允许绝对路径：{rel_path}")
 
     if len(rel_path) >= 2 and rel_path[1] == ":":
         raise ValueError(f"不允许 Windows 盘符绝对路径：{rel_path}")
+
+    if "*" in rel_path or "?" in rel_path:
+        raise ValueError(f"不允许路径包含通配符：{rel_path}")
 
     parts = Path(rel_path).parts
 
