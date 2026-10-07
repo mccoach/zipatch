@@ -164,8 +164,8 @@ def styled_text_with_scrollbars(
         bd=4,
         font=font,
         undo=not readonly,
-        maxundo=-1,
-        autoseparators=True,
+        maxundo=0 if readonly else -1,
+        autoseparators=not readonly,
     )
 
     y_scroll = tk.Scrollbar(
@@ -202,15 +202,3 @@ def styled_text_with_scrollbars(
 
     return outer, text
 
-
-def styled_scrolled_text(parent, height, mono=False, wrap="word"):
-    """
-    兼容旧调用。
-    """
-    return styled_text_with_scrollbars(
-        parent,
-        height=height,
-        mono=mono,
-        wrap=wrap,
-        readonly=False,
-    )

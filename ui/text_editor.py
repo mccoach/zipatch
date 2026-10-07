@@ -31,6 +31,7 @@ class TextEditorController:
         enable_replace=True,
         enable_undo=True,
         readonly=False,
+        on_content_changed=None,
     ):
         self.parent = parent
         self.toolbar_parent = toolbar_parent
@@ -40,6 +41,7 @@ class TextEditorController:
         self.enable_replace = enable_replace
         self.enable_undo = enable_undo
         self.readonly = readonly
+        self.on_content_changed = on_content_changed
 
         self.find_var = tk.StringVar()
         self.replace_var = tk.StringVar()
@@ -153,18 +155,28 @@ class TextEditorController:
             self.replace_entry.bind("<Shift-Return>", self.find_prev)
             self.replace_entry.bind("<Escape>", self.hide_search_bar)
 
+    def content_completed(self, prepared_text=None):
+        if self.on_content_changed is not None:
+            self.on_content_changed(prepared_text)
+
     def undo(self, event=None):
         try:
             self.text_widget.edit_undo()
-        except TclError:
-            pass
+        except TclError as error:
+            if "nothing to undo" not in str(error).lower():
+                raise
+        else:
+            self.content_completed()
         return "break"
 
     def redo(self, event=None):
         try:
             self.text_widget.edit_redo()
-        except TclError:
-            pass
+        except TclError as error:
+            if "nothing to redo" not in str(error).lower():
+                raise
+        else:
+            self.content_completed()
         return "break"
 
     def clear_search_highlight(self):
@@ -303,15 +315,19 @@ class TextEditorController:
             return self.find_next()
 
         start, end = ranges[0], ranges[1]
+        replacement = self.replace_var.get()
+
+        if self.text_widget.get(start, end) == replacement:
+            return self.find_next()
 
         self.text_widget.edit_separator()
         self.text_widget.delete(start, end)
-        self.text_widget.insert(start, self.replace_var.get())
+        self.text_widget.insert(start, replacement)
         self.text_widget.edit_separator()
 
         self.search_state["current_start"] = None
         self.highlight_all_matches()
-
+        self.content_completed()
         return self.find_next()
 
     def replace_all(self, event=None):
@@ -324,21 +340,24 @@ class TextEditorController:
         if not keyword:
             return "break"
 
-        content = get_text_value(self.text_widget)
+        binding = getattr(self.text_widget, "_config_binding", None)
+        content = (
+            binding.read_current_value()
+            if binding is not None else get_text_value(self.text_widget)
+        )
         count = content.count(keyword)
 
-        if count <= 0:
+        if count <= 0 or keyword == replacement:
             self.highlight_all_matches()
             return "break"
 
-        replace_text_keep_undo(
-            self.text_widget,
-            content.replace(keyword, replacement),
-        )
+        final_content = content.replace(keyword, replacement)
+        replace_text_keep_undo(self.text_widget, final_content)
 
         self.search_state["current_start"] = None
         self.highlight_all_matches()
 
+        self.content_completed(final_content)
         return "break"
 
     def on_find_text_changed(self, *_):

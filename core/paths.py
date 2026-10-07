@@ -82,31 +82,24 @@ def raise_and_focus(win):
 
 
 def open_path_with_default_app(path, parent=None):
+    from core.message_utils import safe_show_error
+
+    if not path:
+        safe_show_error("打开失败", "路径为空。", parent)
+        return
     try:
-        if not path:
-            messagebox.showerror("打开失败", "路径为空。", parent=parent)
+        absolute = Path(path).resolve()
+        if not absolute.exists():
+            safe_show_error("打开失败", f"路径不存在：\n{absolute}", parent)
             return
-
-        abs_path = Path(path).resolve()
-
-        if not abs_path.exists():
-            messagebox.showerror("打开失败", f"路径不存在：\n{abs_path}", parent=parent)
-            return
-
         if sys.platform == "win32":
-            os.startfile(str(abs_path))
+            os.startfile(str(absolute))
         elif sys.platform == "darwin":
-            subprocess.run(["open", str(abs_path)], check=False)
+            subprocess.run(["open", str(absolute)], check=True)
         else:
-            subprocess.run(["xdg-open", str(abs_path)], check=False)
-
-    except TclError:
-        print(f"[打开失败] {path}", file=sys.stderr)
-    except Exception as e:
-        try:
-            messagebox.showerror("打开失败", f"无法自动打开：\n{path}\n\n错误：{e}", parent=parent)
-        except TclError:
-            print(f"[打开失败] {path}: {e}", file=sys.stderr)
+            subprocess.run(["xdg-open", str(absolute)], check=True)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        safe_show_error("打开失败", f"无法自动打开：\n{path}\n\n错误：{error}", parent)
 
 
 def get_initial_dir_from_path(path):

@@ -1,126 +1,365 @@
 # -*- coding: utf-8 -*-
 
 import json
+import os
 import sys
+from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from time import perf_counter
 
 from core.constants import DEFAULT_CONFIG
 from core.paths import get_config_path
 
 
+RESULT_TEXT_MAX_CHARS = 500_000
+RESULT_TRUNCATION_NOTICE = "【结果内容过长，已仅保留末尾部分】\n\n"
+
+
+def limit_result_text(text):
+    if len(text) <= RESULT_TEXT_MAX_CHARS:
+        return text
+    keep = RESULT_TEXT_MAX_CHARS - len(RESULT_TRUNCATION_NOTICE)
+    return RESULT_TRUNCATION_NOTICE + text[-keep:]
+
+
 def deep_merge_config(defaults, user_config):
-    """
-    按默认配置重建用户配置。
-
-    规则：
-    1. 默认配置中存在、用户配置缺失的字段：按默认值补齐；
-    2. 默认配置中存在、用户配置也存在的字段：保留用户值；
-    3. 默认配置中不存在的旧字段：自动删除；
-    4. 嵌套 dict 递归执行同一规则。
-
-    这一步是配置的唯一清理入口：
-    - 不做旧字段兼容；
-    - 不保留废弃配置；
-    - 最终保存出的配置只包含当前版本唯一有效的配置结构。
-    """
+    """按当前结构重建配置；所有可变值归本次配置实例所有。"""
+    source = user_config if isinstance(user_config, dict) else {}
     result = {}
-    user_config = user_config if isinstance(user_config, dict) else {}
 
-    for key, default_value in defaults.items():
-        user_value = user_config.get(key)
+    for key, default in defaults.items():
+        value = source.get(key, default)
 
-        if isinstance(default_value, dict):
-            if not default_value and isinstance(user_value, dict):
-                result[key] = user_value
+        if isinstance(default, dict):
+            if not default:
+                result[key] = deepcopy(value) if isinstance(value, dict) else {}
             else:
-                result[key] = deep_merge_config(
-                    default_value,
-                    user_value if isinstance(user_value, dict) else {},
-                )
-        elif key in user_config:
-            result[key] = user_value
+                result[key] = deep_merge_config(default, value)
+        elif isinstance(default, bool):
+            result[key] = value if isinstance(value, bool) else default
+        elif isinstance(default, int):
+            result[key] = value if type(value) is int else default
+        elif isinstance(default, str):
+            result[key] = value if isinstance(value, str) else default
+        elif isinstance(default, list):
+            result[key] = deepcopy(value) if isinstance(value, list) else deepcopy(default)
         else:
-            result[key] = default_value
+            result[key] = deepcopy(value)
 
     return result
 
 
-def load_user_config():
-    path = get_config_path()
-
-    if not path.exists():
-        return deep_merge_config(DEFAULT_CONFIG, {})
-
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            user_config = json.load(f)
-
-        return deep_merge_config(DEFAULT_CONFIG, user_config)
-
-    except Exception as e:
-        print(f"[配置] 读取失败，使用默认配置：{e}", file=sys.stderr)
-        return deep_merge_config(DEFAULT_CONFIG, {})
-
-
-def save_user_config(config):
-    path = get_config_path()
-
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-        print(f"[配置] 已保存：{path}")
-    except Exception as e:
-        print(f"[配置] 保存失败：{e}", file=sys.stderr)
-
-
 def normalize_feature_order(config_data, feature_registry):
-    """
-    修复功能标签顺序配置。
-
-    规则：
-    1. 移除已经不存在的功能 key；
-    2. 自动补上新增功能 key；
-    3. 如果配置为空，则按 default_order 生成；
-    4. 保证顺序稳定、可恢复。
-    """
-    config_data.setdefault("ui", {})
-
-    known_keys = set(feature_registry.keys())
-    saved_order = config_data["ui"].get("feature_order", [])
-
-    if not isinstance(saved_order, list):
-        saved_order = []
-
+    known = set(feature_registry)
+    order = config_data["ui"]["feature_order"]
     normalized = []
     seen = set()
 
-    for key in saved_order:
-        if key in known_keys and key not in seen:
+    if isinstance(order, list):
+        for key in order:
+            if isinstance(key, str) and key in known and key not in seen:
+                normalized.append(key)
+                seen.add(key)
+
+    for key, feature in sorted(
+        feature_registry.items(),
+        key=lambda pair: pair[1].get("default_order", 9999),
+    ):
+        if key not in seen:
             normalized.append(key)
-            seen.add(key)
 
-    missing = [
-        key
-        for key, item in sorted(
-            feature_registry.items(),
-            key=lambda pair: pair[1].get("default_order", 9999)
-        )
-        if key not in seen
-    ]
-
-    normalized.extend(missing)
-
-    if not normalized:
-        normalized = [
-            key
-            for key, item in sorted(
-                feature_registry.items(),
-                key=lambda pair: pair[1].get("default_order", 9999)
-            )
-        ]
-
+    changed = normalized != order
     config_data["ui"]["feature_order"] = normalized
 
-    active_mode = config_data.get("active_mode")
-    if active_mode not in known_keys:
+    if config_data["active_mode"] not in known:
         config_data["active_mode"] = normalized[0]
+        changed = True
+
+    return changed
+
+
+def normalize_config(config):
+    maximum = config["settings"]["entry_history_max_items"]
+    if type(maximum) is not int or maximum < 1:
+        maximum = DEFAULT_CONFIG["settings"]["entry_history_max_items"]
+    config["settings"]["entry_history_max_items"] = maximum
+
+    histories = {}
+    for key, values in config["entry_history"].items():
+        if not isinstance(key, str) or not isinstance(values, list):
+            continue
+        unique = []
+        for value in values:
+            if isinstance(value, str) and value and value not in unique:
+                unique.append(value)
+        # 删除最后一项后的空列表也是有效历史状态，不在重启时反复修复。
+        histories[key] = unique[:maximum]
+    config["entry_history"] = histories
+
+    for key, values in config["favorites"].items():
+        config["favorites"][key] = [
+            {"name": value["name"], "content": value["content"]}
+            for value in values
+            if isinstance(value, dict)
+            and isinstance(value.get("name"), str)
+            and isinstance(value.get("content"), str)
+        ]
+
+    if config["patch"]["patch_mode"] not in ("apply", "restore"):
+        config["patch"]["patch_mode"] = "apply"
+    if config["restore"]["existing_file_policy"] not in ("overwrite", "rename", "skip"):
+        config["restore"]["existing_file_policy"] = "overwrite"
+
+    config["patch"]["last_result_text"] = limit_result_text(
+        config["patch"]["last_result_text"]
+    )
+    return config
+
+
+def load_user_config(path=None):
+    """读取失败与内容损坏分开：文件系统故障不自动覆盖原文件。"""
+    path = Path(path) if path is not None else get_config_path()
+
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            source = json.load(stream)
+    except FileNotFoundError:
+        return normalize_config(deep_merge_config(DEFAULT_CONFIG, {})), True
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        print(f"[配置] 内容损坏，重建当前结构：{error}", file=sys.stderr)
+        return normalize_config(deep_merge_config(DEFAULT_CONFIG, {})), True
+
+    config = normalize_config(deep_merge_config(DEFAULT_CONFIG, source))
+    return config, config != source
+
+
+class SaveStatus(Enum):
+    UNCHANGED = "unchanged"
+    SAVED = "saved"
+    FAILED = "failed"
+    QUEUED = "queued"
+    DEFERRED = "deferred"
+
+
+@dataclass(frozen=True)
+class SaveResult:
+    status: SaveStatus
+    error: OSError | None = None
+
+    @property
+    def persisted(self):
+        """整个已接受配置已经确认持久化。排队和会话延后不是成功。"""
+        return self.status in (SaveStatus.UNCHANGED, SaveStatus.SAVED)
+
+    @property
+    def request_satisfied(self):
+        """普通操作无需写盘时，会话字段仍可按正式契约延后。"""
+        return self.persisted or self.status is SaveStatus.DEFERRED
+
+
+class ConfigSaveManager:
+    """唯一配置持久化入口。batch 合并请求，不承担配置回滚。"""
+
+    def __init__(self, config_data, path=None, needs_write=False):
+        self.config_data = config_data
+        self.path = Path(path) if path is not None else get_config_path()
+        self.last_save_error = None
+        self.last_cleanup_error = None
+        self.required_write = needs_write
+        self._pending = False
+        self._session_pending = False
+        self._batch_depth = 0
+        self._save_requested = False
+        self._include_session_requested = False
+        self._batch_aborted = False
+        self._batch_original_fields = {}
+        self._batch_original_pending = False
+        self._batch_original_session_pending = False
+        self.metrics = {
+            "save_requests": 0,
+            "json_generations": 0,
+            "write_attempts": 0,
+            "successful_replaces": 0,
+            "json_seconds": 0.0,
+            "compare_seconds": 0.0,
+            "write_seconds": 0.0,
+            "fsync_seconds": 0.0,
+            "replace_seconds": 0.0,
+        }
+        self._saved_snapshot = None if needs_write else self._serialize()
+        self.last_result = SaveResult(SaveStatus.UNCHANGED)
+
+    @property
+    def needs_save(self):
+        return self.required_write or self._pending
+
+    def accept(self, target, values, persist=True):
+        """接受准备完毕的字段；不接受尚未明确恢复的异常批次。"""
+        if self._batch_aborted:
+            raise RuntimeError("异常批次尚未恢复，禁止继续接受配置或保存。")
+
+        changes = {
+            key: value for key, value in values.items()
+            if key not in target or target[key] != value
+        }
+        if not changes:
+            return False
+
+        if self._batch_depth:
+            for key in changes:
+                identifier = (id(target), key)
+                if identifier not in self._batch_original_fields:
+                    exists = key in target
+                    original = deepcopy(target[key]) if exists else None
+                    self._batch_original_fields[identifier] = (
+                        target, key, exists, original,
+                    )
+
+        target.update(changes)
+        if persist:
+            self._pending = True
+        else:
+            self._session_pending = True
+        return True
+
+    def recover_aborted_batch(self):
+        """
+        调用方显式放弃异常批次，只恢复该批次实际修改过的字段。
+
+        batch 本身不自动回滚，不复制整份配置。
+        恢复完成前所有新接受和保存都被拒绝，防止夹带半成品。
+        """
+        if self._batch_depth:
+            raise RuntimeError("必须在最外层批次退出后恢复。")
+        if not self._batch_aborted:
+            return False
+
+        for target, key, existed, original in self._batch_original_fields.values():
+            if existed:
+                target[key] = original
+            else:
+                target.pop(key, None)
+
+        self._pending = self._batch_original_pending
+        self._session_pending = self._batch_original_session_pending
+        self._batch_original_fields.clear()
+        self._batch_aborted = False
+        self._save_requested = False
+        self._include_session_requested = False
+        return True
+
+    def _serialize(self):
+        start = perf_counter()
+        snapshot = json.dumps(
+            self.config_data,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        self.metrics["json_generations"] += 1
+        self.metrics["json_seconds"] += perf_counter() - start
+        return snapshot
+
+    def _write_snapshot(self, snapshot):
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        self.metrics["write_attempts"] += 1
+        self.last_cleanup_error = None
+
+        try:
+            start = perf_counter()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+                stream.write(snapshot)
+                stream.flush()
+                self.metrics["write_seconds"] += perf_counter() - start
+                start = perf_counter()
+                os.fsync(stream.fileno())
+                self.metrics["fsync_seconds"] += perf_counter() - start
+
+            start = perf_counter()
+            os.replace(temporary, self.path)
+            self.metrics["replace_seconds"] += perf_counter() - start
+        except OSError as error:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                self.last_cleanup_error = cleanup_error
+            self.last_save_error = error
+            # 已经尝试持久化的状态失败后属于待重试内容，
+            # 包括原本仅延后的会话字段；普通提交无需重新编辑即可重试。
+            self._pending = True
+            return SaveResult(SaveStatus.FAILED, error)
+
+        self.metrics["successful_replaces"] += 1
+        self._saved_snapshot = snapshot
+        self.required_write = False
+        self._pending = False
+        self._session_pending = False
+        self.last_save_error = None
+        return SaveResult(SaveStatus.SAVED)
+
+    def save(self, include_session=False):
+        self.metrics["save_requests"] += 1
+        if self._batch_aborted:
+            raise RuntimeError("异常批次尚未恢复，禁止保存半完成配置。")
+
+        if self._batch_depth:
+            self._save_requested = True
+            self._include_session_requested |= include_session
+            return SaveResult(SaveStatus.QUEUED)
+
+        needed = self.needs_save or (include_session and self._session_pending)
+        if not needed:
+            status = SaveStatus.DEFERRED if self._session_pending else SaveStatus.UNCHANGED
+            self.last_result = SaveResult(status)
+            return self.last_result
+
+        snapshot = self._serialize()
+        start = perf_counter()
+        same = snapshot == self._saved_snapshot
+        self.metrics["compare_seconds"] += perf_counter() - start
+
+        if same and not self.required_write:
+            self._pending = False
+            self._session_pending = False
+            # 相同状态不抹掉最近保存错误的历史记录。
+            self.last_result = SaveResult(SaveStatus.UNCHANGED)
+        else:
+            self.last_result = self._write_snapshot(snapshot)
+
+        return self.last_result
+
+    @contextmanager
+    def batch(self):
+        if self._batch_aborted:
+            raise RuntimeError("请先显式恢复上一次异常批次。")
+        if self._batch_depth == 0:
+            self._batch_original_fields.clear()
+            self._batch_original_pending = self._pending
+            self._batch_original_session_pending = self._session_pending
+
+        self._batch_depth += 1
+        completed = False
+        try:
+            yield self
+            completed = True
+        finally:
+            self._batch_depth -= 1
+            if not completed:
+                self._batch_aborted = True
+                self._save_requested = False
+                self._include_session_requested = False
+
+            if self._batch_depth == 0 and completed:
+                if self._batch_aborted:
+                    raise RuntimeError("嵌套批次已经失败，必须恢复后才能继续。")
+                requested = self._save_requested
+                include_session = self._include_session_requested
+                self._save_requested = False
+                self._include_session_requested = False
+                self._batch_original_fields.clear()
+                if requested:
+                    self.save(include_session=include_session)

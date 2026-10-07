@@ -130,7 +130,10 @@ def resolve_output_file_conflict(output_file, force_overwrite, parent=None):
         accent=True
     ).pack(side="right", padx=6)
 
+    from ui.window_manager import register_popup, unregister_popup
+    register_popup(dialog, lambda: choose("cancel"), exit_blocker=True)
     parent.wait_window(dialog)
+    unregister_popup(dialog)
 
     if result["action"] == "overwrite":
         return output_file
@@ -138,4 +141,4 @@ def resolve_output_file_conflict(output_file, force_overwrite, parent=None):
     if result["action"] == "rename":
         return get_available_renamed_path(output_file)
 
-    raise ValueError("用户取消了操作。")
+    return None

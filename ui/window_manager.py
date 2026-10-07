@@ -1,314 +1,218 @@
 # -*- coding: utf-8 -*-
 
+from tkinter import TclError
+
+
 _popup_stack = []
 
 
-def _window_exists(win):
+def _window_exists(window):
     try:
-        return bool(win.winfo_exists())
-    except Exception:
+        return bool(window.winfo_exists())
+    except TclError:
         return False
-
-
-def get_focus_owner(window):
-    """
-    返回当前显示域中的真实焦点控件。
-
-    临时浮窗的存续判断只认这个焦点事实：
-    - 焦点在浮窗内部：临时浮窗可以继续存在；
-    - 焦点不在浮窗内部：临时浮窗必须关闭。
-    """
-    try:
-        return window.focus_displayof()
-    except Exception:
-        return None
 
 
 def is_descendant_or_self(widget, ancestor):
-    """
-    判断 widget 是否为 ancestor 本身或其真实子孙控件。
-
-    控件归属关系只能来自 Tkinter 的 widget.master 父链，
-    不能来自 str(widget) 的字符串前缀。
-
-    例如：
-
-        .!toplevel.!frame.!toplevel
-        .!toplevel.!frame.!toplevel2
-
-    二者只是兄弟 Toplevel。
-    第二个字符串虽然以第一个字符串为前缀，但第二个并不是第一个的子控件。
-    """
     if widget is None or ancestor is None:
         return False
-
-    current = widget
-
-    while current is not None:
-        if current is ancestor:
+    while widget is not None:
+        if widget is ancestor:
             return True
-
-        try:
-            current = current.master
-        except Exception:
-            return False
-
+        widget = widget.master
     return False
+
+
+def get_focus_owner(window):
+    try:
+        return window.focus_displayof()
+    except TclError:
+        return None
 
 
 def cleanup_popup_stack():
-    global _popup_stack
-
-    _popup_stack = [
-        item
-        for item in _popup_stack
-        if _window_exists(item["window"])
+    _popup_stack[:] = [
+        record for record in _popup_stack if _window_exists(record["window"])
     ]
 
 
-def focus_window(win):
-    try:
-        win.deiconify()
-        win.lift()
-        win.focus_force()
-        win.after(50, win.focus_force)
-    except Exception:
-        pass
+def focus_window(window):
+    if _window_exists(window):
+        window.deiconify()
+        window.lift()
+        window.focus_set()
 
 
-def is_focus_inside(window):
-    focused = get_focus_owner(window)
-    return is_descendant_or_self(focused, window)
-
-
-def _focus_is_inside_any(focused, widgets):
-    if focused is None:
-        return False
-
-    for widget in widgets:
-        if is_descendant_or_self(focused, widget):
-            return True
-
-    return False
-
-
-def _unbind_item_bindings(item):
-    window = item.get("window")
-    bindings = item.get("temporary_focus_bindings") or []
-
-    for sequence, funcid, bind_all in bindings:
-        try:
-            if bind_all:
-                window.unbind_all(sequence)
-            else:
-                window.unbind(sequence, funcid)
-        except Exception:
-            pass
-
-    item["temporary_focus_bindings"] = []
-
-
-def _schedule_temporary_focus_validation(window):
-    if not _window_exists(window):
+def _install_observer(root):
+    """解释器级监听只安装一次，不删除其他组件的全局监听。"""
+    if getattr(root, "_zipatch_popup_observer_installed", False):
         return
+    root._zipatch_popup_observer_installed = True
+    root._zipatch_popup_validation_id = None
 
-    try:
-        window.after_idle(validate_temporary_popups)
-    except Exception:
-        pass
+    def schedule(event=None):
+        if getattr(root, "_zipatch_closing", False):
+            return
+        if root._zipatch_popup_validation_id is None:
+            root._zipatch_popup_validation_id = root.after_idle(validate)
+
+    def validate():
+        root._zipatch_popup_validation_id = None
+        if not getattr(root, "_zipatch_closing", False):
+            validate_temporary_popups(root)
+
+    def destroyed(event):
+        if event.widget is root:
+            if root._zipatch_popup_validation_id is not None:
+                root.after_cancel(root._zipatch_popup_validation_id)
+                root._zipatch_popup_validation_id = None
+            _popup_stack[:] = [
+                record for record in _popup_stack
+                if record["window"]._root() is not root
+            ]
+
+    root.bind_all("<FocusIn>", schedule, add="+")
+    root.bind_all("<FocusOut>", schedule, add="+")
+    root.bind_all("<ButtonRelease>", schedule, add="+")
+    root.bind("<Destroy>", destroyed, add="+")
 
 
-def validate_temporary_popups():
-    """
-    维护临时浮窗的唯一存续不变量：
-
-    close_on_focus_out=True 的窗口必须“有焦才存在”。
-    每次焦点变化或鼠标点击事件闭环结束后，统一校验所有临时浮窗；
-    当前真实焦点不在临时浮窗内部，也不在显式 guard 内，则关闭该临时浮窗。
-
-    这不是主动互斥规则，而是基于焦点事实的存续校验。
-    """
+def validate_temporary_popups(root=None):
     cleanup_popup_stack()
-
-    if not _popup_stack:
+    records = [
+        record for record in _popup_stack
+        if root is None or record["window"]._root() is root
+    ]
+    if not records:
+        return
+    focused = get_focus_owner(records[-1]["window"])
+    # 原生模态窗口期间焦点可能暂时不可查询；未知不等于确定离开。
+    if focused is None:
         return
 
-    focus_reference = _popup_stack[-1]["window"]
-    focused = get_focus_owner(focus_reference)
-
-    for item in list(_popup_stack):
-        window = item["window"]
-
-        if not item.get("close_on_focus_out"):
+    for record in list(records):
+        if not record["close_on_focus_out"]:
             continue
-
+        window = record["window"]
         if not _window_exists(window):
-            unregister_popup(window)
             continue
-
-        guards = list(item.get("focus_guard_widgets") or [])
-
         if is_descendant_or_self(focused, window):
             continue
-
-        if _focus_is_inside_any(focused, guards):
+        if any(
+            is_descendant_or_self(focused, guard)
+            for guard in record["focus_guard_widgets"]
+        ):
             continue
-
+        # 子窗口不是普通焦点离开：关闭父浮窗会同时销毁正在运行的子窗口。
+        # 使用现有登记和 Tk 父子关系判断，不另建焦点状态机。
+        if any(
+            child["window"] is not window
+            and _window_exists(child["window"])
+            and is_descendant_or_self(child["window"], window)
+            for child in records
+        ):
+            continue
         close_registered_popup(window, restore_focus=False)
 
 
 def register_popup(
-    window,
-    close_callback=None,
-    focus_on_register=True,
-    close_on_focus_out=False,
-    focus_guard_widgets=None,
+    window, close_callback=None, focus_on_register=True,
+    close_on_focus_out=False, focus_guard_widgets=None,
+    prepare_close=None, exit_blocker=False,
 ):
-    """
-    注册弹窗/浮窗。
-
-    弹窗栈是 ESC 逐级关闭的唯一真相源：
-    - 后注册的窗口位于栈顶；
-    - ESC 只关闭当前栈顶；
-    - 栈顶关闭后再恢复下一层窗口焦点。
-
-    close_on_focus_out=True 的窗口被定义为“有焦才存在”的临时浮窗：
-    - 它不依赖单次 FocusOut 事件是否可靠送达；
-    - 每次焦点变化或鼠标点击事件闭环结束后，统一校验所有临时浮窗；
-    - 当前焦点不在临时浮窗内部时，关闭对应临时浮窗。
-    """
     cleanup_popup_stack()
     unregister_popup(window)
-
-    focus_guard_widgets = list(focus_guard_widgets or [])
-
-    item = {
+    root = window._root()
+    _install_observer(root)
+    _popup_stack.append({
         "window": window,
         "close_callback": close_callback,
+        "prepare_close": prepare_close,
+        "exit_blocker": exit_blocker,
         "close_on_focus_out": close_on_focus_out,
-        "focus_guard_widgets": focus_guard_widgets,
-        "temporary_focus_bindings": [],
-    }
+        "focus_guard_widgets": list(focus_guard_widgets or []),
+    })
 
-    _popup_stack.append(item)
-
-    def on_escape(event=None):
-        close_registered_popup(window)
+    def escape(event=None):
+        close_top_popup(root)
         return "break"
 
-    window.bind("<Escape>", on_escape, add="+")
+    window.bind("<Escape>", escape, add="+")
+    window.protocol("WM_DELETE_WINDOW", lambda: close_registered_popup(window))
 
-    try:
-        window.protocol(
-            "WM_DELETE_WINDOW",
-            lambda: close_registered_popup(window),
-        )
-    except Exception:
-        pass
+    def destroyed(event):
+        if event.widget is window:
+            unregister_popup(window)
 
-    if close_on_focus_out:
-        def schedule_validation(event=None):
-            _schedule_temporary_focus_validation(window)
-
-        focus_out_id = window.bind("<FocusOut>", schedule_validation, add="+")
-        focus_in_id = window.bind("<FocusIn>", schedule_validation, add="+")
-        button_id = window.bind("<ButtonPress>", schedule_validation, add="+")
-        global_focus_in_id = window.bind_all("<FocusIn>", schedule_validation, add="+")
-        global_focus_out_id = window.bind_all("<FocusOut>", schedule_validation, add="+")
-        global_button_id = window.bind_all("<ButtonPress>", schedule_validation, add="+")
-
-        item["temporary_focus_bindings"] = [
-            ("<FocusOut>", focus_out_id, False),
-            ("<FocusIn>", focus_in_id, False),
-            ("<ButtonPress>", button_id, False),
-            ("<FocusIn>", global_focus_in_id, True),
-            ("<FocusOut>", global_focus_out_id, True),
-            ("<ButtonPress>", global_button_id, True),
-        ]
-
+    window.bind("<Destroy>", destroyed, add="+")
     if focus_on_register:
         focus_window(window)
     else:
-        try:
-            window.lift()
-        except Exception:
-            pass
-
-    if close_on_focus_out:
-        _schedule_temporary_focus_validation(window)
+        window.lift()
 
 
 def unregister_popup(window):
-    global _popup_stack
-
-    remaining = []
-
-    for item in _popup_stack:
-        if item["window"] is window:
-            _unbind_item_bindings(item)
-        else:
-            remaining.append(item)
-
-    _popup_stack = remaining
+    _popup_stack[:] = [
+        record for record in _popup_stack if record["window"] is not window
+    ]
 
 
 def close_registered_popup(window, restore_focus=True):
-    """
-    关闭指定注册弹窗。
-
-    restore_focus:
-    - True：关闭后把焦点交还给新的栈顶弹窗；
-    - False：关闭后不自动恢复栈顶焦点，由业务动作自行决定焦点去向。
-      例如“应用收藏项”后，焦点应回到目标文本框，而不是回到父弹窗壳体。
-    """
     cleanup_popup_stack()
-
-    for item in reversed(_popup_stack):
-        if item["window"] is window:
-            callback = item.get("close_callback")
-
-            if callback:
-                close_result = callback()
-
-                if close_result is False:
-                    return "break"
-            else:
-                try:
-                    window.destroy()
-                except Exception:
-                    pass
-
-            unregister_popup(window)
-
-            if restore_focus:
-                focus_top_popup()
-
-            return "break"
-
-    try:
+    root = window._root()
+    if getattr(root, "_zipatch_closing", False):
+        return False
+    record = next(
+        (record for record in _popup_stack if record["window"] is window), None
+    )
+    if record is not None and record["close_callback"] is not None:
+        if record["close_callback"]() is False:
+            return False
+    elif _window_exists(window):
         window.destroy()
-    except Exception:
-        pass
+    unregister_popup(window)
+    if restore_focus:
+        focus_top_popup(root)
+    return True
 
-    return "break"
 
-
-def close_top_popup():
+def close_top_popup(root=None):
     cleanup_popup_stack()
+    records = [
+        record for record in _popup_stack
+        if root is None or record["window"]._root() is root
+    ]
+    if records:
+        return close_registered_popup(records[-1]["window"])
+    return True
 
-    if not _popup_stack:
-        return "break"
 
-    item = _popup_stack[-1]
-    window = item["window"]
-
-    return close_registered_popup(window)
-
-
-def focus_top_popup():
+def focus_top_popup(root=None):
     cleanup_popup_stack()
+    records = [
+        record for record in _popup_stack
+        if root is None or record["window"]._root() is root
+    ]
+    if records:
+        focus_window(records[-1]["window"])
 
-    if not _popup_stack:
-        return
 
-    focus_window(_popup_stack[-1]["window"])
+def exit_blocking_popup(root):
+    cleanup_popup_stack()
+    for record in reversed(_popup_stack):
+        if record["window"]._root() is root and record["exit_blocker"]:
+            return record["window"]
+    return None
+
+
+def prepare_all_for_exit(root):
+    """只处理草稿决策，不关闭窗口；最终保存失败或取消时保持窗口原状。"""
+    cleanup_popup_stack()
+    for record in reversed(list(_popup_stack)):
+        if record["window"]._root() is not root:
+            continue
+        callback = record["prepare_close"]
+        if callback is not None and not callback():
+            focus_window(record["window"])
+            return False
+    return True

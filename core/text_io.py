@@ -3,6 +3,7 @@
 import re
 from pathlib import Path
 
+
 from core.constants import ENCODINGS_TO_TRY
 
 
@@ -116,46 +117,21 @@ def set_text_value(text_widget, value):
 
 
 def replace_text_keep_undo(text_widget, value):
-    try:
-        text_widget.edit_separator()
-    except Exception:
-        pass
-
+    text_widget.edit_separator()
     text_widget.delete("1.0", "end")
     text_widget.insert("1.0", value or "")
-
-    try:
-        text_widget.edit_separator()
-    except Exception:
-        pass
+    text_widget.edit_separator()
 
 
 def replace_text_preserve_view(text_widget, value):
-    """
-    替换文本内容时保留只读结果/日志框的阅读位置。
-
-    规则：
-    - 如果替换前已经在底部，替换后继续停在底部；
-    - 如果替换前不在底部，替换后尽量保持原滚动位置；
-    - 用于程序自动刷新/追加展示类文本框，不用于普通编辑文本框。
-    """
-    try:
-        first, last = text_widget.yview()
-        was_at_bottom = last >= 0.999
-    except Exception:
-        first = 0.0
-        was_at_bottom = True
-
+    """同步替换展示内容；不刷新事件循环，不产生撤销历史。"""
+    first, last = text_widget.yview()
     text_widget.delete("1.0", "end")
     text_widget.insert("1.0", value or "")
-
-    try:
-        if was_at_bottom:
-            text_widget.see("end")
-        else:
-            text_widget.yview_moveto(first)
-    except Exception:
-        pass
+    if last >= 0.999:
+        text_widget.see("end")
+    else:
+        text_widget.yview_moveto(first)
 
 
 def split_lines_keep_text(text: str):
