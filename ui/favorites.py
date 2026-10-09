@@ -94,6 +94,12 @@ class FavoriteTextBoxController:
 
     def save_current_text_as_favorite(self):
         content = get_text_value(self.text_widget)
+        prepare_favorite = getattr(self.text_widget, "_prepare_favorite_content", None)
+        if prepare_favorite is not None:
+            with self.commits.operation():
+                content = prepare_favorite(content)
+            if content is None:
+                return
         if not content:
             safe_show_error("内容为空", "当前文本框内容为空，不能收藏。", self.parent.winfo_toplevel())
             return
@@ -129,11 +135,18 @@ class FavoriteTextBoxController:
             name = ask_favorite_name(self.parent, old_name)
         if name is None or name == old_name:
             return
+        content = value["content"]
+        prepare_favorite = getattr(self.text_widget, "_prepare_favorite_content", None)
+        if prepare_favorite is not None:
+            with self.commits.operation():
+                content = prepare_favorite(content, display=False)
+            if content is None:
+                return
         values = [
             favorite for favorite in self.favorites()
             if favorite["name"] not in (old_name, name)
         ]
-        values.append({"name": name, "content": value["content"]})
+        values.append({"name": name, "content": content})
         self.submit(values)
 
     def delete_favorite(self, value):

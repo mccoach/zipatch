@@ -6,7 +6,8 @@ from core.constants import THEME
 from core.message_utils import resolve_output_file_conflict, safe_show_error, safe_show_info
 from core.path_validation import normalize_windows_display_path
 from core.paths import build_output_path, center_window, open_path_with_default_app, validate_required_path
-from core.text_io import parse_list_text, set_text_value
+from core.exclusion_rules import prepare_exclusions
+from core.text_io import set_text_value
 from panels.base_panel import BasePanel
 from services.merge_service import (
     merge_demand_files, merge_project_files,
@@ -108,13 +109,14 @@ class MergePanel(BasePanel):
     def _execute_regular_merge(self):
         cfg = self.prepare({
             "source_folder", "output_folder", "output_filename",
-            "exclude_folders", "exclude_files", "exclude_extensions",
+            "exclude_folders", "exclude_files",
             "preamble_text", "ending_text", "code_header_line",
             "code_footer_line", "open_after_done", "force_overwrite",
         })
         if cfg is None:
             return
         try:
+            exclusions = prepare_exclusions(cfg["exclude_folders"], cfg["exclude_files"])
             source = validate_required_path(cfg["source_folder"], "源文件夹")
             output, header, footer = self.resolve_common_output_and_markers(cfg, self.root)
             if output is None:
@@ -124,9 +126,7 @@ class MergePanel(BasePanel):
             self.commits.metrics["business_starts"] += 1
             result = merge_project_files(
                 source_folder=source, output_file=output,
-                exclude_folders=parse_list_text(cfg["exclude_folders"]),
-                exclude_files=parse_list_text(cfg["exclude_files"]),
-                exclude_extensions=parse_list_text(cfg["exclude_extensions"], normalize_ext=True),
+                exclusions=exclusions,
                 preamble_text=cfg["preamble_text"], ending_text=cfg["ending_text"],
                 code_header_line=header, code_footer_line=footer, log_func=self.log,
             )

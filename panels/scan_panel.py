@@ -6,7 +6,7 @@ from core.constants import THEME
 from core.message_utils import resolve_output_file_conflict, safe_show_info
 from core.path_validation import normalize_windows_display_path
 from core.paths import build_output_path, open_path_with_default_app, validate_required_path
-from core.text_io import parse_list_text
+from core.exclusion_rules import prepare_exclusions
 from panels.base_panel import BasePanel
 from services.scan_service import panoramic_scan
 from ui.dialogs import edit_exclude_settings, edit_extra_text_settings
@@ -88,13 +88,14 @@ class ScanPanel(BasePanel):
     def _execute(self):
         cfg = self.prepare({
             "source_folder", "output_folder", "output_filename",
-            "exclude_folders", "exclude_files", "exclude_extensions",
+            "exclude_folders", "exclude_files",
             "preamble_text", "ending_text", "include_size", "include_date",
             "open_after_done", "force_overwrite",
         })
         if cfg is None:
             return
         try:
+            exclusions = prepare_exclusions(cfg["exclude_folders"], cfg["exclude_files"])
             source = validate_required_path(cfg["source_folder"], "源文件夹")
             folder = validate_required_path(cfg["output_folder"], "输出文件夹")
             filename = validate_required_path(cfg["output_filename"], "输出文件名")
@@ -109,9 +110,7 @@ class ScanPanel(BasePanel):
             self.commits.metrics["business_starts"] += 1
             result = panoramic_scan(
                 source_folder=source, output_file=output,
-                exclude_folders=parse_list_text(cfg["exclude_folders"]),
-                exclude_files=parse_list_text(cfg["exclude_files"]),
-                exclude_extensions=parse_list_text(cfg["exclude_extensions"], normalize_ext=True),
+                exclusions=exclusions,
                 preamble_text=cfg["preamble_text"], ending_text=cfg["ending_text"],
                 include_size=cfg["include_size"], include_date=cfg["include_date"],
                 log_func=self.log,

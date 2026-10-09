@@ -2,7 +2,7 @@
 
 import json
 import os
-import sys
+
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,16 +13,6 @@ from time import perf_counter
 from core.constants import DEFAULT_CONFIG
 from core.paths import get_config_path
 
-
-RESULT_TEXT_MAX_CHARS = 500_000
-RESULT_TRUNCATION_NOTICE = "【结果内容过长，已仅保留末尾部分】\n\n"
-
-
-def limit_result_text(text):
-    if len(text) <= RESULT_TEXT_MAX_CHARS:
-        return text
-    keep = RESULT_TEXT_MAX_CHARS - len(RESULT_TRUNCATION_NOTICE)
-    return RESULT_TRUNCATION_NOTICE + text[-keep:]
 
 
 def deep_merge_config(defaults, user_config):
@@ -113,14 +103,55 @@ def normalize_config(config):
     if config["restore"]["existing_file_policy"] not in ("overwrite", "rename", "skip"):
         config["restore"]["existing_file_policy"] = "overwrite"
 
-    config["patch"]["last_result_text"] = limit_result_text(
-        config["patch"]["last_result_text"]
-    )
     return config
 
 
+def validate_exclusion_config_source(source):
+    """结构错误必须暴露，不能把损坏名单或收藏替换为默认值。"""
+    if not isinstance(source, dict):
+        raise ValueError("配置顶层必须是 JSON 对象；原文件未修改。")
+
+    for page in ("scan", "merge"):
+        if page not in source:
+            continue
+        section = source[page]
+        if not isinstance(section, dict):
+            raise ValueError(f"配置 {page} 必须是对象；原文件未修改。")
+        for field in ("exclude_folders", "exclude_files"):
+            if field in section and not isinstance(section[field], str):
+                raise ValueError(
+                    f"配置 {page}.{field} 必须是字符串；"
+                    "不能将错误内容当成空名单或默认名单加载。"
+                )
+
+    if "favorites" not in source:
+        return
+    favorites = source["favorites"]
+    if not isinstance(favorites, dict):
+        raise ValueError("配置 favorites 必须是对象；原文件未修改。")
+    for key in (
+        "scan_exclude_folders", "scan_exclude_files",
+        "merge_exclude_folders", "merge_exclude_files",
+    ):
+        if key not in favorites:
+            continue
+        entries = favorites[key]
+        if not isinstance(entries, list):
+            raise ValueError(f"排除收藏 favorites.{key} 必须是数组；原文件未修改。")
+        for number, entry in enumerate(entries, 1):
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("name"), str)
+                or not isinstance(entry.get("content"), str)
+            ):
+                raise ValueError(
+                    f"排除收藏 favorites.{key} 第 {number} 项结构错误："
+                    "name 和 content 必须是字符串；原文件未修改。"
+                )
+
+
 def load_user_config(path=None):
-    """读取失败与内容损坏分开：文件系统故障不自动覆盖原文件。"""
+    """只有文件不存在才创建默认配置；损坏或读取故障不重建、不覆盖。"""
     path = Path(path) if path is not None else get_config_path()
 
     try:
@@ -129,9 +160,12 @@ def load_user_config(path=None):
     except FileNotFoundError:
         return normalize_config(deep_merge_config(DEFAULT_CONFIG, {})), True
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
-        print(f"[配置] 内容损坏，重建当前结构：{error}", file=sys.stderr)
-        return normalize_config(deep_merge_config(DEFAULT_CONFIG, {})), True
+        raise ValueError(
+            f"配置内容无法解析：{path}\n{error}\n"
+            "原配置文件未修改，请修正配置后重新启动。"
+        ) from error
 
+    validate_exclusion_config_source(source)
     config = normalize_config(deep_merge_config(DEFAULT_CONFIG, source))
     return config, config != source
 

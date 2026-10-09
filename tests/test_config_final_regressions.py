@@ -117,6 +117,35 @@ class ApplicationPageRegressionTests(unittest.TestCase):
             self.app.config_manager.metrics["successful_replaces"] - before, 1,
         )
 
+    def test_long_result_display_save_and_clear(self):
+        result = "【完整结果开始】\n" + "结果正文" * 150_000 + "\n【完整结果结束】\n"
+        self.assertGreater(len(result), 500_000)
+        self.app.show_panel("patch")
+        panel = self.app.current_panel
+        before = dict(self.app.config_manager.metrics)
+
+        with self.app.commits.operation():
+            saved = panel.finish_result(result)
+        self.assertTrue(saved.persisted)
+        self.assertEqual(panel.result_text.get("1.0", "end-1c"), result)
+        self.assertEqual(panel.cfg["last_result_text"], result)
+        self.assertEqual(str(panel.result_text.cget("state")), "disabled")
+        for key in ("json_generations", "write_attempts", "successful_replaces"):
+            self.assertEqual(
+                self.app.config_manager.metrics[key] - before[key], 1,
+            )
+
+        loaded, needs_write = load_user_config(self.path)
+        self.assertFalse(needs_write)
+        self.assertEqual(loaded["patch"]["last_result_text"], result)
+
+        panel.clear_result()
+        self.assertEqual(panel.result_text.get("1.0", "end-1c"), "")
+        loaded, needs_write = load_user_config(self.path)
+        self.assertFalse(needs_write)
+        self.assertEqual(loaded["patch"]["last_result_text"], "")
+        self.assertEqual(self.app.commits.operation_depth, 0)
+
     def test_restore_mode_accepts_hidden_backup_directory(self):
         self.app.show_panel("patch")
         panel = self.app.current_panel

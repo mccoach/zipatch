@@ -5,12 +5,11 @@ from pathlib import Path
 
 from core.constants import (
     FILE_SECTION_START_TEMPLATE,
-    MESSAGE_SKIP_BY_EXT,
-    MESSAGE_SKIP_BY_NAME,
+    MESSAGE_FILE_EXCLUDED,
     MESSAGE_CANNOT_READ,
     MESSAGE_READ_ERROR,
 )
-from core.file_walk import iter_all_files_with_skip_reason
+from core.file_walk import iter_project_entries
 from core.path_validation import summarize_path_issues, validate_path_list
 from core.paths import ensure_parent_dir
 from core.text_io import read_text_content_for_merge
@@ -31,42 +30,21 @@ def make_merge_plan_item(file_path, merge_content=True, skip_message=""):
     }
 
 
-def build_regular_merge_plan(
-    source_folder,
-    exclude_folders,
-    exclude_files,
-    exclude_extensions,
-    output_file=None,
-):
-    """
-    常规合并计划：
-    - 未排除文件：合并内容；
-    - 命中文件名/扩展名排除：仍写文件段落，但内容写“内容略”。
-    """
-    source_folder = str(Path(source_folder).resolve())
-
-    if not Path(source_folder).is_dir():
-        raise ValueError(f"源文件夹不存在或不是文件夹：{source_folder}")
-
+def build_regular_merge_plan(source_folder, exclusions, output_file=None):
+    """目录剪枝；排除文件保留段落，但不读取正文。"""
     plan = []
-
-    for file_path, merge_content, skip_message in iter_all_files_with_skip_reason(
-        source_folder=source_folder,
-        exclude_folders=exclude_folders,
-        exclude_files=exclude_files,
-        exclude_extensions=exclude_extensions,
-        output_file=output_file,
-        skip_by_name_message=MESSAGE_SKIP_BY_NAME + "，内容略",
-        skip_by_ext_message=MESSAGE_SKIP_BY_EXT + "，内容略",
+    for file_path, is_directory, excluded in iter_project_entries(
+        source_folder, exclusions, output_file,
     ):
+        if is_directory:
+            continue
         plan.append(
             make_merge_plan_item(
-                file_path=file_path,
-                merge_content=merge_content,
-                skip_message=skip_message,
+                file_path,
+                merge_content=not excluded,
+                skip_message=MESSAGE_FILE_EXCLUDED if excluded else "",
             )
         )
-
     return sorted(plan, key=lambda item: item["path"].lower())
 
 
@@ -159,9 +137,7 @@ def write_merge_file(
 def merge_project_files(
     source_folder,
     output_file,
-    exclude_folders,
-    exclude_files,
-    exclude_extensions,
+    exclusions,
     preamble_text,
     ending_text,
     code_header_line,
@@ -175,9 +151,7 @@ def merge_project_files(
 
     file_plan = build_regular_merge_plan(
         source_folder=source_folder,
-        exclude_folders=exclude_folders,
-        exclude_files=exclude_files,
-        exclude_extensions=exclude_extensions,
+        exclusions=exclusions,
         output_file=output_file,
     )
 

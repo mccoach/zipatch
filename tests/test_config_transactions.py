@@ -8,8 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.config import (
-    ConfigSaveManager, SaveStatus, deep_merge_config,
-    limit_result_text, load_user_config,
+    ConfigSaveManager, SaveStatus, deep_merge_config, load_user_config,
 )
 from core.constants import DEFAULT_CONFIG
 from ui.config_editing import ConfigCommitController
@@ -214,18 +213,38 @@ class ConfigPersistenceTests(unittest.TestCase):
             [{"name": "sample", "content": "body"}],
         )
 
-    def test_missing_and_corrupt_load_require_write(self):
+    def test_missing_creates_defaults_but_corrupt_load_preserves_file(self):
         missing = Path(self.directory.name) / "missing.json"
         _, needed = load_user_config(missing)
         self.assertTrue(needed)
         missing.write_text("{broken", encoding="utf-8")
-        _, needed = load_user_config(missing)
-        self.assertTrue(needed)
+        original = missing.read_bytes()
+        with self.assertRaises(ValueError):
+            load_user_config(missing)
+        self.assertEqual(missing.read_bytes(), original)
 
-    def test_result_limit_includes_notice(self):
-        result = limit_result_text("x" * 600_000)
-        self.assertEqual(len(result), 500_000)
-        self.assertTrue(result.startswith("【结果内容过长"))
+    def test_long_result_is_saved_and_loaded_without_truncation(self):
+        result = "【完整结果开始】\n" + "结果正文" * 150_000 + "\n【完整结果结束】\n"
+        self.assertGreater(len(result), 500_000)
+        self.manager.accept(
+            self.config["patch"], {"last_result_text": result},
+        )
+        before = dict(self.manager.metrics)
+        self.assertEqual(self.manager.save().status, SaveStatus.SAVED)
+        for key in ("json_generations", "write_attempts", "successful_replaces"):
+            self.assertEqual(self.manager.metrics[key] - before[key], 1)
+
+        disk = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(disk["patch"]["last_result_text"], result)
+        original_file = self.path.read_bytes()
+        loaded, needs_write = load_user_config(self.path)
+        self.assertFalse(needs_write)
+        self.assertEqual(loaded["patch"]["last_result_text"], result)
+        self.assertEqual(self.path.read_bytes(), original_file)
+
+        self.assertEqual(self.manager.save().status, SaveStatus.UNCHANGED)
+        for key in ("json_generations", "write_attempts", "successful_replaces"):
+            self.assertEqual(self.manager.metrics[key] - before[key], 1)
 
     def test_draft_failure_restores_fields_before_error_message(self):
         controller = ConfigCommitController(None, self.manager)

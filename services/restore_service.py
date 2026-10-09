@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.constants import (
-    MESSAGE_SKIP_BY_EXT,
+    MESSAGE_FILE_EXCLUDED,
     MESSAGE_CANNOT_READ,
     MESSAGE_READ_ERROR,
     SKIPPED_LOG_FILENAME,
@@ -84,7 +84,7 @@ def resolve_restore_path(original_path_str, target_root_folder):
 
 def should_skip_restored_content(content):
     return (
-        MESSAGE_SKIP_BY_EXT in content
+        MESSAGE_FILE_EXCLUDED in content
         or MESSAGE_CANNOT_READ in content
         or MESSAGE_READ_ERROR in content
     )

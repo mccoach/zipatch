@@ -11,43 +11,49 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.pyo
-*.pyd
+
+# 不全局忽略 *.pyd：
+# 虚拟环境中的扩展由环境目录规则覆盖，
+# 项目以后可能需要提交正式的二进制扩展。
 
 
 # ============================================================
 # 2. Virtual environments
 # ============================================================
 
-.venv/
+/.venv*/
 venv/
 env/
 ENV/
 virtualenv/
 .conda/
+__pypackages__/
 
 
 # ============================================================
 # 3. Python packaging / build artifacts
 # ============================================================
 
-build/
-dist/
-downloads/
-develop-eggs/
-eggs/
-.eggs/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-pip-wheel-metadata/
+/build/
+/dist/
+/downloads/
+/develop-eggs/
+/eggs/
+/.eggs/
+/parts/
+/sdist/
+/var/
+/wheels/
+/share/python-wheels/
+/pip-wheel-metadata/
 
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
+
+# 建议不默认忽略 downloads/、parts/、var/ 和 MANIFEST，
+# 避免误伤项目数据或正式打包文件。
 
 
 # ============================================================
@@ -60,6 +66,14 @@ MANIFEST
 *.pkg
 *.pyz
 *.pyzw
+
+/.pack-build/
+/.pack-spec/
+
+# 常规产物已由 /build/、/dist/ 覆盖。
+# 建议不全局忽略 *.spec、*.manifest、*.pkg 等：
+# 它们可能是正式构建配置、Windows 清单或测试样本。
+
 
 
 # ============================================================
@@ -75,7 +89,10 @@ htmlcov/
 .nox/
 .hypothesis/
 junit.xml
-test-results/
+/test-results/
+/tests/results/
+
+# 保留 tests/ 下的测试源码及正式测试样本。
 
 
 # ============================================================
@@ -96,11 +113,15 @@ dmypy.json
 # 7. IDE / editor files
 # ============================================================
 
-.vscode/
+/.vscode/
 .idea/
 *.suo
 *.ntvs*
 *.njsproj
+
+*.user
+*.userosscache
+*.sln.docstates
 *.sln
 *.swp
 *.swo
@@ -121,7 +142,7 @@ Thumbs.db
 Thumbs.db:encryptable
 ehthumbs.db
 ehthumbs_vista.db
-Desktop.ini
+[Dd]esktop.ini
 $RECYCLE.BIN/
 
 
@@ -129,10 +150,10 @@ $RECYCLE.BIN/
 # 9. Logs / temporary runtime output
 # ============================================================
 
-logs/
-log/
-tmp/
-temp/
+/logs/
+/log/
+/tmp/
+/temp/
 
 *.log
 *.out
@@ -140,6 +161,9 @@ temp/
 *.trace
 *.tmp
 *.temp
+
+# 建议不全局忽略 *.out、*.err、*.trace，
+# 避免误伤正式测试预期结果与诊断样本。
 
 
 # ============================================================
@@ -152,6 +176,10 @@ temp/
 *.local
 *.secret
 
+!.env.example
+!.env.sample
+!.env.template
+
 secrets.json
 secret.json
 credentials.json
@@ -159,6 +187,9 @@ token.json
 
 # Local Python version selection
 .python-version
+
+# .python-version 可用于共享 Python 版本选择，
+# 建议不默认忽略。
 
 
 # ============================================================
@@ -178,14 +209,20 @@ zipatch_config.json
 # ============================================================
 
 *.bak
-*.bak1
-*.bak2
+*.bak[0-9]*
 *.backup
 *.orig
 *.old
+*.rej
 
-backup/
-backups/
+/backup/
+/backups/
+
+# Zipatch 自动生成的修改备份，任意层级均忽略。
+AI文件修改备份/
+
+# 当前项目的本地历史归档。
+/99_归档/
 
 
 # ============================================================
@@ -199,6 +236,9 @@ backups/
 *.db
 *.db-journal
 
+# 建议不按扩展名全局忽略数据库，
+# 避免误伤以后需要提交的测试数据库或正式资源。
+# 新增本地数据库后，应按具体路径添加忽略规则。
 
 # ============================================================
 # 14. Archives / compressed files
@@ -212,6 +252,9 @@ backups/
 *.tgz
 *.gz
 
+# 建议不全局忽略压缩文件，
+# 避免误伤正式测试样本、资源包和离线依赖。
+# 构建及备份目录已有对应忽略规则。
 
 # ============================================================
 # 15. Installer / binary outputs
@@ -222,6 +265,10 @@ backups/
 *.dmg
 *.app
 *.AppImage
+
+# 当前 EXE 及其他发布产物由 /dist/ 覆盖。
+# 建议不全局忽略 *.exe、*.msi 等，
+# 避免误伤以后需要提交的工具或正式资源。
 
 
 # ============================================================
@@ -246,7 +293,4 @@ backups/
 !assets/*.ico
 !assets/*.svg
 !assets/*.png
-wechat_qr.png
-
-# Zipatch 自动生成的修改包备份和本地归档
-99_归档/
+!wechat_qr.png

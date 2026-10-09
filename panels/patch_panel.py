@@ -5,7 +5,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
 
-from core.config import SaveStatus, limit_result_text
+from core.config import SaveStatus
 from core.constants import THEME
 from core.message_utils import safe_ask_risk_confirm, safe_ask_yes_no, safe_show_error, safe_show_info
 from core.path_validation import normalize_windows_display_path
@@ -207,7 +207,6 @@ class PatchPanel(BasePanel):
         return self.prepare(fields)
 
     def display_result(self, text):
-        text = limit_result_text(text)
         self.result_text.configure(state="normal")
         replace_text_preserve_view(self.result_text, text)
         self.result_text.configure(state="disabled")
@@ -216,7 +215,7 @@ class PatchPanel(BasePanel):
     def accept_result_control(self):
         if self.commits.operation_depth:
             return False
-        text = limit_result_text(get_text_value(self.result_text))
+        text = get_text_value(self.result_text)
         return self.commits.submit_values(
             self.cfg, {"last_result_text": text}, self.root,
         ).request_satisfied

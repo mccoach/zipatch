@@ -219,15 +219,7 @@ def create_text_settings_dialog(parent, title, config, commits, definitions, wid
     dialog.transient(parent)
     dialog.grab_set()
     center_window(dialog, width, height)
-    is_exclude_dialog = any(field == "exclude_extensions" for field, *_ in definitions)
-    instructions = (
-        "其他说明：支持换行、英文逗号、中文逗号、空格分隔；"
-        "在名单行或名单项前添加半角分号 ; 可临时取消该项，例如 ;tests，移除分号即可恢复。"
-        "扩展名不写点号会自动补点号。注意：像 .gitignore 这类完整特殊文件名"
-        "应写入“排除文件名”，不要写入“排除扩展名”。"
-        if is_exclude_dialog else ""
-    )
-    instructions += "快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做。收藏按钮位于各文本框标题栏右侧。"
+    instructions = "快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做。收藏按钮位于各文本框标题栏右侧。"
     tk.Label(
         dialog,
         text=instructions,
@@ -256,12 +248,9 @@ def create_text_settings_dialog(parent, title, config, commits, definitions, wid
 
 
 def edit_exclude_settings(parent, title, config, commits, page):
-    definitions = [
-        ("exclude_folders", "排除文件夹", f"{page}_exclude_folders", f"{page}.exclude_folders", 6),
-        ("exclude_files", "排除文件名", f"{page}_exclude_files", f"{page}.exclude_files", 6),
-        ("exclude_extensions", "排除扩展名", f"{page}_exclude_extensions", f"{page}.exclude_extensions", 6),
-    ]
-    return create_text_settings_dialog(parent, title, config, commits, definitions, 720, 740)
+    # 独立名单编辑职责；延迟导入避免与 managed text 创建能力循环导入。
+    from ui.exclusion_editor import create_exclusion_dialog
+    return create_exclusion_dialog(parent, title, config, commits, page)
 
 
 def edit_extra_text_settings(parent, title, config, commits, page):

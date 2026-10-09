@@ -3,114 +3,48 @@
 import os
 from pathlib import Path
 
+from core.exclusion_rules import PreparedExclusions
 
-def iter_project_files(
-    source_folder,
-    exclude_folders=None,
-    exclude_files=None,
-    exclude_extensions=None,
-    output_file=None,
-):
-    """
-    统一文件遍历器。
 
-    用于：
-    - 全景扫描；
-    - 常规代码合并。
+def _raise_walk_error(error):
+    raise error
 
-    规则：
-    - 支持排除文件夹；
-    - 支持排除文件名；
-    - 支持排除扩展名；
-    - 自动跳过输出文件本身；
-    - 返回绝对路径字符串。
-    """
-    source_folder = Path(source_folder)
-    exclude_folders = set(exclude_folders or [])
-    exclude_files = set(exclude_files or [])
-    exclude_extensions = set(exclude_extensions or [])
-    output_abs = str(Path(output_file).resolve()) if output_file else None
 
-    for root, dirs, files in os.walk(source_folder, topdown=True):
-        if exclude_folders:
-            dirs[:] = [d for d in dirs if d not in exclude_folders]
+def iter_project_entries(source_folder, exclusions, output_file=None):
+    """一次遍历消费已编译规则；命中目录实际剪枝，不再进入。"""
+    if not isinstance(exclusions, PreparedExclusions):
+        raise TypeError("文件遍历必须消费 PreparedExclusions")
 
-        for filename in files:
-            if filename in exclude_files:
+    source = Path(source_folder).resolve()
+    if not source.is_dir():
+        raise ValueError(f"源文件夹不存在或不是文件夹：{source}")
+    output = (
+        os.path.normcase(str(Path(output_file).resolve()))
+        if output_file is not None else None
+    )
+
+    for root, directories, filenames in os.walk(
+        source, topdown=True, onerror=_raise_walk_error,
+    ):
+        folder = Path(root)
+        relative_parts = folder.relative_to(source).parts
+        kept_directories = []
+        for name in directories:
+            if exclusions.directories.matches(relative_parts + (name,)):
                 continue
+            kept_directories.append(name)
+            yield str(folder / name), True, False
+        directories[:] = kept_directories
 
-            file_abs = str((Path(root) / filename).resolve())
-
-            if output_abs and file_abs == output_abs:
+        for name in filenames:
+            absolute = str(folder / name)
+            if output is not None and os.path.normcase(str(Path(absolute).resolve())) == output:
                 continue
-
-            ext = Path(filename).suffix
-
-            if ext in exclude_extensions:
-                continue
-
-            yield file_abs
-
-
-def iter_all_files_with_skip_reason(
-    source_folder,
-    exclude_folders=None,
-    exclude_files=None,
-    exclude_extensions=None,
-    output_file=None,
-    skip_by_name_message="",
-    skip_by_ext_message="",
-):
-    """
-    合并功能专用遍历器。
-
-    与 iter_project_files 不同：
-    这里不会直接丢弃被排除的文件，而是返回“跳过原因”，
-    这样合并输出中仍然可以保留文件段落和“内容略”提示。
-    """
-    source_folder = Path(source_folder)
-    exclude_folders = set(exclude_folders or [])
-    exclude_files = set(exclude_files or [])
-    exclude_extensions = set(exclude_extensions or [])
-    output_abs = str(Path(output_file).resolve()) if output_file else None
-
-    for root, dirs, files in os.walk(source_folder, topdown=True):
-        if exclude_folders:
-            dirs[:] = [d for d in dirs if d not in exclude_folders]
-
-        for filename in files:
-            file_abs = str((Path(root) / filename).resolve())
-
-            if output_abs and file_abs == output_abs:
-                continue
-
-            ext = Path(filename).suffix
-
-            if filename in exclude_files:
-                yield file_abs, False, skip_by_name_message
-                continue
-
-            if ext in exclude_extensions:
-                yield file_abs, False, skip_by_ext_message
-                continue
-
-            yield file_abs, True, ""
-
-
-def count_dirs(source_folder, exclude_folders=None):
-    source_folder = Path(source_folder)
-    exclude_folders = set(exclude_folders or [])
-
-    total = 0
-
-    for _, dirs, _ in os.walk(source_folder, topdown=True):
-        if exclude_folders:
-            dirs[:] = [d for d in dirs if d not in exclude_folders]
-
-        total += len(dirs)
-
-    return total
+            yield (
+                absolute, False,
+                exclusions.files.matches(relative_parts + (name,)),
+            )
 
 
 def sorted_paths(paths):
-    return sorted(paths, key=lambda p: str(p).lower())
+    return sorted(paths, key=lambda path: str(path).lower())
