@@ -81,21 +81,35 @@ class ExclusionGuiTests(unittest.TestCase):
 
     def test_editing_paste_undo_and_focus_do_not_commit(self):
         before = dict(self.manager.metrics)
-        self.replace("exclude_files", '"src/cache/"\n bad|name')
+        raw = '"src/cache/"\n bad|name\n README*\n|*.log'
+        self.replace("exclude_files", raw)
         widget = self.widgets["exclude_files"]
         widget.event_generate("<FocusOut>")
         self.root.update()
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
-        self.assertEqual(self.value("exclude_files"), '"src/cache/"\n bad|name')
-        self.assertEqual(self.status.get(), "已修改，尚未校验")
-        for tag in ("exclusion_error", "exclusion_warning", "exclusion_disabled"):
-            self.assertEqual(widget.tag_ranges(tag), ())
+        self.assertEqual(self.value("exclude_files"), raw)
+        self.assertEqual(
+            self.status.get(), "已修改，尚未保存；高亮对应当前原文",
+        )
+        for tag, line in (
+            ("exclusion_error", "2.0"),
+            ("exclusion_warning", "3.0"),
+            ("exclusion_disabled", "4.0"),
+        ):
+            self.assertEqual(str(widget.tag_ranges(tag)[0]), line)
         tool = widget._text_editor_controller
         tool.undo()
         self.root.update()
         tool.redo()
         self.root.update()
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
+        self.assertEqual(self.value("exclude_files"), raw)
+        for tag, line in (
+            ("exclusion_error", "2.0"),
+            ("exclusion_warning", "3.0"),
+            ("exclusion_disabled", "4.0"),
+        ):
+            self.assertEqual(str(widget.tag_ranges(tag)[0]), line)
         for key in ("json_generations", "write_attempts", "successful_replaces"):
             self.assertEqual(self.manager.metrics[key], before[key])
 
@@ -153,14 +167,17 @@ class ExclusionGuiTests(unittest.TestCase):
 
     def test_yellow_return_then_confirm_is_scoped_to_current_save(self):
         self.replace("exclude_files", " README*")
+        widget = self.widgets["exclude_files"]
+        self.assertTrue(widget.tag_ranges("exclusion_warning"))
         with patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=False):
             self.assertFalse(self.session.save_and_close())
-        widget = self.widgets["exclude_files"]
         self.assertTrue(widget.tag_ranges("exclusion_warning"))
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
         self.replace("exclude_files", " LICENSE*")
-        self.assertEqual(widget.tag_ranges("exclusion_warning"), ())
-        self.assertEqual(self.status.get(), "已修改，尚未校验")
+        self.assertTrue(widget.tag_ranges("exclusion_warning"))
+        self.assertEqual(
+            self.status.get(), "已修改，尚未保存；高亮对应当前原文",
+        )
         with patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=True):
             self.assertTrue(self.session.save_and_close())
         self.assertEqual(self.config["scan"]["exclude_files"], " LICENSE*")
