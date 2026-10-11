@@ -94,6 +94,9 @@ class EditorBinding:
         if self.variable is None:
             self.widget.edit_modified(False)
         self.dirty = False
+        if changed:
+            # 只通知已接受事实；不把连续输入当成基准变化。
+            self.widget.event_generate("<<ConfigAccepted>>")
         return changed
 
     def on_focus_out(self, event=None):
@@ -192,11 +195,13 @@ class ConfigCommitController:
         binding.commit(prepared_text)
         return self.finish(binding.widget.winfo_toplevel())
 
-    def read_text(self, widget):
-        """读取一次正文并记录耗时；不接受字段，不请求保存。"""
+    def read_text(self, widget, *, preserve_trailing_newlines=False):
+        """观测一次读取；规则草稿保留物理行，普通文本语义不变。"""
         start = perf_counter()
         self.metrics["text_reads"] += 1
         try:
+            if preserve_trailing_newlines:
+                return widget.get("1.0", "end-1c")
             return get_text_value(widget)
         finally:
             self.metrics["text_read_seconds"] += perf_counter() - start

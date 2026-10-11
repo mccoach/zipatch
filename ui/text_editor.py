@@ -160,6 +160,8 @@ class TextEditorController:
             self.on_content_changed(prepared_text)
 
     def undo(self, event=None):
+        if self.readonly or str(self.text_widget.cget("state")) != "normal":
+            return "break"
         try:
             self.text_widget.edit_undo()
         except TclError as error:
@@ -170,6 +172,8 @@ class TextEditorController:
         return "break"
 
     def redo(self, event=None):
+        if self.readonly or str(self.text_widget.cget("state")) != "normal":
+            return "break"
         try:
             self.text_widget.edit_redo()
         except TclError as error:
@@ -301,7 +305,7 @@ class TextEditorController:
         return "break"
 
     def replace_current(self, event=None):
-        if self.readonly:
+        if self.readonly or str(self.text_widget.cget("state")) != "normal":
             return "break"
 
         keyword = self.find_var.get()
@@ -331,7 +335,7 @@ class TextEditorController:
         return self.find_next()
 
     def replace_all(self, event=None):
-        if self.readonly:
+        if self.readonly or str(self.text_widget.cget("state")) != "normal":
             return "break"
 
         keyword = self.find_var.get()
@@ -341,10 +345,13 @@ class TextEditorController:
             return "break"
 
         binding = getattr(self.text_widget, "_config_binding", None)
-        content = (
-            binding.read_current_value()
-            if binding is not None else get_text_value(self.text_widget)
-        )
+        if getattr(self.text_widget, "_preserve_trailing_newlines", False):
+            content = self.text_widget.get("1.0", "end-1c")
+        else:
+            content = (
+                binding.read_current_value()
+                if binding is not None else get_text_value(self.text_widget)
+            )
         count = content.count(keyword)
 
         if count <= 0 or keyword == replacement:

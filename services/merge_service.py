@@ -10,7 +10,7 @@ from core.constants import (
     MESSAGE_READ_ERROR,
 )
 from core.file_walk import iter_project_entries
-from core.path_validation import summarize_path_issues, validate_path_list
+from services.demand_rules import windows_path_key
 from core.paths import ensure_parent_dir
 from core.text_io import read_text_content_for_merge
 from core.time_utils import current_timestamp_text
@@ -48,34 +48,11 @@ def build_regular_merge_plan(source_folder, exclusions, output_file=None):
     return sorted(plan, key=lambda item: item["path"].lower())
 
 
-def validate_and_normalize_demand_file_list(file_list_text):
-    """
-    按需合并名单校验。
-
-    业务层只保留“按需合并需要文件路径名单”这一语义入口；
-    路径文本规范化、绝对路径校验、存在性校验、文件类型校验、去重和问题汇总，
-    统一由 core.path_validation 负责，避免同一规则多处重复实现。
-    """
-    result = validate_path_list(
-        file_list_text,
-        allow_relative=False,
-        expected_type="file",
-        deduplicate=True,
-    )
-
-    return {
-        "normalized_text": result.normalized_text,
-        "valid_paths": result.valid_paths,
-        "invalid_line_numbers": result.invalid_line_numbers,
-        "issue_counts": result.issue_counts,
-        "duplicate_count": result.duplicate_count,
-    }
-
-
 def build_demand_merge_plan(file_paths):
+    """消费最终选中路径，不重新解释链接或改变选择顺序。"""
     return [
-        make_merge_plan_item(file_path, merge_content=True)
-        for file_path in file_paths
+        {"path": str(path), "merge_content": True, "skip_message": ""}
+        for path in file_paths
     ]
 
 
@@ -87,12 +64,21 @@ def write_merge_file(
     code_header_line,
     code_footer_line,
     log_func=None,
+    strict_read=False,
 ):
     """
     统一写合并文件：
     常规合并和按需合并共用这一条写入链路。
     """
     output_file = str(Path(output_file).resolve())
+
+    if strict_read:
+        output_key = windows_path_key(output_file)
+        if any(
+            item["merge_content"] and windows_path_key(item["path"]) == output_key
+            for item in file_plan
+        ):
+            raise ValueError("输出文件被实际选中，不能执行按需合并。")
 
     ensure_parent_dir(output_file)
 
@@ -121,6 +107,7 @@ def write_merge_file(
                         file_path,
                         read_error_message=MESSAGE_READ_ERROR,
                         cannot_read_message=MESSAGE_CANNOT_READ,
+                        strict=strict_read,
                     )
                 )
             else:
@@ -197,6 +184,7 @@ def merge_demand_files(
         code_header_line=code_header_line,
         code_footer_line=code_footer_line,
         log_func=log_func,
+        strict_read=True,
     )
 
     if log_func:
@@ -208,5 +196,4 @@ def merge_demand_files(
     )
 
 
-def summarize_demand_file_list_issues(issue_counts):
-    return summarize_path_issues(issue_counts)
+

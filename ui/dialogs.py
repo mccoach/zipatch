@@ -19,6 +19,7 @@ def create_managed_text_box(
     enable_favorites=True, enable_clear=True, enable_wrap_toggle=True,
     enable_import_text=False, wrap_config_key=None,
     config=None, field=None, page=None, on_content_changed=None,
+    preserve_trailing_newlines=False,
 ):
     title_row = styled_frame(parent)
     title_row.pack(fill="x", pady=(8, 2))
@@ -35,6 +36,8 @@ def create_managed_text_box(
         wrap="word" if wrap_value else "none", readonly=readonly,
     )
     frame.pack(fill="both", expand=True)
+    # 规则名单的末尾空行属于正文结构；普通文本继续沿用既有语义。
+    text._preserve_trailing_newlines = preserve_trailing_newlines
     if readonly:
         text.configure(state="normal")
     text.insert("1.0", initial_value or "")

@@ -3,22 +3,15 @@
 import tkinter as tk
 
 from core.constants import THEME
-from core.message_utils import resolve_output_file_conflict, safe_show_error, safe_show_info
+from core.message_utils import resolve_output_file_conflict, safe_show_info
 from core.path_validation import normalize_windows_display_path
-from core.paths import build_output_path, center_window, open_path_with_default_app, validate_required_path
+from core.paths import build_output_path, open_path_with_default_app, validate_required_path
 from core.exclusion_rules import prepare_exclusions
-from core.text_io import set_text_value
 from panels.base_panel import BasePanel
-from services.merge_service import (
-    merge_demand_files, merge_project_files,
-    summarize_demand_file_list_issues, validate_and_normalize_demand_file_list,
-)
-from ui.dialogs import (
-    TextDraftSession, create_managed_text_box, edit_exclude_settings, edit_extra_text_settings,
-)
+from services.merge_service import merge_demand_files, merge_project_files
+from ui.dialogs import edit_exclude_settings, edit_extra_text_settings
 from ui.theme import styled_button, styled_frame
 from ui.widgets import browse_folder, create_entry_row, make_checkbutton, open_output_file
-from ui.window_manager import register_popup
 
 
 class MergePanel(BasePanel):
@@ -145,131 +138,41 @@ class MergePanel(BasePanel):
             open_path_with_default_app(result.output_file, self.root)
 
     def open_demand_merge_dialog(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("按需合并")
-        dialog.configure(bg=THEME["bg"])
-        dialog.transient(self.root)
-        dialog.grab_set()
-        center_window(dialog, 980, 740)
-        tk.Label(
-            dialog,
-            text="合并名单每行填写一个文件绝对路径；行首半角分号 ; 可临时取消。"
-                 "程序会规范化、去重并高亮错误行。"
-                 "快捷键：Ctrl+F、Ctrl+H、Ctrl+Z、Ctrl+Y。",
-            bg=THEME["bg"], fg=THEME["fg_dim"], font=THEME["font_main"],
-            wraplength=930, anchor="w", justify="left",
-        ).pack(fill="x", padx=16, pady=(12, 6))
-        body = styled_frame(dialog)
-        body.pack(fill="both", expand=True, padx=16, pady=6)
-        left, right = styled_frame(body), styled_frame(body)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        widgets = {}
-        for field, label, parent, favorite, wrap_key, height in (
-            ("demand_file_list_text", "合并名单", left, "demand_file_list", "merge.demand_file_list", 28),
-            ("demand_preamble_text", "前言文本", right, "demand_preamble", "merge.demand_preamble", 12),
-            ("demand_ending_text", "后语文本", right, "demand_ending", "merge.demand_ending", 12),
-        ):
-            widgets[field] = create_managed_text_box(
-                parent, label, self.cfg[field], height=height,
-                mono=parent is left, commits=self.commits,
-                favorite_key=favorite, wrap_config_key=wrap_key,
-            )
-        file_list = widgets["demand_file_list_text"]
-        file_list.tag_configure("invalid_line", background=THEME["danger_bg"])
-        file_list.tag_lower("invalid_line")
-        session = TextDraftSession(dialog, self.commits, self.cfg, widgets)
-        status = tk.StringVar(value="")
-        bottom = styled_frame(dialog)
-        bottom.pack(fill="x", padx=16, pady=(6, 14))
-        tk.Label(
-            bottom, textvariable=status, bg=THEME["bg"], fg=THEME["fg_dim"],
-            anchor="w", font=THEME["font_main"],
-        ).pack(side="left", fill="x", expand=True)
-        styled_button(bottom, "取消", session.close, width=10).pack(
-            side="right", padx=(8, 0),
-        )
-        styled_button(
-            bottom, "执行按需合并",
-            lambda: self.execute_demand_merge(session, status),
-            width=14, accent=True,
-        ).pack(side="right")
-        register_popup(dialog, session.close, prepare_close=session.prepare_close)
+        from ui.demand_editor import open_demand_editor
+        return open_demand_editor(self)
 
-    def execute_demand_merge(self, session, status):
-        if self.commits.operation_depth:
-            return
-        with self.commits.operation():
-            return self._execute_demand_merge(session, status)
-
-    def _execute_demand_merge(self, session, status):
-        values = session.values()
-        validation = validate_and_normalize_demand_file_list(values["demand_file_list_text"])
-        values["demand_file_list_text"] = validation["normalized_text"]
-        text = session.widgets["demand_file_list_text"]
-        set_text_value(text, validation["normalized_text"])
-        text.tag_remove("invalid_line", "1.0", "end")
-        for number in validation["invalid_line_numbers"]:
-            text.tag_add("invalid_line", f"{number}.0", f"{number}.end")
-        text.tag_lower("invalid_line")
-        text.tag_raise("search_match")
-        text.tag_raise("search_current")
-
-        fields = {"output_folder", "output_filename", "code_header_line", "code_footer_line"}
-        self.commits.accept_editors(self.commits.select("merge", fields))
-        cfg = {
-            key: self.cfg[key] for key in (
-                "output_folder", "output_filename", "code_header_line",
-                "code_footer_line", "force_overwrite", "open_after_done",
-            )
-        }
-        if not session.accept(values):
-            return
-
-        if validation["invalid_line_numbers"]:
-            status.set(
-                "名单校验未通过。"
-                + summarize_demand_file_list_issues(validation["issue_counts"])
-            )
-            safe_show_error(
-                "名单需要修正",
-                "名单中存在错误，已红色高亮，请原位修改后再次执行。",
-                session.dialog,
-            )
-            return
-        if not validation["valid_paths"]:
-            status.set("合并名单为空。")
-            safe_show_error("名单为空", "请至少填写一个有效文件路径。", session.dialog)
-            return
-
+    def execute_demand_merge(self, cfg, values, file_paths, parent):
+        """只消费本次最终检查固定参数及文件清单，不重新读取草稿。"""
         try:
-            output, header, footer = self.resolve_common_output_and_markers(cfg, session.dialog)
+            output, header, footer = self.resolve_common_output_and_markers(cfg, parent)
             if output is None:
-                return
+                return False
+            from services.demand_rules import windows_path_key
+            output_key = windows_path_key(output)
+            if any(windows_path_key(path) == output_key for path in file_paths):
+                raise ValueError("输出文件被实际选中，不能执行按需合并。")
+
             self.set_status("正在按需合并文件代码...")
             self.log("用户启动：按需合并")
             self.commits.metrics["business_starts"] += 1
             result = merge_demand_files(
-                file_paths=validation["valid_paths"], output_file=output,
+                file_paths=file_paths, output_file=output,
                 preamble_text=values["demand_preamble_text"],
                 ending_text=values["demand_ending_text"],
-                code_header_line=header, code_footer_line=footer, log_func=self.log,
+                code_header_line=header, code_footer_line=footer,
+                log_func=self.log,
             )
         except (OSError, ValueError) as error:
-            status.set(f"按需合并失败：{error}")
-            self.handle_error("按需合并", error, session.dialog)
-            return
+            self.handle_error("按需合并", error, parent)
+            return False
 
         self.set_status("按需文件代码合并完成")
-        status.set("按需合并完成。")
-        duplicate = validation["duplicate_count"]
-        hint = f"\n已自动去重 {duplicate} 条重复路径。" if duplicate else ""
         safe_show_info(
             "成功",
-            f"按需合并完成！\n\n总共合并了 {result.total_files} 个文件。{hint}\n\n"
+            f"按需合并完成！\n\n总共合并了 {result.total_files} 个文件。\n\n"
             f"已保存到：\n{result.output_file}",
-            session.dialog,
+            parent,
         )
         if cfg["open_after_done"]:
             open_path_with_default_app(result.output_file, self.root)
-        session.destroy()
+        return True

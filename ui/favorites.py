@@ -5,7 +5,7 @@ import tkinter as tk
 from core.constants import THEME
 from core.message_utils import safe_ask_yes_no, safe_show_error
 from core.paths import center_window
-from core.text_io import get_text_value, replace_text_keep_undo
+from core.text_io import replace_text_keep_undo
 from ui.theme import styled_entry, styled_frame
 from ui.window_manager import register_popup, unregister_popup, close_registered_popup
 
@@ -93,7 +93,12 @@ class FavoriteTextBoxController:
         return result
 
     def save_current_text_as_favorite(self):
-        content = get_text_value(self.text_widget)
+        content = self.commits.read_text(
+            self.text_widget,
+            preserve_trailing_newlines=getattr(
+                self.text_widget, "_preserve_trailing_newlines", False,
+            ),
+        )
         prepare_favorite = getattr(self.text_widget, "_prepare_favorite_content", None)
         if prepare_favorite is not None:
             with self.commits.operation():

@@ -105,8 +105,8 @@ README.md
 • “ |cache”有前导空格，不是放行条目，正文竖线非法。
 • “:|README”也不是放行条目。
 • 单独“|”是有效放行条目。
-• 分号 ; 在排除名单中不表示放行或注释。
-  按需合并路径名单的分号放行规则与这里不同。
+• 分号 ; 在排除名单和按需合并名单中均是普通名称字符，
+  不表示停用、放行或注释；两种名单均使用行首 | 停用。
 
 
 四、无扩展名条件：文件名单行首半角冒号 :
@@ -659,7 +659,7 @@ def create_exclusion_dialog(parent, title, config, commits, page):
     for color, description in (
         (THEME["danger_bg"], "红：无效，阻止保存"),
         (EXCLUSION_WARNING_BACKGROUND, "黄：有效，有空格风险"),
-        (EXCLUSION_DISABLED_BACKGROUND, "灰：临时放行，不参与排除"),
+        (EXCLUSION_DISABLED_BACKGROUND, "灰：临时停用，不参与排除"),
     ):
         tk.Label(
             legend, text="  ", bg=color, relief="solid", bd=1,

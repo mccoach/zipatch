@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.text_io import is_temporarily_disabled_list_line
+
 
 
 @dataclass
@@ -35,20 +35,6 @@ class PathValidationResult:
     is_relative: bool = False
     was_changed: bool = False
     issue: str = ""
-
-
-@dataclass
-class PathListValidationResult:
-    """
-    多行路径名单校验结果。
-    """
-
-    normalized_text: str
-    valid_paths: list
-    invalid_line_numbers: list
-    changed_line_numbers: list
-    issue_counts: dict
-    duplicate_count: int = 0
 
 
 def strip_outer_quotes(value):
@@ -249,99 +235,6 @@ def validate_output_target_path(raw_path, label="输出路径"):
         result.issue = f"{label}父目录不可创建：{e}"
 
     return result
-
-
-def validate_path_list(
-    list_text,
-    base_dir=None,
-    allow_relative=False,
-    expected_type="file",
-    deduplicate=True,
-):
-    """
-    多行路径名单校验。
-
-    用于：
-    - 按需合并名单；
-    - 未来其他路径批处理功能。
-
-    规则：
-    - 空行忽略；
-    - 每行一个路径；
-    - 可选允许相对路径；
-    - 相对路径使用 base_dir 拼接；
-    - 自动规范化为绝对路径；
-    - 无效行记录行号；
-    - 自动修改行记录为 changed_line_numbers；
-    - 可去重。
-    """
-    normalized_lines = []
-    valid_paths = []
-    invalid_line_numbers = []
-    changed_line_numbers = []
-    issue_counts = {}
-    seen = set()
-    duplicate_count = 0
-
-    for raw_line in (list_text or "").splitlines():
-        if not raw_line.strip():
-            continue
-
-        if is_temporarily_disabled_list_line(raw_line):
-            normalized_lines.append(raw_line.strip())
-            continue
-
-        result = validate_existing_path(
-            raw_line,
-            label="路径",
-            expected_type=expected_type,
-            base_dir=base_dir,
-            allow_relative=allow_relative,
-        )
-
-        line_number = len(normalized_lines) + 1
-
-        if result.is_valid:
-            path_key = os.path.normcase(os.path.abspath(result.resolved))
-
-            if deduplicate and path_key in seen:
-                duplicate_count += 1
-                continue
-
-            seen.add(path_key)
-            normalized_lines.append(result.resolved)
-            valid_paths.append(result.resolved)
-
-            if result.was_changed or result.is_relative or result.original.strip() != result.resolved:
-                changed_line_numbers.append(line_number)
-
-        else:
-            normalized_lines.append(result.normalized or result.original)
-            invalid_line_numbers.append(line_number)
-            issue = result.issue or "路径无效"
-            issue_counts[issue] = issue_counts.get(issue, 0) + 1
-
-    if duplicate_count:
-        issue_counts["重复路径已自动去重"] = duplicate_count
-
-    return PathListValidationResult(
-        normalized_text="\n".join(normalized_lines),
-        valid_paths=valid_paths,
-        invalid_line_numbers=invalid_line_numbers,
-        changed_line_numbers=changed_line_numbers,
-        issue_counts=issue_counts,
-        duplicate_count=duplicate_count,
-    )
-
-
-def summarize_path_issues(issue_counts):
-    if not issue_counts:
-        return ""
-
-    return "；".join(
-        f"{name} {count} 行"
-        for name, count in issue_counts.items()
-    )
 
 
 def normalize_rel_path(rel_path: str):

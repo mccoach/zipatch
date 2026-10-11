@@ -229,7 +229,12 @@ class ExclusionHelpGuiTests(unittest.TestCase):
         widget = widgets["exclude_files"]
         widget.edit_reset()
         raw = '\n"|*.log"\n" README*"\n<none>'
+        separators = self.root.tk.getboolean(widget.cget("autoseparators"))
         replace_text_keep_undo(widget, raw)
+        self.assertEqual(
+            self.root.tk.getboolean(widget.cget("autoseparators")),
+            separators,
+        )
         widget._content_operation_completed(raw)
         self.root.update()
         for tag, line in (
