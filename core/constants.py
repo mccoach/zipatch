@@ -169,6 +169,7 @@ TEXT_WRAP_DEFAULTS = {
     "patch.result_text": False,
     "patch.protocol_doc_text": True,
     "app.log_text": True,
+    "settings.crlf_file_list": True,
 }
 
 # --- 主题配色 ---
@@ -206,6 +207,7 @@ DEFAULT_CONFIG = {
     "active_mode": "merge",
     "settings": {
         "entry_history_max_items": 10,
+        "crlf_file_list": "*.bat\n*.CMD",
     },
     "entry_history": {},
     "ui": {
@@ -278,5 +280,6 @@ DEFAULT_CONFIG = {
         "demand_preamble": [],
         "demand_ending": [],
         "patch_text": [],
+        "crlf_file_list": [],
     },
 }

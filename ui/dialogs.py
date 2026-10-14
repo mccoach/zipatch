@@ -10,7 +10,10 @@ from core.text_io import get_text_value, read_text_with_fallback_encodings, repl
 from ui.favorites import FavoriteTextBoxController, title_bar_button
 from ui.text_editor import TextEditorController
 from ui.theme import styled_button, styled_frame, styled_text_with_scrollbars
-from ui.window_manager import register_popup, unregister_popup
+from ui.window_manager import (
+    register_popup, unregister_popup, restore_editor_interaction,
+    take_modal_control,
+)
 
 
 def create_managed_text_box(
@@ -65,34 +68,43 @@ def create_managed_text_box(
         parent=parent, toolbar_parent=parent, text_widget=text,
         before_text_frame=frame, enable_find=True,
         enable_replace=not readonly, enable_undo=not readonly,
-        readonly=readonly, on_content_changed=content_completed,
+        readonly=readonly,
+        on_content_changed=lambda prepared=None:
+        text._content_operation_completed(prepared),
     )
 
     if not readonly and enable_favorites and favorite_key:
         FavoriteTextBoxController(
-            parent, title_row, text, commits, favorite_key, content_completed,
+            parent, title_row, text, commits, favorite_key,
+            lambda prepared=None: text._content_operation_completed(prepared),
         )
 
     if not readonly and enable_import_text:
         def import_text():
-            with commits.operation():
-                path = filedialog.askopenfilename(
-                    title="导入文本文件", filetypes=[("All Files", "*.*")],
-                    parent=text.winfo_toplevel(),
-                )
-            if not path:
+            if commits.operation_depth or str(text.cget("state")) != "normal":
                 return
             try:
-                content, encoding = read_text_with_fallback_encodings(path)
-            except (OSError, ValueError) as error:
-                safe_show_error("导入失败", str(error), text.winfo_toplevel())
-                return
-            replace_text_keep_undo(text, content)
-            if content_completed(content):
-                safe_show_info(
-                    "导入完成", f"文本文件已导入。\n\n编码：{encoding}\n路径：\n{path}",
-                    text.winfo_toplevel(),
-                )
+                with commits.operation():
+                    path = filedialog.askopenfilename(
+                        title="导入文本文件", filetypes=[("All Files", "*.*")],
+                        parent=text.winfo_toplevel(),
+                    )
+                    if not path:
+                        return
+                    try:
+                        content, encoding = read_text_with_fallback_encodings(path)
+                    except (OSError, ValueError) as error:
+                        safe_show_error("导入失败", str(error), text.winfo_toplevel())
+                        return
+                    replace_text_keep_undo(text, content)
+                    if text._content_operation_completed(content):
+                        safe_show_info(
+                            "导入完成",
+                            f"文本文件已导入。\n\n编码：{encoding}\n路径：\n{path}",
+                            text.winfo_toplevel(),
+                        )
+            finally:
+                restore_editor_interaction(text)
 
         title_bar_button(title_row, "导入", import_text, width=6).pack(
             side="right", padx=(0, 6),
@@ -108,7 +120,7 @@ def create_managed_text_box(
                 text.configure(state="disabled")
             else:
                 replace_text_keep_undo(text, "")
-            content_completed("")
+            text._content_operation_completed("")
 
         title_bar_button(title_row, "清空", clear, width=6).pack(
             side="right", padx=(0, 6),
@@ -156,6 +168,9 @@ class TextDraftSession:
             for field, widget in self.widgets.items()
         }
 
+    def has_changes(self, values):
+        return values != self.baseline
+
     def accept(self, values):
         if not self.commits.accept_draft(self.config, values, self.dialog):
             return False
@@ -196,7 +211,7 @@ class TextDraftSession:
         try:
             with self.commits.operation():
                 values = self.values()
-                if values != self.baseline:
+                if self.has_changes(values):
                     choice = messagebox.askyesnocancel(
                         "内容已修改", "文本内容有修改，是否保存？", parent=self.dialog,
                     )
@@ -220,7 +235,7 @@ def create_text_settings_dialog(parent, title, config, commits, definitions, wid
     dialog.title(title)
     dialog.configure(bg=THEME["bg"])
     dialog.transient(parent)
-    dialog.grab_set()
+    take_modal_control(dialog)
     center_window(dialog, width, height)
     instructions = "快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做。收藏按钮位于各文本框标题栏右侧。"
     tk.Label(

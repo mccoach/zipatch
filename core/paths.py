@@ -4,7 +4,7 @@ import os
 import sys
 import subprocess
 from pathlib import Path
-from tkinter import TclError, messagebox
+
 
 from core.constants import CONFIG_FILENAME
 
@@ -60,14 +60,12 @@ def get_asset_path(relative_path):
 
 
 def center_window(win, width=980, height=760):
-    try:
-        win.update_idletasks()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        x = int((sw - width) / 2)
-        y = int((sh - height) / 3)
-        win.geometry(f"{width}x{height}+{x}+{y}")
-    except Exception:
-        pass
+    """调用方传入存活窗口；几何设置失败自然暴露，不伪装完成。"""
+    win.update_idletasks()
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    x = int((sw - width) / 2)
+    y = int((sh - height) / 3)
+    win.geometry(f"{width}x{height}+{x}+{y}")
 
 
 def raise_and_focus(win):

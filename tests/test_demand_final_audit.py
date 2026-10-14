@@ -236,7 +236,7 @@ class DemandFinalGuiAuditTests(unittest.TestCase):
     def test_final_start_reads_each_draft_once(self):
         before = self.app.commits.metrics["text_reads"]
         self.assertTrue(self.session.start_final("save"))
-        self.assertEqual(self.app.commits.metrics["text_reads"] - before, 3)
+        self.assertEqual(self.app.commits.metrics["text_reads"] - before, 2)
         self.session.cancel_final()
         self.wait_until(lambda: not self.session.busy)
 

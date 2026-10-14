@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""按需合并草稿、后台检查调度和最终操作的界面协调。"""
+"""按名单合并草稿、后台检查调度和最终操作的界面协调。"""
 
 import tkinter as tk
 from collections import defaultdict, deque
@@ -19,14 +19,16 @@ from services.demand_rules import (
     DemandCheckCancelled,
     DemandMatch,
     build_demand_selection,
-    clean_demand_expression,
+
     demand_physical_lines,
     inspect_demand_rules,
     rule_is_relative,
 )
 from ui.dialogs import TextDraftSession, create_managed_text_box
 from ui.theme import styled_button, styled_frame, styled_text_with_scrollbars
-from ui.window_manager import register_popup, unregister_popup
+from ui.window_manager import register_popup, unregister_popup, take_modal_control
+from ui.list_text_editing import ListTextEditing
+from core.rule_lists import clean_rule_quotes
 
 
 DEBOUNCE_SECONDS = 0.2
@@ -40,82 +42,190 @@ DEMAND_HIGHLIGHT_STYLES = (
     ("demand_disabled", "#555555", "#c6c6c6", "灰：主动停用"),
 )
 
-DEMAND_HELP = r"""按需合并名单填写规则
+DEMAND_HELP = r"""按名单合并名单填写规则
 
-每个物理文本行是一条文件选择规则，不是排除规则。
-常规扫描、常规合并的排除名单不应用于这里。
+一、每行选择一个文件或一组文件
+────────────────────────────────────────
+每行填写一条文件选择规则。
+可以填写具体文件路径，也可以使用通配符选择一组文件。
+这里是“选择要合并的文件”，不是排除名单；
+扫描和按目录合并的排除名单不适用于这里。
 
-文本处理
-1. 删除每行全部半角双引号。
-2. 删除后完全为空的行忽略；仅空白行不是空行。
-3. 删除后第一个字符为 |，该行停用。
-4. 其他行启用。不自动去掉首尾空白。
-5. ; 是普通名称字符，不再表示停用；不支持行尾注释。
-6. 不删除重复规则，不改变规则顺序。
-7. 只识别 LF、CRLF 为换行，不展开环境变量或 ~。
+例：
+README.md
+docs\a.md
+docs\*.md
 
-路径
-C:\docs\a.md 或 C:/docs/a.md：完整盘符绝对路径。
-\\server\share\docs\a.md：完整 UNC 路径。
-docs\a.md：以主面板已接受的源文件夹为唯一基准。
-README.md：只选择源文件夹根下文件，不到任意层级搜索。
-绝对路径可以使用不同于源文件夹的盘符。
-C:docs\a.md、C:、单个开头斜杠、设备路径均不支持。
-UNC 必须包含服务器名和共享名；两者不能使用通配符。
-相对路径不得使用 ..，并要求源文件夹存在且为目录。
-全部启用规则均为绝对路径时，不要求设置源文件夹。
-普通目录路径不能直接合并，必须填写文件或显式通配符。
+不要用逗号或分号分隔多条规则。
+名称里的空格、逗号、分号和方括号都是普通字符。
 
-通配符
-*：当前路径段内零个或多个字符，不跨目录。
-?：当前路径段内恰好一个字符。
-**：独立路径段，零层或多层目录。
-a**、**a、*** 等均无效。
-不支持正则、花括号扩展或取反规则。
 
-示例
-docs\*.md：docs 当前层级的 Markdown 文件。
-docs\**\*.md：docs 及其子目录的 Markdown 文件。
-**\README.md：源文件夹各层级的同名文件。
-docs\**\*：递归选择 docs 下的文件。
-|docs\*.md：主动停用，不检查、不执行。
-;docs\a.md：启用的普通路径，不是停用。
+二、引号、空行和空格
+────────────────────────────────────────
+• 半角双引号 " 在输入、粘贴和回填时实时删除，包括路径内部的双引号。
+• 删除双引号后完全为空的行不选择任何文件。
+• 不自动删除首尾空格，空格会参与文件名匹配。
+• 只有空格的行不是有效规则。
+• 不展开环境变量或 ~，请填写实际路径。
+• 不支持行尾注释；说明文字不要写在启用规则后面。
+• 换行请使用普通回车换行，不用 Tab 分隔规则。
 
-颜色
-红：语法、文件选择或访问检查失败，不能执行。
-黄：选择成功，至少一个文件与前序规则重复，可以执行。
-绿：选择成功，重复关系确定，没有与前序规则重复。
-灰：用户主动停用。
-无颜色：待检查、检查中、旧结果失效，或重复关系尚未确定。
-空行无颜色。
-颜色仅代表最近一次有效检查，不自动感知所有外部文件变化。
+例：
+"docs\a.md"       → docs\a.md
+""                → 不选择文件
+;README.md        → 名为 ;README.md 的文件，不表示停用
 
-检查与结果
-正文变化后立即撤销变化规则的旧结果。
-200 毫秒防抖，只合并尚未开始的请求。
-始终只有一个运行扫描任务和一个最新待检查请求。
-修改正文或源基准立即通知旧任务取消；不保证立即中断系统调用。
-检查在后台执行，后台不访问 Tk。
-结果展示当前行号、命中/重复/新增数量和有序去重文件清单。
-单条规则的文件按完整路径大小写不敏感排序。
-同一路径仅合并一次，保留首次选中的位置。
 
-保存
-点击保存后固定正文和源基准，重新检查全部启用规则。
-允许保存红项，但会明确提示仍不能执行。
-保存的是规则表达，不是展开文件清单。
-收藏同样保存规则表达；收藏回填触发自动检查。
-收藏添加/改名的文字清洗不代替业务保存或执行的完整最终检查。
+三、停用某一行：行首 |
+────────────────────────────────────────
+删除双引号后，第一个字符为半角竖线 |，表示停用。
+去掉行首 | 即可重新启用。
+Ctrl+` 逐行切换行首一个 |；无选区处理光标所在物理行。
+有选区时各行独立切换；结束在下一行行首时不处理该下一行。
+屏幕折行不算新行。空行变为 |，||abc 变为 |abc。
+一次切换可一次撤销，不自动保存。
 
-执行
-点击执行后固定正文、附加文本和必要主面板参数。
-等待旧任务退出后立即进行完整最终检查，不等待防抖。
-任一红项、全部为空/停用、没有文件、实际选中输出文件，
-或最终检查被取消，均不执行。
-黄色不阻止执行。
-执行消费本次固定的有序去重清单，不重新读取另一份名单。
-源文件读取失败明确报告失败，不静默跳过。
-本轮仍直接写成果；原子写入及旧成果保护留到下一课题。
+例：
+|docs\a.md
+|docs\*.md
+
+停用行不选择文件，显示灰色。
+| 必须位于行首；“ |docs\a.md”不是停用规则。
+停用行可以保留暂时不用的路径或备注。
+
+
+四、绝对路径和相对路径
+────────────────────────────────────────
+【绝对路径】
+填写完整盘符路径，或完整网络共享路径。
+
+例：
+C:\docs\a.md
+D:/project/README.md
+\\server\share\docs\a.md
+
+网络共享路径必须包含服务器名和共享名。
+服务器名及共享名不能使用通配符。
+可以选择不同盘符下的文件。
+
+【相对路径】
+以主面板设置的源文件夹为起点。
+
+例：
+README.md
+只选择源文件夹根下的 README.md，不自动搜索子目录。
+
+docs\a.md
+选择源文件夹下 docs 目录中的 a.md。
+
+使用相对路径时，必须设置有效的源文件夹。
+全部启用规则都是绝对路径时，可以不设置源文件夹。
+相对路径不得使用 .. 返回上级目录。
+
+以下形式不支持：
+C:docs\a.md
+C:
+\docs\a.md
+\\?\C:\docs\a.md
+\\.\C:\docs\a.md
+
+可以使用 / 或 \ 作为路径分隔符。
+不要在文件名后加斜杠；docs\a.md\ 表示目录要求，
+不能用来选择文件。
+
+
+五、文件夹不能直接合并
+────────────────────────────────────────
+填写文件夹路径不会自动选择里面的文件。
+如需选择目录内文件，请明确使用通配符。
+
+例：
+docs
+这是文件夹，不是可合并文件。
+
+docs\*
+选择 docs 当前层级的文件。
+
+docs\**\*
+选择 docs 及其全部子目录中的文件。
+
+
+六、通配符
+────────────────────────────────────────
+【*：当前路径段内零个或多个字符】
+不跨目录。
+
+docs\*.md
+选择 docs 当前层级的 Markdown 文件。
+
+test_*.py
+选择源文件夹根下的 test_.py、test_a.py 等文件。
+
+【?：当前路径段内一个字符】
+不跨目录。
+
+part?.txt
+可以选择 part1.txt，不选择 part.txt 或 part10.txt。
+
+【**：零层或多层目录】
+必须独占一个路径段。
+
+docs\**\*.md
+选择 docs 及其子目录中的 Markdown 文件。
+
+**\README.md
+选择源文件夹各层级的 README.md。
+
+docs\**\*
+选择 docs 下所有层级的文件。
+
+以下写法无效：
+a**b
+**.md
+***
+
+不支持正则表达式、花括号扩展或取反。
+[ab].txt 表示字面名称 [ab].txt，不表示 a.txt 或 b.txt。
+
+
+七、顺序和重复选择
+────────────────────────────────────────
+• 合并顺序按名单从上到下排列。
+• 一条通配符规则选中的文件，按完整路径排序，不区分大小写。
+• 多条规则选中同一路径时，只合并一次，保留首次选中的位置。
+• 重复规则不必手动删除；也可以调整顺序改变文件出现位置。
+
+
+八、颜色和诊断
+────────────────────────────────────────
+红：规则无效、文件不存在、没有选中文件或无法访问；
+    查看对应行的原因并修正，红项不能执行。
+
+黄：选中了文件，但与前面的规则有重复；可以执行。
+
+绿：成功选中文件，且没有与前面的规则重复。
+
+灰：该行已主动停用。
+
+无高亮：尚未得到确定结果；空行也不高亮。
+
+结果区显示对应行的命中、重复和新增数量，
+以及当前选中的文件清单，便于核对选择范围。
+颜色是最近一次检查的结果，不代表文件以后不会变化。
+
+
+九、保存与执行前核对
+────────────────────────────────────────
+保存和收藏保留你填写的规则表达，
+不会把通配符改写为一长串具体文件路径。
+重复行和末尾空行会保留。
+
+有红项时可以保存名单，留待以后修改，但不能执行。
+执行前请确认：
+• 没有红项。
+• 至少选中一个文件。
+• 文件清单及顺序符合预期。
+• 没有选中本次输出文件本身。
 """
 
 
@@ -142,13 +252,12 @@ def descendants(widget):
 
 
 def show_demand_help(parent):
-    root = parent._root()
-    previous_grab = parent.grab_current()
+
     dialog = tk.Toplevel(parent)
-    dialog.title("按需合并 - 填写规则")
+    dialog.title("按名单合并 - 填写规则")
     dialog.configure(bg=THEME["bg"])
     dialog.transient(parent)
-    dialog.grab_set()
+    take_modal_control(dialog)
     center_window(dialog, 860, 720)
     frame, text = styled_text_with_scrollbars(
         dialog, height=30, wrap="word", readonly=True,
@@ -171,12 +280,7 @@ def show_demand_help(parent):
         parent.wait_window(dialog)
     finally:
         unregister_popup(dialog)
-        if (
-            not getattr(root, "_zipatch_closed", False)
-            and previous_grab is not None
-            and previous_grab.winfo_exists()
-        ):
-            previous_grab.grab_set()
+
 
 
 class DemandDraftSession(TextDraftSession):
@@ -217,8 +321,10 @@ class DemandDraftSession(TextDraftSession):
         self.rule_text.tag_raise("search_match")
         self.rule_text.tag_raise("search_current")
         self.rule_text.tag_raise("sel")
-        self.rule_text.edit_modified(False)
-        self.rule_text.bind("<<Modified>>", self.on_modified, add="+")
+        self.list_editing = ListTextEditing(
+            self.rule_text, self.commits, self.on_rule_text,
+        )
+        self.baseline["demand_file_list_text"] = self.list_editing.text
         self.rule_text._prepare_favorite_content = self.prepare_favorite
         for binding in self.commits.select("merge", {"source_folder"}):
             callback_id = binding.widget.bind(
@@ -237,15 +343,16 @@ class DemandDraftSession(TextDraftSession):
 
     def values(self):
         return {
-            field: self.commits.read_text(
-                widget,
-                preserve_trailing_newlines=field == "demand_file_list_text",
+            field: (
+                self.list_editing.complete()
+                if field == "demand_file_list_text"
+                else self.commits.read_text(widget)
             )
             for field, widget in self.widgets.items()
         }
 
     def prepare_favorite(self, content, display=True):
-        prepared = clean_demand_expression(content)
+        prepared = clean_rule_quotes(content)
         if display and prepared != content:
             replace_text_keep_undo(self.rule_text, prepared)
         return prepared
@@ -264,7 +371,7 @@ class DemandDraftSession(TextDraftSession):
             else:
                 self.next_identifier += 1
                 rule = RuleState(self.next_identifier, raw)
-                expression = clean_demand_expression(raw)
+                expression = clean_rule_quotes(raw)
                 if expression == "":
                     rule.match = DemandMatch(completed=True, empty=True)
                 elif expression.startswith("|"):
@@ -275,15 +382,9 @@ class DemandDraftSession(TextDraftSession):
         self.render()
         return True
 
-    def on_modified(self, event=None):
+    def on_rule_text(self, content):
         if self._destroyed or self._writing_text:
             return
-        if not self.rule_text.edit_modified():
-            return
-        self.rule_text.edit_modified(False)
-        content = self.commits.read_text(
-            self.rule_text, preserve_trailing_newlines=True,
-        )
         if demand_physical_lines(content) == [rule.raw for rule in self.rules]:
             return
         self.cancel_running()
@@ -462,11 +563,28 @@ class DemandDraftSession(TextDraftSession):
         )
         if not selection.files:
             lines.append("无")
+        # 高亮表达当前事实；结果正文保留按时间追加的检查反馈。
+        # 历史记录不参与选择、去重或执行资格判断。
+        follow_end = self.result_text.yview()[1] >= 0.999
+        self.result_text.configure(state="normal")
+        separator = "" if self.result_text.index("end-1c") == "1.0" else "\n\n"
+        self.result_text.insert(
+            "end-1c",
+            separator + "【当前名单检查记录】\n" + "\n".join(lines),
+        )
+        self.result_text.configure(state="disabled")
+        if follow_end:
+            self.result_text.see("end")
+        return selection
+
+    def clear_check_history(self):
+        """仅主动清空显示历史，不改变规则、匹配和业务配置。"""
+        if self._destroyed or self.busy or self.commits.operation_depth:
+            return False
         self.result_text.configure(state="normal")
         self.result_text.delete("1.0", "end")
-        self.result_text.insert("1.0", "\n".join(lines))
         self.result_text.configure(state="disabled")
-        return selection
+        return True
 
     def lock_inputs(self):
         candidates = list(descendants(self.dialog)) + list(descendants(self.panel))
@@ -512,7 +630,7 @@ class DemandDraftSession(TextDraftSession):
 
     def start_final(self, action):
         if action not in ("save", "execute", "close"):
-            raise ValueError(f"未知按需名单操作：{action}")
+            raise ValueError(f"未知按名单合并操作：{action}")
         if self._destroyed or self.busy or self.commits.operation_depth:
             return False
         fields = (
@@ -543,7 +661,7 @@ class DemandDraftSession(TextDraftSession):
             self.lock_inputs()
             self.cancel_running()
             for rule in self.rules:
-                expression = clean_demand_expression(rule.raw)
+                expression = clean_rule_quotes(rule.raw)
                 rule.match = (
                     DemandMatch(completed=True, empty=True)
                     if expression == "" else
@@ -573,7 +691,7 @@ class DemandDraftSession(TextDraftSession):
                 self.cancel_button.configure(state="disabled")
             values = dict(self._final_values)
             parameters = dict(self._final_parameters)
-            values["demand_file_list_text"] = clean_demand_expression(
+            values["demand_file_list_text"] = clean_rule_quotes(
                 values["demand_file_list_text"]
             )
             if not selection.complete:
@@ -610,7 +728,7 @@ class DemandDraftSession(TextDraftSession):
                     self.rule_text.configure(state="disabled")
                 self.rule_text.edit_modified(False)
                 for rule in self.rules:
-                    rule.raw = clean_demand_expression(rule.raw)
+                    rule.raw = clean_rule_quotes(rule.raw)
                 # 正文整体替换会移除标签；清洗不改变选择语义，
                 # 使用本次已完成的匹配结果重建展示，不重新访问文件系统。
                 self.render()
@@ -635,7 +753,7 @@ class DemandDraftSession(TextDraftSession):
                     self.release_final()
                     self.destroy()
                 else:
-                    self.status.set("按需合并未完成；规则已保存，未宣称执行成功")
+                    self.status.set("按名单合并未完成；规则已保存，未宣称执行成功")
             elif action == "close":
                 self.release_final()
                 self.destroy()
@@ -710,10 +828,10 @@ class DemandDraftSession(TextDraftSession):
 
 def open_demand_editor(panel):
     dialog = tk.Toplevel(panel.root)
-    dialog.title("按需合并")
+    dialog.title("按名单合并")
     dialog.configure(bg=THEME["bg"])
     dialog.transient(panel.root)
-    dialog.grab_set()
+    take_modal_control(dialog)
     center_window(dialog, 1180, 840)
 
     header = styled_frame(dialog)
@@ -721,7 +839,7 @@ def open_demand_editor(panel):
     tk.Label(
         header,
         text="每行一条文件选择规则；| 停用；相对路径以主面板源文件夹为基准。"
-             "Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做。",
+             "Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做，Ctrl+` 逐行停用／启用。",
         bg=THEME["bg"], fg=THEME["fg_label"], font=THEME["font_main"],
         anchor="w", justify="left", wraplength=990,
     ).pack(side="left", fill="x", expand=True)
@@ -774,6 +892,12 @@ def open_demand_editor(panel):
     frame.pack(fill="both", expand=True, pady=(8, 0))
     status = tk.StringVar(master=dialog, value="待检查")
     session = DemandDraftSession(panel, dialog, widgets, result_text, status)
+    history_buttons = styled_frame(left)
+    history_buttons.pack(fill="x", pady=(4, 0))
+    styled_button(
+        history_buttons, "清空检查记录",
+        session.clear_check_history, width=12,
+    ).pack(side="right")
 
     bottom = styled_frame(dialog)
     bottom.pack(fill="x", padx=16, pady=(6, 14))
@@ -785,7 +909,7 @@ def open_demand_editor(panel):
         side="right", padx=(8, 0),
     )
     styled_button(
-        bottom, "执行按需合并", lambda: session.start_final("execute"),
+        bottom, "执行按名单合并", lambda: session.start_final("execute"),
         width=14, accent=True,
     ).pack(side="right", padx=(8, 0))
     styled_button(

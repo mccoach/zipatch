@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""按需合并规则的唯一解析、可取消文件选择和内存去重能力。"""
+"""按名单合并规则的唯一解析、可取消文件选择和内存去重能力。"""
 
 import ntpath
 import os
@@ -8,6 +8,8 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+
+from core.rule_lists import clean_rule_quotes
 
 
 class DemandCheckCancelled(Exception):
@@ -63,10 +65,6 @@ def check_cancel(cancel):
         raise DemandCheckCancelled()
 
 
-def clean_demand_expression(text):
-    """仅删除半角双引号，不删除空白、空行或重复表达。"""
-    return text.replace('"', "")
-
 
 def demand_physical_lines(text):
     """只识别 LF 和 CRLF；孤立 CR 留在正文接受校验。"""
@@ -78,7 +76,7 @@ def windows_path_key(path):
 
 
 def parse_demand_rule(raw):
-    expression = clean_demand_expression(raw)
+    expression = clean_rule_quotes(raw)
     if expression == "":
         return ParsedDemandRule(expression, False, False, "", (), False)
     if expression.startswith("|"):

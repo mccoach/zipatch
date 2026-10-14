@@ -7,6 +7,7 @@ from time import perf_counter
 from core.config import SaveStatus
 from core.message_utils import safe_show_error
 from core.text_io import get_text_value
+from core.rule_lists import RuleListResult, analyze_rule_list, clean_rule_quotes
 
 
 class EditorBinding:
@@ -131,6 +132,8 @@ class ConfigCommitController:
         self.root = root
         self.manager = manager
         self.editors = set()
+        # 每字段只保留当前配置结果；不累积草稿历史。
+        self.rule_results = {}
         self.operation_depth = 0
         self.metrics = {
             "editor_accept_calls": 0,
@@ -138,6 +141,38 @@ class ConfigCommitController:
             "text_read_seconds": 0.0,
             "business_starts": 0,
         }
+
+    def prepare_rule(self, config, field, kind, text=None):
+        """只分析请求正文；对应当前配置的固定正文结果可以保留。"""
+        key = (id(config), field, kind)
+        accepted = config[field]
+        source = accepted if text is None else text
+        cleaned = clean_rule_quotes(source)
+        previous = self.rule_results.get(key)
+        if previous is not None:
+            result = previous[1]
+            if cleaned in (result.source_text, result.normalized_text):
+                if source == accepted:
+                    self.rule_results[key] = (config, result)
+                return result
+        result = analyze_rule_list(source, kind)
+        if source == accepted:
+            # 固定业务正文等于当前配置时，首次结果必须保留。
+            # 不接受另一份候选，也不以候选替换配置权威正文。
+            self.rule_results[key] = (config, result)
+        return result
+
+    def remember_rule(self, config, field, result):
+        """成功接受并保存后关联结果；失败候选不替代配置结果。"""
+        if not isinstance(result, RuleListResult):
+            raise TypeError("配置名单必须关联正式分析结果")
+        if clean_rule_quotes(config[field]) not in (
+            result.source_text, result.normalized_text,
+        ):
+            raise ValueError("名单结果不对应当前已接受正文")
+        self.rule_results[(id(config), field, result.object_kind)] = (
+            config, result,
+        )
 
     def register(self, *args, **kwargs):
         return EditorBinding(self, *args, **kwargs)

@@ -22,7 +22,9 @@ from services.patch_protocol_doc_sync import (
     apply_protocol_doc_update, is_protocol_doc_update_available, preview_protocol_doc_update,
 )
 from services.patch_service import apply_backup_restore, apply_patch, preview_backup_restore, preview_patch
+
 from ui.dialogs import create_managed_text_box
+from ui.newline_settings import edit_newline_settings
 from ui.theme import styled_button, styled_frame
 from ui.widgets import browse_folder, create_entry_row, make_checkbutton, make_radiobutton
 from ui.window_manager import register_popup, unregister_popup
@@ -58,7 +60,7 @@ class PatchPanel(BasePanel):
             history_key="patch.restore_source_dir", value_normalizer=normalize_windows_display_path,
             browse_command=lambda: self.browse_project_relative_folder(self.restore_source_dir, "选择用于还原的历史备份目录"),
             open_command=lambda: open_path_with_default_app(self.restore_source_dir.get(), self.root),
-            tooltip_text="备份来源目录必须包含 manifest.json。",
+            tooltip_text="仅支持新格式 recovery.json；旧 manifest 不再支持，不自动转换或删除。",
         )
 
         self.mode_row = styled_frame(body, bg=THEME["bg_panel"])
@@ -120,6 +122,10 @@ class PatchPanel(BasePanel):
         row.pack(fill="x", pady=(12, 0))
         styled_button(row, "清空结果", self.clear_result, width=10).pack(side="left", padx=(0, 8))
         styled_button(row, "打开备份目录", self.open_last_backup_dir, width=12).pack(side="left")
+        self.newline_settings_button = styled_button(
+            row, "换行设置", self.open_newline_settings, width=10,
+        )
+        self.newline_settings_button.pack(side="left", padx=(8, 0))
         self.apply_button = styled_button(row, "预演并执行", self.apply, width=12, danger=True)
         self.apply_button.pack(side="right", padx=(8, 0))
         self.preview_button = styled_button(row, "Dry Run 预演", self.preview, width=14, accent=True)
@@ -131,6 +137,10 @@ class PatchPanel(BasePanel):
 
     def refresh_mode_ui(self):
         restore = self.patch_mode.get() == "restore"
+        if restore:
+            self.newline_settings_button.pack_forget()
+        elif not self.newline_settings_button.winfo_manager():
+            self.newline_settings_button.pack(side="left", padx=(8, 0))
         for row, visible in (
             (self.backup_dir_entry._row_frame, not restore),
             (self.restore_source_entry._row_frame, restore),
@@ -195,7 +205,17 @@ class PatchPanel(BasePanel):
             return
         open_path_with_default_app(str(path), self.root)
 
+    def open_newline_settings(self):
+        if edit_newline_settings(self.root, self.commits):
+            self.log("换行设置已保存")
+
     def prepare_parameters(self):
+        output_rules = (
+            self.commits.prepare_rule(
+                self.config_data["settings"], "crlf_file_list", "file",
+            )
+            if self.cfg["patch_mode"] == "apply" else None
+        )
         fields = {
             "project_root", "patch_mode", "backup_enabled", "backup_dir",
             "open_backup_after_done",
@@ -204,7 +224,10 @@ class PatchPanel(BasePanel):
             fields |= {"restore_source_dir", "keep_restore_source_path"}
         else:
             fields |= {"allow_delete", "allow_multi_replace_exact", "patch_text"}
-        return self.prepare(fields)
+        parameters = self.prepare(fields)
+        if parameters is not None and output_rules is not None:
+            parameters["output_rules"] = output_rules
+        return parameters
 
     def display_result(self, text):
         self.result_text.configure(state="normal")
@@ -236,7 +259,12 @@ class PatchPanel(BasePanel):
         )
 
     def finish_result(self, text, updates=None, outcome="预演已完成"):
-        final = self.display_result(text)
+        # 已接受结果字段是历史权威源，控件只是其展示。
+        # 组合操作的中间预演未接受，最终完整记录只追加一次。
+        history = self.cfg["last_result_text"]
+        final = self.display_result(
+            history + "\n\n" + text if history else text
+        )
         values = {"last_result_text": final}
         if updates:
             values.update(updates)
@@ -264,6 +292,7 @@ class PatchPanel(BasePanel):
             )
         patch = validate_required_path(cfg["patch_text"], "修改包内容")
         return preview_patch(
+            output_rules=cfg["output_rules"],
             project_root=project, patch_text=patch,
             allow_delete=cfg["allow_delete"],
             allow_multi_replace_exact=cfg["allow_multi_replace_exact"],
@@ -299,7 +328,6 @@ class PatchPanel(BasePanel):
         cfg = self.prepare_parameters()
         if cfg is None:
             return
-        self.display_result("")
         self.set_status(
             "正在预演备份还原..." if cfg["patch_mode"] == "restore"
             else "正在执行 Dry Run 预演..."
@@ -321,8 +349,7 @@ class PatchPanel(BasePanel):
             safe_show_info("Dry Run 完成", "校验完成，请查看预演结果。", self.root)
 
 
-    def build_apply_operation_summary(self, cfg, patch):
-        project = Path(cfg["project_root"]).resolve()
+    def build_apply_operation_summary(self, cfg, preview):
         groups = [
             ("create", "新增文件"), ("create_dir", "创建目录"),
             ("overwrite", "覆盖已有路径"), ("append_text", "追加文本"),
@@ -331,40 +358,32 @@ class PatchPanel(BasePanel):
             ("copy_file", "复制文件"), ("rename_dir", "目录改名"),
             ("move_dir", "移动目录"), ("copy_dir", "复制目录"),
             ("delete_file", "删除文件"), ("delete_dir", "删除文件夹"),
-            ("skip", "跳过写入"),
+            ("skip", "固定跳过"),
         ]
         paths = {key: [] for key, _ in groups}
         counts = {key: 0 for key, _ in groups}
         replacements = 0
-
-        for operation in patch["operations"]:
+        for action in preview.execution.plan.actions:
+            operation = action.payload
             kind = operation["op"]
-            relative = operation["path"].replace("\\", "/").strip()
-            target = project / relative
-            display = relative
-            if kind == "write_file":
-                if target.exists():
-                    group = "skip" if operation.get("if_exists", "error") == "skip" else "overwrite"
-                else:
-                    group = "create"
-            elif kind in (
-                "rename_file", "move_file", "copy_file",
-                "rename_dir", "move_dir", "copy_dir",
-            ):
-                new_path = operation["new_path"].replace("\\", "/").strip()
-                display = f"{relative} -> {new_path}"
-                if (project / new_path).exists():
-                    group = "skip" if operation.get("if_exists", "error") == "skip" else "overwrite"
-                else:
-                    group = kind
-            else:
-                group = kind
+            display = operation["path"]
+            group = kind
+            if not action.execute:
+                group = "skip"
+            elif kind == "write_file":
+                group = (
+                    "create" if action.expectations[0].kind == "absent"
+                    else "overwrite"
+                )
+            if "new_path" in operation:
+                display += " -> " + operation["new_path"]
+                if action.execute and action.expectations[1].kind != "absent":
+                    group = "overwrite"
             counts[group] += 1
             if group == "replace_exact":
                 replacements += int(operation["count"])
             if display not in paths[group]:
                 paths[group].append(display)
-
         existing = {
             "overwrite", "append_text", "replace_exact", "replace_between",
             "rename_file", "move_file", "copy_file", "rename_dir",
@@ -404,7 +423,12 @@ class PatchPanel(BasePanel):
             return safe_ask_risk_confirm(
                 "高风险确认：未启用自动备份", message, self.root, danger=True,
             )
-        backup = "自动备份已开启。" if cfg["backup_enabled"] else "当前未开启自动备份。"
+        backup = (
+            "自动备份已开启：首次改变前逐步备份并发布 recovery.json。"
+            if cfg["backup_enabled"] else "当前未开启自动备份。"
+        )
+        backup += "\n执行消费本次固定计划；状态偏离时停止。"
+        backup += "\n规划、备份和执行期间避免外部并发修改；不提供自动整批回滚。"
         return safe_ask_risk_confirm(
             "执行确认",
             "即将执行文件修改。\n\n" + backup + "\n\n本次操作清单：\n\n"
@@ -414,12 +438,24 @@ class PatchPanel(BasePanel):
 
     def confirm_restore_execution(self, cfg, summary):
         lines = [
-            "即将根据备份来源执行文件层级还原。",
-            "还原前程序会按“自动备份”设置备份当前状态。", "", "风险清单：",
+            "即将按 recovery.json 恢复原状态。",
+            "会覆盖或删除保护范围内的后续修改；"
+            "已发布但尚未执行的对象也可能被冗余还原。",
+            "没有可靠执行后状态，不能确认没有后续修改。",
+            "确认后执行本次固定计划；范围或源清单变化时停止。",
+            "规划、备份和执行期间请避免外部并发修改。",
+            "还原前备份可通过同一入口再次恢复。"
+            if cfg["backup_enabled"] else
+            "当前未开启自动备份，不能保证恢复到本次还原之前。",
+            "", "实际范围：",
         ]
         for key, title in (
-            ("mismatch_paths", "状态漂移项"), ("delete_paths", "将删除当前存在路径"),
-            ("overwrite_paths", "将覆盖当前路径"), ("restore_dirs", "涉及目录树还原"),
+            ("restore_paths", "恢复原状态"),
+            ("delete_paths", "删除当前对象"),
+            ("overwrite_paths", "覆盖或移除当前对象"),
+            ("restore_dirs", "整体恢复原目录树"),
+            ("create_parent_paths", "创建必要缺失父目录"),
+            ("prebackup_absent_dirs", "还原前备份再次恢复的整体目录删除范围"),
         ):
             paths = summary.get(key, [])
             if paths:
@@ -445,7 +481,6 @@ class PatchPanel(BasePanel):
         cfg = self.prepare_parameters()
         if cfg is None:
             return
-        self.display_result("")
         self.set_status(
             "正在预演备份还原..." if cfg["patch_mode"] == "restore"
             else "正在执行 Dry Run 预演..."
@@ -460,7 +495,10 @@ class PatchPanel(BasePanel):
         self.set_status("Dry Run 预演完成")
         self.log("Dry Run 预演完成")
         report = self.result_section("Dry Run 预演", preview.preview_text, cfg)
-        self.display_result(report)
+        history = self.cfg["last_result_text"]
+        # 先展示本次预演供用户确认，但不提前接受或保存。
+        # 完成、取消或失败时，finish_result 从同一历史追加最终记录。
+        self.display_result(history + "\n\n" + report if history else report)
 
         if cfg["patch_mode"] == "apply" and preview.failed_count:
             message = self.failure_message(preview)
@@ -479,7 +517,7 @@ class PatchPanel(BasePanel):
         confirmed = (
             self.confirm_restore_execution(cfg, preview.risk_summary)
             if cfg["patch_mode"] == "restore"
-            else self.confirm_apply_execution(cfg, preview.valid_patch)
+            else self.confirm_apply_execution(cfg, preview)
         )
         if not confirmed:
             self.finish_result(report)
@@ -492,20 +530,9 @@ class PatchPanel(BasePanel):
             )
             self.commits.metrics["business_starts"] += 1
             if cfg["patch_mode"] == "restore":
-                result = apply_backup_restore(
-                    project_root=cfg["project_root"],
-                    restore_source_dir=cfg["restore_source_dir"],
-                    backup_enabled=cfg["backup_enabled"], backup_dir=cfg["backup_dir"],
-                    risk_confirmed=True, preview_text=preview.preview_text,
-                )
+                result = apply_backup_restore(preview, risk_confirmed=True)
             else:
-                result = apply_patch(
-                    project_root=cfg["project_root"], patch=preview.valid_patch,
-                    allow_delete=cfg["allow_delete"],
-                    allow_multi_replace_exact=cfg["allow_multi_replace_exact"],
-                    backup_enabled=cfg["backup_enabled"], backup_dir=cfg["backup_dir"],
-                    patch_text=cfg["patch_text"], preview_text=preview.preview_text,
-                )
+                result = apply_patch(preview)
         except (OSError, ValueError) as error:
             content = str(error) + "\n\n" + traceback.format_exc()
             self.finish_result(
@@ -538,7 +565,7 @@ class PatchPanel(BasePanel):
         if self.last_backup_root:
             open_path_with_default_app(self.last_backup_root, self.root)
             return
-        for line in self.cfg["last_result_text"].splitlines():
+        for line in reversed(self.cfg["last_result_text"].splitlines()):
             if line.startswith("备份目录："):
                 path = line[len("备份目录："):].strip()
                 if path:

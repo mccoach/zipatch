@@ -10,11 +10,14 @@ from unittest.mock import patch
 
 from core.config import ConfigSaveManager, deep_merge_config, load_user_config
 from core.constants import DEFAULT_CONFIG
-from core.exclusion_rules import analyze_exclusion_list
+from core.rule_lists import analyze_rule_list
 from ui.config_editing import ConfigCommitController
 from ui.dialogs import create_managed_text_box
 from ui.exclusion_editor import (
-    ExclusionDraftSession, confirm_exclusion_diagnostics,
+    ExclusionDraftSession,
+)
+from ui.rule_list_editor import (
+    confirm_rule_diagnostics,
 )
 from ui.favorites import FavoriteTextBoxController
 from ui.window_manager import register_popup, prepare_all_for_exit
@@ -121,13 +124,13 @@ class ExclusionLoadAuditTests(unittest.TestCase):
 class ExclusionMatchingAuditTests(unittest.TestCase):
     def test_long_pattern_does_not_depend_on_python_recursion_depth(self):
         segments = ("folder",) * 1500 + ("README",)
-        result = analyze_exclusion_list("\\" + "\\".join(segments), "file")
+        result = analyze_rule_list("\\" + "\\".join(segments), "file")
         self.assertFalse(result.has_errors)
         self.assertTrue(result.matches(segments))
         self.assertFalse(result.matches(("extra",) + segments))
 
     def test_multiple_double_stars_preserve_zero_and_multiple_layer_semantics(self):
-        result = analyze_exclusion_list("\\a\\**\\b\\**\\README", "file")
+        result = analyze_rule_list("\\a\\**\\b\\**\\README", "file")
         self.assertFalse(result.has_errors)
         for parts in (
             ("a", "b", "README"),
@@ -141,8 +144,8 @@ class ExclusionMatchingAuditTests(unittest.TestCase):
         self.assertFalse(result.matches(("a", "b", "README.txt")))
 
     def test_trailing_double_star_does_not_turn_file_into_directory(self):
-        files = analyze_exclusion_list("\\tools\\**\\**", "file")
-        directories = analyze_exclusion_list("\\tools\\**\\**", "directory")
+        files = analyze_rule_list("\\tools\\**\\**", "file")
+        directories = analyze_rule_list("\\tools\\**\\**", "directory")
         self.assertFalse(files.matches(("tools",)))
         self.assertTrue(files.matches(("tools", "file.txt")))
         self.assertTrue(files.matches(("tools", "sub", "file.txt")))
@@ -225,7 +228,7 @@ class ExclusionGuiAuditTests(unittest.TestCase):
         self.set_text("exclude_folders", "src/cache/")
         self.set_text("exclude_files", "<none>")
         with patch(
-            "ui.exclusion_editor.confirm_exclusion_diagnostics",
+            "ui.rule_list_editor.confirm_rule_diagnostics",
             return_value=True,
         ):
             self.assertFalse(self.session.save_and_close())
@@ -236,11 +239,11 @@ class ExclusionGuiAuditTests(unittest.TestCase):
 
     def test_red_favorite_is_blocked_even_if_confirmation_returns_true(self):
         with patch(
-            "ui.exclusion_editor.confirm_exclusion_diagnostics",
+            "ui.rule_list_editor.confirm_rule_diagnostics",
             return_value=True,
         ):
             self.assertIsNone(
-                self.session.prepare_favorite("exclude_files", "<none>"),
+                self.session.list_editor.prepare_favorite("exclude_files", "<none>"),
             )
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
 
@@ -255,7 +258,7 @@ class ExclusionGuiAuditTests(unittest.TestCase):
         with (
             patch("ui.favorites.ask_favorite_name", return_value="new"),
             patch(
-                "ui.exclusion_editor.confirm_exclusion_diagnostics",
+                "ui.rule_list_editor.confirm_rule_diagnostics",
                 return_value=True,
             ),
         ):
@@ -279,7 +282,8 @@ class ExclusionGuiAuditTests(unittest.TestCase):
         original = self.path.read_bytes()
         observed = []
 
-        def confirm(parent, named_results):
+        def confirm(parent, named_results, use_input_lines=False):
+            self.assertTrue(use_input_lines)
             observed.extend(named_results)
             return True
 
@@ -287,7 +291,7 @@ class ExclusionGuiAuditTests(unittest.TestCase):
         with (
             patch("ui.favorites.ask_favorite_name", return_value="new"),
             patch(
-                "ui.exclusion_editor.confirm_exclusion_diagnostics",
+                "ui.rule_list_editor.confirm_rule_diagnostics",
                 side_effect=confirm,
             ),
         ):
@@ -298,7 +302,7 @@ class ExclusionGuiAuditTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), original)
         diagnostic = observed[0][1].diagnostics[0]
         self.assertEqual(diagnostic.input_line, 3)
-        self.assertEqual(diagnostic.display_line, 3)
+        self.assertEqual(diagnostic.display_line, 1)
         self.assertEqual(
             self.widgets["exclude_files"].get("1.0", "end-1c"), "*.log",
         )
@@ -306,7 +310,7 @@ class ExclusionGuiAuditTests(unittest.TestCase):
     def test_standardization_keeps_diagnostics_after_event_loop_returns(self):
         self.set_text("exclude_files", '\n""\n" bad|name"\n" README*"')
         with patch(
-            "ui.exclusion_editor.confirm_exclusion_diagnostics",
+            "ui.rule_list_editor.confirm_rule_diagnostics",
             return_value=False,
         ):
             self.assertFalse(self.session.save_and_close())
@@ -322,7 +326,7 @@ class ExclusionGuiAuditTests(unittest.TestCase):
         self.assertEqual(widget.tag_ranges("exclusion_warning"), ())
 
     def run_real_diagnostic(self, content, action, closing):
-        result = analyze_exclusion_list(content, "file")
+        result = analyze_rule_list(content, "file")
         self.dialog.grab_set()
         self.root._zipatch_closing = closing
         observed = []
@@ -359,7 +363,7 @@ class ExclusionGuiAuditTests(unittest.TestCase):
         callback = self.dialog.after(30, choose)
         timeout = self.dialog.after(2000, self.cancel_remaining_diagnostic)
         try:
-            accepted = confirm_exclusion_diagnostics(
+            accepted = confirm_rule_diagnostics(
                 self.dialog, (("文件名单", result),),
             )
         finally:
@@ -407,7 +411,7 @@ class ExclusionGuiAuditTests(unittest.TestCase):
             with (
                 patch("ui.dialogs.messagebox.askyesnocancel", return_value=True),
                 patch(
-                    "ui.exclusion_editor.confirm_exclusion_diagnostics",
+                    "ui.rule_list_editor.confirm_rule_diagnostics",
                     return_value=True,
                 ),
             ):

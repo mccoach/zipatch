@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core.file_walk import iter_project_entries, sorted_paths
-from core.paths import ensure_parent_dir
+from core.atomic_file import atomic_text_writer
 from core.time_utils import current_timestamp_text
 
 
@@ -51,9 +51,8 @@ def panoramic_scan(
 
     files = sorted_paths(files)
     file_count = len(files)
-    ensure_parent_dir(output_file)
 
-    with open(output_file, "w", encoding="utf-8", errors="ignore") as f_out:
+    with atomic_text_writer(output_file) as f_out:
         f_out.write(f"{current_timestamp_text()}\n\n")
         if preamble_text:
             f_out.write(preamble_text.rstrip("\n") + "\n\n")

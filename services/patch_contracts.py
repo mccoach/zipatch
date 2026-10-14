@@ -1,225 +1,86 @@
 # -*- coding: utf-8 -*-
 
-from pathlib import Path, PurePosixPath
+"""全局路径互斥和已定位旧文本区间的互斥检查。"""
 
-from core.path_validation import safe_join, normalize_rel_path
-from core.text_io import read_text_auto
-from services.patch_ops import (
-    CONTENT_OPS,
-    DUAL_PATH_OPS,
-    REPLACE_OPS,
-    parse_required_positive_int,
-)
+import os
+from pathlib import PurePosixPath
 
-
-def normalize_text_newlines(text: str):
-    """
-    将文本换行统一为 LF。
-    """
-    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+from core.path_validation import normalize_rel_path
+from services.patch_ops import CONTENT_OPS, DUAL_PATH_OPS
 
 
 def normalize_contract_path(path):
-    return normalize_rel_path(path).replace("\\", "/")
+    normalized = normalize_rel_path(path)
+    return os.path.normcase(os.path.normpath(normalized)).replace("\\", "/")
 
 
 def is_same_or_parent_path(left, right):
     left_path = PurePosixPath(normalize_contract_path(left))
     right_path = PurePosixPath(normalize_contract_path(right))
-
-    if left_path == right_path:
-        return True
-
-    left_parts = left_path.parts
-    right_parts = right_path.parts
-
+    left_parts, right_parts = left_path.parts, right_path.parts
     return (
-        len(left_parts) < len(right_parts)
-        and right_parts[:len(left_parts)] == left_parts
-    ) or (
-        len(right_parts) < len(left_parts)
-        and left_parts[:len(right_parts)] == right_parts
+        left_path == right_path
+        or len(left_parts) < len(right_parts) and right_parts[:len(left_parts)] == left_parts
+        or len(right_parts) < len(left_parts) and left_parts[:len(right_parts)] == right_parts
     )
 
 
 def iter_op_related_paths(op):
     yield normalize_contract_path(op.get("path", ""))
-
     if op.get("op") in DUAL_PATH_OPS:
         if "new_path" not in op:
             raise ValueError(f'id="{op.get("id", "")}" {op.get("op")} 缺少 new_path 参数')
-        yield normalize_contract_path(op.get("new_path", ""))
+        yield normalize_contract_path(op["new_path"])
 
 
 def collect_path_contract_errors(operations):
-    errors = []
-    items = []
-
+    errors, items = [], []
     for op in operations:
-        op_type = op.get("op", "")
-        op_id = op.get("id", "")
-
+        kind, identifier = op.get("op", ""), op.get("id", "")
         try:
-            paths = list(iter_op_related_paths(op))
-        except Exception as e:
-            errors.append(f'id="{op_id}" {op_type} 路径参数非法：{e}')
+            paths = tuple(iter_op_related_paths(op))
+        except ValueError as error:
+            errors.append(f'id="{identifier}" {kind} 路径参数非法：{error}')
             continue
-
         if len(paths) == 2 and is_same_or_parent_path(paths[0], paths[1]):
             errors.append(
-                f'id="{op_id}" {op_type} 的 path 与 new_path 路径冲突：'
+                f'id="{identifier}" {kind} 的 path 与 new_path 路径冲突：'
                 f"{paths[0]} / {paths[1]}"
             )
-
-        items.append({
-            "op": op,
-            "op_type": op_type,
-            "op_id": op_id,
-            "paths": paths,
-        })
-
-    for left_pos, left in enumerate(items):
-        for right in items[left_pos + 1:]:
-            if left["op_type"] in CONTENT_OPS and right["op_type"] in CONTENT_OPS:
+        items.append((kind, identifier, paths))
+    for index, (left_kind, left_id, left_paths) in enumerate(items):
+        for right_kind, right_id, right_paths in items[index + 1:]:
+            if left_kind in CONTENT_OPS and right_kind in CONTENT_OPS:
                 continue
-
-            for left_path in left["paths"]:
-                for right_path in right["paths"]:
-                    if is_same_or_parent_path(left_path, right_path):
+            for left in left_paths:
+                for right in right_paths:
+                    if is_same_or_parent_path(left, right):
                         errors.append(
-                            f'id="{left["op_id"]}" {left["op_type"]} 路径 {left_path} 与 '
-                            f'id="{right["op_id"]}" {right["op_type"]} 路径 {right_path} 冲突。'
+                            f'id="{left_id}" {left_kind} 路径 {left} 与 '
+                            f'id="{right_id}" {right_kind} 路径 {right} 冲突。'
                         )
-
     return errors
 
 
-def validate_path_contracts(operations):
-    errors = collect_path_contract_errors(operations)
-
-    if errors:
-        raise ValueError("修改包存在路径互斥冲突：\n" + "\n".join(f"- {item}" for item in errors))
-
-
-def find_text_ranges(text, old):
-    ranges = []
-    start = 0
-
-    while True:
-        index = text.find(old, start)
-
-        if index < 0:
-            break
-
-        end = index + len(old)
-        ranges.append((index, end))
-        start = end
-
-    return ranges
-
-
-def collect_content_contract_errors(root, operations):
+def collect_content_contract_errors(located_operations):
+    """消费预演已定位区间，不读取正文、不重新搜索。"""
+    by_path = {}
+    for operation, location in located_operations:
+        path = normalize_contract_path(operation["path"])
+        for start, end in location.original_ranges:
+            by_path.setdefault(path, []).append(
+                (start, end, operation["id"], operation["op"])
+            )
     errors = []
-    ranges_by_path = {}
-
-    for op in operations:
-        op_type = op.get("op", "")
-        op_id = op.get("id", "")
-
-        if op_type not in REPLACE_OPS:
-            continue
-
-        try:
-            rel_path = normalize_contract_path(op.get("path", ""))
-            target = safe_join(root, rel_path)
-            text, enc = read_text_auto(target)
-            text = normalize_text_newlines(text)
-
-            if op_type == "replace_exact":
-                old = normalize_text_newlines(op.get("old", ""))
-
-                if not old:
-                    errors.append(f'id="{op_id}" replace_exact 的 OLD 文本不能为空')
-                    continue
-
-                expected_count = parse_required_positive_int(op.get("count"), "count")
-                ranges = find_text_ranges(text, old)
-
-                if len(ranges) != expected_count:
-                    errors.append(
-                        f'id="{op_id}" replace_exact 命中次数不符：'
-                        f"expected={expected_count}, actual={len(ranges)}, path={rel_path}"
-                    )
-                    continue
-
-            else:
-                start_marker = op.get("start_marker", "")
-                end_marker = op.get("end_marker", "")
-
-                if not start_marker or not end_marker:
-                    errors.append(f'id="{op_id}" replace_between 缺少 start_marker 或 end_marker')
-                    continue
-
-                s_count = text.count(start_marker)
-                e_count = text.count(end_marker)
-
-                if s_count != 1 or e_count != 1:
-                    errors.append(
-                        f'id="{op_id}" replace_between 锚点不唯一：'
-                        f"start_count={s_count}, end_count={e_count}, path={rel_path}"
-                    )
-                    continue
-
-                s_idx = text.find(start_marker)
-                e_idx = text.find(end_marker)
-
-                if s_idx >= e_idx:
-                    errors.append(
-                        f'id="{op_id}" replace_between 起始锚点在结束锚点之后：{rel_path}'
-                    )
-                    continue
-
-                ranges = [(s_idx, e_idx + len(end_marker))]
-
-            for start, end in ranges:
-                ranges_by_path.setdefault(rel_path, []).append({
-                    "op_id": op_id,
-                    "op_type": op_type,
-                    "start": start,
-                    "end": end,
-                })
-
-        except Exception as e:
-            errors.append(f'id="{op_id}" {op_type} 内容互斥校验失败：{e}')
-
-    for rel_path, ranges in ranges_by_path.items():
-        ranges.sort(key=lambda item: (item["start"], item["end"]))
-
-        for previous, current in zip(ranges, ranges[1:]):
-            if current["start"] < previous["end"]:
+    for path, ranges in by_path.items():
+        ranges.sort()
+        previous = None
+        for current in ranges:
+            if previous is not None and current[0] < previous[1]:
                 errors.append(
-                    f'{rel_path} 中 id="{previous["op_id"]}" {previous["op_type"]} '
-                    f'与 id="{current["op_id"]}" {current["op_type"]} '
-                    "旧文本位置区间发生重叠。"
+                    f'{path} 中 id="{previous[2]}" {previous[3]} '
+                    f'与 id="{current[2]}" {current[3]} 旧文本位置区间发生重叠。'
                 )
-
+            if previous is None or current[1] > previous[1]:
+                previous = current
     return errors
-
-
-def validate_content_contracts(root, operations):
-    errors = collect_content_contract_errors(root, operations)
-
-    if errors:
-        raise ValueError("修改包存在内容互斥冲突：\n" + "\n".join(f"- {item}" for item in errors))
-
-
-def validate_global_patch_contracts(root, operations):
-    path_errors = collect_path_contract_errors(operations)
-    content_errors = collect_content_contract_errors(root, operations)
-
-    errors = []
-    errors.extend(f"路径互斥：{item}" for item in path_errors)
-    errors.extend(f"内容互斥：{item}" for item in content_errors)
-
-    if errors:
-        raise ValueError("修改包存在全局冲突：\n" + "\n".join(f"- {item}" for item in errors))

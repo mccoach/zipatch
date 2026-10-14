@@ -8,6 +8,8 @@ from unittest.mock import Mock, patch
 
 from core.constants import MESSAGE_FILE_EXCLUDED
 from core.exclusion_rules import prepare_exclusions
+from core.config import ConfigSaveManager
+from ui.config_editing import ConfigCommitController
 from core.file_walk import iter_project_entries
 from panels.merge_panel import MergePanel
 from panels.scan_panel import ScanPanel
@@ -162,6 +164,12 @@ class ExclusionBusinessTests(unittest.TestCase):
         ):
             with self.subTest(panel=panel_class.__name__):
                 panel = SimpleNamespace(
+                    cfg=cfg,
+                    commits=ConfigCommitController(
+                        None, ConfigSaveManager(
+                            {}, Path(self.directory.name) / "isolated.json",
+                        ),
+                    ),
                     prepare=Mock(return_value=cfg),
                     handle_error=Mock(),
                     root=None,

@@ -3,11 +3,13 @@
 import tkinter as tk
 
 from core.constants import THEME
-from core.message_utils import safe_show_info
+from core.message_utils import safe_show_error, safe_show_info
 from core.path_validation import normalize_windows_display_path
 from core.paths import open_path_with_default_app, validate_required_path
 from panels.base_panel import BasePanel
 from services.restore_service import split_and_restore
+
+from ui.newline_settings import edit_newline_settings
 from ui.theme import styled_button, styled_frame, styled_label_frame
 from ui.widgets import browse_folder, browse_open_file, create_entry_row, make_checkbutton, make_radiobutton
 
@@ -61,7 +63,14 @@ class RestorePanel(BasePanel):
         ).pack(side="left")
         buttons = styled_frame(body, bg=THEME["bg_panel"])
         buttons.pack(fill="x", pady=(12, 0))
+        styled_button(
+            buttons, "换行设置", self.open_newline_settings, width=10,
+        ).pack(side="left")
         styled_button(buttons, "开始还原", self.execute, width=12, accent=True).pack(side="right")
+
+    def open_newline_settings(self):
+        if edit_newline_settings(self.root, self.commits):
+            self.log("换行设置已保存")
 
     def execute(self):
         if self.commits.operation_depth:
@@ -70,6 +79,9 @@ class RestorePanel(BasePanel):
             return self._execute()
 
     def _execute(self):
+        output_rules = self.commits.prepare_rule(
+            self.config_data["settings"], "crlf_file_list", "file",
+        )
         cfg = self.prepare({
             "source_txt_file", "target_folder", "code_header_line",
             "code_footer_line", "existing_file_policy", "open_after_done",
@@ -77,6 +89,7 @@ class RestorePanel(BasePanel):
         if cfg is None:
             return
         try:
+
             source = validate_required_path(cfg["source_txt_file"], "源txt文件")
             target = validate_required_path(cfg["target_folder"], "目标文件夹")
             header = validate_required_path(cfg["code_header_line"], "开始标记")
@@ -85,6 +98,7 @@ class RestorePanel(BasePanel):
             self.log("用户启动：代码拆分还原")
             self.commits.metrics["business_starts"] += 1
             result = split_and_restore(
+                output_rules=output_rules,
                 source_txt_file=source, target_root_folder=target,
                 code_header_line=header, code_footer_line=footer,
                 existing_file_policy=cfg["existing_file_policy"], log_func=self.log,
@@ -93,13 +107,24 @@ class RestorePanel(BasePanel):
             self.handle_error("代码拆分还原", error)
             return
 
-        self.set_status("代码拆分还原完成")
+        self.set_status(
+            "代码拆分还原结束，存在失败"
+            if result.failed_count else "代码拆分还原完成"
+        )
+        introduction = "还原任务结束，存在失败。" if result.failed_count else "还原任务完成！"
         message = (
-            f"还原任务完成！\n\n成功还原了 {result.restored_count} 个文件。\n"
+            f"{introduction}\n\n成功还原了 {result.restored_count} 个文件。\n"
             f"跳过了 {result.skipped_count} 个文件。\n\n目标目录：\n{result.target_folder}"
         )
         if result.log_path:
             message += f"\n\n跳过日志：\n{result.log_path}"
-        safe_show_info("操作成功", message, self.root)
+        if result.failed_count:
+            message += (
+                f"\n\n其中 {result.failed_count} 个文件还原失败，未计入成功数量。"
+                "\n已提交文件没有自动撤销，请查看跳过日志。"
+            )
+            safe_show_error("还原存在失败", message, self.root)
+        else:
+            safe_show_info("操作成功", message, self.root)
         if cfg["open_after_done"]:
             open_path_with_default_app(result.target_folder, self.root)

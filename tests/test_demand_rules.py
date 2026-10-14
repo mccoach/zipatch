@@ -10,13 +10,14 @@ from services.demand_rules import (
     DemandCheckCancelled,
     DemandMatch,
     build_demand_selection,
-    clean_demand_expression,
+
     inspect_demand_rule,
     inspect_demand_rules,
     parse_demand_rule,
     windows_path_key,
 )
 from services.merge_service import merge_demand_files
+from core.rule_lists import clean_rule_quotes
 
 
 class DemandRuleTests(unittest.TestCase):
@@ -41,7 +42,7 @@ class DemandRuleTests(unittest.TestCase):
 
     def test_cleaning_preserves_spaces_order_and_duplicate_rules(self):
         self.assertEqual(
-            clean_demand_expression('" README.md "\n""\n"README.md"\n"README.md"'),
+            clean_rule_quotes('" README.md "\n""\n"README.md"\n"README.md"'),
             " README.md \n\nREADME.md\nREADME.md",
         )
 

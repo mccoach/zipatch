@@ -11,6 +11,7 @@ class PatchPreviewResult:
     has_errors: bool
     success_count: int
     failed_count: int
+    execution: object
     has_global_errors: bool = False
 
 
@@ -33,9 +34,8 @@ class PatchOpCheckResult:
 @dataclass
 class BackupRestorePreviewResult:
     preview_text: str
-    manifest: dict
-    has_mismatch: bool
     risk_summary: dict
+    execution: object
 
 
 @dataclass

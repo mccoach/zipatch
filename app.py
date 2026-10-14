@@ -38,8 +38,6 @@ class ZipatchApp:
         self.panels = {}
         self.current_panel = None
         self.log_auto_scroll = True
-        self.log_max_lines = 5000
-        self.log_trim_lines = 500
         self._scroll_after_id = None
 
         apply_global_theme(root)
@@ -50,7 +48,7 @@ class ZipatchApp:
 
     def build_ui(self):
         root = self.root
-        root.title("智派-文本代码修改合并助手 Zipatch v3.2.0-20261011")
+        root.title("智派-文本代码修改合并助手 Zipatch v3.3.0-20261014")
         root.protocol("WM_DELETE_WINDOW", self.close_application)
         root.resizable(True, True)
         center_window(root, 1080, 800)
@@ -222,11 +220,8 @@ class ZipatchApp:
     def log(self, message):
         text = self.log_text
         text.configure(state="normal")
+        # 会话日志只追加，不自动截断；主动清空仍由现有按钮负责。
         text.insert("end", f"[{current_log_time()}]  {message}\n")
-        lines = int(text.index("end-1c").split(".")[0]) - 1
-        if lines > self.log_max_lines:
-            remove = max(self.log_trim_lines, lines - self.log_max_lines)
-            text.delete("1.0", f"{remove + 1}.0")
         text.configure(state="disabled")
         if self.log_auto_scroll:
             text.see("end")

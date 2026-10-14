@@ -11,6 +11,7 @@ from pathlib import Path
 from time import perf_counter
 
 from core.constants import DEFAULT_CONFIG
+from core.favorite_order import order_favorites
 from core.paths import get_config_path
 
 
@@ -90,13 +91,17 @@ def normalize_config(config):
     config["entry_history"] = histories
 
     for key, values in config["favorites"].items():
-        config["favorites"][key] = [
-            {"name": value["name"], "content": value["content"]}
+        config["favorites"][key] = order_favorites([
+            {
+                "name": value["name"],
+                "content": value["content"],
+                **({"pinned": True} if value.get("pinned", False) else {}),
+            }
             for value in values
             if isinstance(value, dict)
             and isinstance(value.get("name"), str)
             and isinstance(value.get("content"), str)
-        ]
+        ])
 
     if config["patch"]["patch_mode"] not in ("apply", "restore"):
         config["patch"]["patch_mode"] = "apply"
@@ -106,38 +111,67 @@ def normalize_config(config):
     return config
 
 
-def validate_exclusion_config_source(source):
-    """结构错误必须暴露，不能把损坏名单或收藏替换为默认值。"""
+def validate_rule_config_source(source):
+    """名单结构先于默认合并检查；非法规则正文仍保留。"""
     if not isinstance(source, dict):
         raise ValueError("配置顶层必须是 JSON 对象；原文件未修改。")
-
-    for page in ("scan", "merge"):
-        if page not in source:
+    for section_name, fields in (
+        ("scan", ("exclude_folders", "exclude_files")),
+        ("merge", ("exclude_folders", "exclude_files")),
+        ("settings", ("crlf_file_list",)),
+    ):
+        if section_name not in source:
             continue
-        section = source[page]
+        section = source[section_name]
         if not isinstance(section, dict):
-            raise ValueError(f"配置 {page} 必须是对象；原文件未修改。")
-        for field in ("exclude_folders", "exclude_files"):
+            raise ValueError(f"配置 {section_name} 必须是对象；原文件未修改。")
+        for field in fields:
             if field in section and not isinstance(section[field], str):
                 raise ValueError(
-                    f"配置 {page}.{field} 必须是字符串；"
+                    f"配置 {section_name}.{field} 必须是字符串；"
                     "不能将错误内容当成空名单或默认名单加载。"
                 )
+
+    if "text_wrap" in source:
+        wraps = source["text_wrap"]
+        if not isinstance(wraps, dict):
+            raise ValueError("配置 text_wrap 必须是对象；原文件未修改。")
+        if (
+            "settings.crlf_file_list" in wraps
+            and not isinstance(wraps["settings.crlf_file_list"], bool)
+        ):
+            raise ValueError(
+                "配置 text_wrap.settings.crlf_file_list 必须是布尔值；原文件未修改。"
+            )
 
     if "favorites" not in source:
         return
     favorites = source["favorites"]
     if not isinstance(favorites, dict):
         raise ValueError("配置 favorites 必须是对象；原文件未修改。")
+    # pinned 是所有收藏条目的可选布尔字段；错误类型不能静默丢失。
+    for key, entries in favorites.items():
+        if not isinstance(entries, list):
+            continue
+        for number, entry in enumerate(entries, 1):
+            if (
+                isinstance(entry, dict)
+                and "pinned" in entry
+                and type(entry["pinned"]) is not bool
+            ):
+                raise ValueError(
+                    f"收藏 favorites.{key} 第 {number} 项 pinned 必须是布尔值；"
+                    "原文件未修改。"
+                )
     for key in (
         "scan_exclude_folders", "scan_exclude_files",
-        "merge_exclude_folders", "merge_exclude_files",
+        "merge_exclude_folders", "merge_exclude_files", "crlf_file_list",
     ):
         if key not in favorites:
             continue
         entries = favorites[key]
         if not isinstance(entries, list):
-            raise ValueError(f"排除收藏 favorites.{key} 必须是数组；原文件未修改。")
+            raise ValueError(f"名单收藏 favorites.{key} 必须是数组；原文件未修改。")
         for number, entry in enumerate(entries, 1):
             if (
                 not isinstance(entry, dict)
@@ -145,7 +179,7 @@ def validate_exclusion_config_source(source):
                 or not isinstance(entry.get("content"), str)
             ):
                 raise ValueError(
-                    f"排除收藏 favorites.{key} 第 {number} 项结构错误："
+                    f"名单收藏 favorites.{key} 第 {number} 项结构错误："
                     "name 和 content 必须是字符串；原文件未修改。"
                 )
 
@@ -165,7 +199,7 @@ def load_user_config(path=None):
             "原配置文件未修改，请修正配置后重新启动。"
         ) from error
 
-    validate_exclusion_config_source(source)
+    validate_rule_config_source(source)
     config = normalize_config(deep_merge_config(DEFAULT_CONFIG, source))
     return config, config != source
 

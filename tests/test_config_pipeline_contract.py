@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from core.config import ConfigSaveManager, SaveStatus, deep_merge_config
 from core.constants import DEFAULT_CONFIG
+from core.rule_lists import analyze_rule_list
 from panels.patch_panel import PatchPanel
 from ui.config_editing import ConfigCommitController
 
@@ -99,6 +100,7 @@ class PipelineContractTests(unittest.TestCase):
             "allow_multi_replace_exact": False,
             "backup_enabled": True,
             "backup_dir": "backup",
+            "output_rules": analyze_rule_list("*.bat\n*.CMD", "file"),
         }
         panel = SimpleNamespace()
         result = SimpleNamespace(preview_text="report")
@@ -107,7 +109,10 @@ class PipelineContractTests(unittest.TestCase):
         ) as service:
             self.assertIs(PatchPanel.run_preview(panel, cfg), result)
         self.assertEqual(vars(panel), {})
+        rules = service.call_args.kwargs["output_rules"]
+        self.assertEqual(rules.normalized_text, "*.bat\n*.CMD")
         service.assert_called_once_with(
+            output_rules=rules,
             project_root="project", patch_text="body",
             allow_delete=False, allow_multi_replace_exact=False,
             backup_enabled=True, backup_dir="backup",
@@ -126,6 +131,7 @@ class PipelineContractTests(unittest.TestCase):
         }
         panel = SimpleNamespace(
             root=None,
+            cfg=self.config["patch"],
             commits=self.controller,
             prepare_parameters=Mock(return_value=cfg),
             display_result=Mock(side_effect=lambda text: text),
@@ -150,11 +156,10 @@ class PipelineContractTests(unittest.TestCase):
         )
         panel, cfg = self.make_apply_panel(preview)
 
-        def apply(**kwargs):
+        def apply(accepted_preview):
             panel.finish_result.assert_not_called()
-            self.assertIs(kwargs["patch"], valid_patch)
-            self.assertEqual(kwargs["preview_text"], "preview report")
-            self.assertEqual(kwargs["project_root"], cfg["project_root"])
+            self.assertIs(accepted_preview, preview)
+            panel.confirm_apply_execution.assert_called_once_with(cfg, preview)
             return SimpleNamespace(log_text="completed", backup_root="backup")
 
         with (
@@ -162,7 +167,7 @@ class PipelineContractTests(unittest.TestCase):
             patch("panels.patch_panel.safe_show_info"),
         ):
             PatchPanel._apply(panel)
-        panel.confirm_apply_execution.assert_called_once_with(cfg, valid_patch)
+        panel.confirm_apply_execution.assert_called_once_with(cfg, preview)
         panel.finish_result.assert_called_once()
         self.assertNotIn("preview_apply_patch", vars(panel))
         self.assertNotIn("preview_snapshot", vars(panel))

@@ -155,18 +155,20 @@ class CallbackLifecycleTests(unittest.TestCase):
         self.assertFalse(result.persisted)
         favorite.refresh_popup.assert_called_once()
 
-    def test_favorite_failed_request_does_not_refresh_as_saved(self):
+    def test_favorite_failed_request_refreshes_memory_without_claiming_saved(self):
         controller = Mock()
-        controller.submit_values.return_value = SaveResult(
-            SaveStatus.FAILED, PermissionError("denied"),
-        )
+        failed = SaveResult(SaveStatus.FAILED, PermissionError("denied"))
+        controller.submit_values.return_value = failed
         controller.manager.config_data = self.config
         favorite = SimpleNamespace(
             commits=controller, parent=Mock(), favorite_key="patch_text",
             refresh_popup=Mock(),
         )
-        FavoriteTextBoxController.submit(favorite, [])
-        favorite.refresh_popup.assert_not_called()
+        result = FavoriteTextBoxController.submit(favorite, [])
+        favorite.refresh_popup.assert_called_once()
+        self.assertIs(result, failed)
+        self.assertFalse(result.persisted)
+        self.assertFalse(result.request_satisfied)
 
 
 class PopupParentLifecycleTests(unittest.TestCase):

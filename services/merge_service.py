@@ -11,7 +11,7 @@ from core.constants import (
 )
 from core.file_walk import iter_project_entries
 from services.demand_rules import windows_path_key
-from core.paths import ensure_parent_dir
+from core.atomic_file import atomic_text_writer
 from core.text_io import read_text_content_for_merge
 from core.time_utils import current_timestamp_text
 
@@ -68,7 +68,7 @@ def write_merge_file(
 ):
     """
     统一写合并文件：
-    常规合并和按需合并共用这一条写入链路。
+    按目录合并和按名单合并共用这一条写入链路。
     """
     output_file = str(Path(output_file).resolve())
 
@@ -78,13 +78,11 @@ def write_merge_file(
             item["merge_content"] and windows_path_key(item["path"]) == output_key
             for item in file_plan
         ):
-            raise ValueError("输出文件被实际选中，不能执行按需合并。")
-
-    ensure_parent_dir(output_file)
+            raise ValueError("输出文件被实际选中，不能执行按名单合并。")
 
     file_counter = 0
 
-    with open(output_file, "w", encoding="utf-8", errors="ignore") as f_out:
+    with atomic_text_writer(output_file) as f_out:
         f_out.write(f"{current_timestamp_text()}\n\n")
 
         if preamble_text:
@@ -132,7 +130,7 @@ def merge_project_files(
     log_func=None,
 ):
     if log_func:
-        log_func("开始常规文件代码合并")
+        log_func("开始按目录合并")
         log_func(f"源文件夹：{source_folder}")
         log_func(f"输出文件：{output_file}")
 
@@ -153,7 +151,7 @@ def merge_project_files(
     )
 
     if log_func:
-        log_func(f"常规文件代码合并完成：共 {total_files} 个文件")
+        log_func(f"按目录合并完成：共 {total_files} 个文件")
 
     return MergeResult(
         output_file=str(Path(output_file).resolve()),
@@ -171,7 +169,7 @@ def merge_demand_files(
     log_func=None,
 ):
     if log_func:
-        log_func("开始按需文件代码合并")
+        log_func("开始按名单合并")
         log_func(f"输出文件：{output_file}")
 
     file_plan = build_demand_merge_plan(file_paths)
@@ -188,7 +186,7 @@ def merge_demand_files(
     )
 
     if log_func:
-        log_func(f"按需文件代码合并完成：共 {total_files} 个文件")
+        log_func(f"按名单合并完成：共 {total_files} 个文件")
 
     return MergeResult(
         output_file=str(Path(output_file).resolve()),

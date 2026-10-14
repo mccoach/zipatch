@@ -6,7 +6,7 @@ from core.constants import THEME
 from core.message_utils import resolve_output_file_conflict, safe_show_info
 from core.path_validation import normalize_windows_display_path
 from core.paths import build_output_path, open_path_with_default_app, validate_required_path
-from core.exclusion_rules import prepare_exclusions
+from core.exclusion_rules import PreparedExclusions
 from panels.base_panel import BasePanel
 from services.scan_service import panoramic_scan
 from ui.dialogs import edit_exclude_settings, edit_extra_text_settings
@@ -95,7 +95,14 @@ class ScanPanel(BasePanel):
         if cfg is None:
             return
         try:
-            exclusions = prepare_exclusions(cfg["exclude_folders"], cfg["exclude_files"])
+            exclusions = PreparedExclusions(
+                self.commits.prepare_rule(
+                    self.cfg, "exclude_folders", "directory", cfg["exclude_folders"],
+                ),
+                self.commits.prepare_rule(
+                    self.cfg, "exclude_files", "file", cfg["exclude_files"],
+                ),
+            )
             source = validate_required_path(cfg["source_folder"], "源文件夹")
             folder = validate_required_path(cfg["output_folder"], "输出文件夹")
             filename = validate_required_path(cfg["output_filename"], "输出文件名")

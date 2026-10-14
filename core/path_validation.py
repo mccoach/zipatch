@@ -275,17 +275,7 @@ def safe_join(root: Path, rel_path: str):
     """
     修改包执行器专用：把相对路径安全拼接到项目根目录下。
 
-    这一步是路径逃逸防护的最终保险：
-    即使前置文本校验遗漏，resolve 后仍必须位于 root 内部。
+    在任何链接解析前检查原路径链，拒绝链接、特殊实体和项目越界。
     """
-    rel_path = normalize_rel_path(rel_path)
-
-    root_real = Path(root).resolve()
-    target = (root_real / rel_path).resolve()
-
-    try:
-        target.relative_to(root_real)
-    except ValueError:
-        raise ValueError(f"目标路径逃逸项目根目录：{target}")
-
-    return target
+    from core.recovery_paths import project_path
+    return project_path(root, rel_path)

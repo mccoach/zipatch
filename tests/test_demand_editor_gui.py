@@ -116,6 +116,39 @@ class DemandEditorGuiTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertEqual(self.app.commits.operation_depth, 0)
 
+    def test_check_feedback_keeps_history_until_explicit_clear(self):
+        self.wait_until(
+            lambda: all(rule.match is not None for rule in self.session.rules)
+        )
+        text = self.session.result_text
+        previous = text.get("1.0", "end-1c")
+        original_disk = self.path.read_bytes()
+        original_config = self.panel.cfg["demand_file_list_text"]
+        matches = tuple(rule.match for rule in self.session.rules)
+
+        self.session.render()
+        self.assertTrue(text.get("1.0", "end-1c").startswith(previous + "\n\n"))
+        self.assertEqual(
+            tuple(rule.match for rule in self.session.rules), matches,
+        )
+        self.assertEqual(self.panel.cfg["demand_file_list_text"], original_config)
+        self.assertEqual(self.path.read_bytes(), original_disk)
+
+        with self.app.commits.operation():
+            self.assertFalse(self.session.clear_check_history())
+        self.assertNotEqual(text.get("1.0", "end-1c"), "")
+        self.assertTrue(self.session.clear_check_history())
+        self.assertEqual(text.get("1.0", "end-1c"), "")
+        self.assertEqual(str(text.cget("state")), "disabled")
+        self.assertEqual(
+            tuple(rule.match for rule in self.session.rules), matches,
+        )
+        self.session.render()
+        self.assertTrue(
+            text.get("1.0", "end-1c").startswith("【当前名单检查记录】\n"),
+        )
+        self.assertEqual(self.path.read_bytes(), original_disk)
+
 
 if __name__ == "__main__":
     unittest.main()

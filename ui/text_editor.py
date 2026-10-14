@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import tkinter as tk
+from contextlib import nullcontext
 from tkinter import TclError
 
 from core.constants import THEME
@@ -324,10 +325,16 @@ class TextEditorController:
         if self.text_widget.get(start, end) == replacement:
             return self.find_next()
 
-        self.text_widget.edit_separator()
-        self.text_widget.delete(start, end)
-        self.text_widget.insert(start, replacement)
-        self.text_widget.edit_separator()
+        scope = getattr(self.text_widget, "_edit_text_scope", None)
+        with scope() if scope is not None else nullcontext():
+            automatic = self.text_widget.cget("autoseparators")
+            self.text_widget.edit_separator()
+            self.text_widget.configure(autoseparators=False)
+            try:
+                self.text_widget.replace(start, end, replacement)
+            finally:
+                self.text_widget.edit_separator()
+                self.text_widget.configure(autoseparators=automatic)
 
         self.search_state["current_start"] = None
         self.highlight_all_matches()
@@ -345,7 +352,11 @@ class TextEditorController:
             return "break"
 
         binding = getattr(self.text_widget, "_config_binding", None)
-        if getattr(self.text_widget, "_preserve_trailing_newlines", False):
+        editing = getattr(self.text_widget, "_list_text_editing", None)
+        if editing is not None:
+            # 名单消费已收口的完整正文；全部替换不负责删除物理空行。
+            content = editing.complete()
+        elif getattr(self.text_widget, "_preserve_trailing_newlines", False):
             content = self.text_widget.get("1.0", "end-1c")
         else:
             content = (
@@ -365,6 +376,55 @@ class TextEditorController:
         self.highlight_all_matches()
 
         self.content_completed(final_content)
+        return "break"
+
+    def toggle_disabled_lines(self, event=None):
+        """仅名单安装；逐物理行切换实际行首一个竖线。"""
+        text = self.text_widget
+        editing = getattr(text, "_list_text_editing", None)
+        if (
+            editing is None or self.readonly
+            or str(text.cget("state")) != "normal"
+        ):
+            return "break"
+        selection = text.tag_ranges("sel")
+        if selection:
+            first, last = map(text.index, selection)
+            first_line = int(first.split(".")[0])
+            last_line, column = map(int, last.split("."))
+            if column == 0:
+                last_line -= 1
+        else:
+            first_line = last_line = int(text.index("insert").split(".")[0])
+        view = text.yview()[0]
+        cursor = text._w + "_zipatch_cursor"
+        start_mark = text._w + "_zipatch_selection_start"
+        end_mark = text._w + "_zipatch_selection_end"
+        text.mark_set(cursor, "insert")
+        text.mark_gravity(cursor, "right")
+        if selection:
+            text.mark_set(start_mark, first)
+            text.mark_gravity(start_mark, "left")
+            text.mark_set(end_mark, last)
+            text.mark_gravity(end_mark, "right")
+        try:
+            with editing.edit_group():
+                for number in range(last_line, first_line - 1, -1):
+                    start = f"{number}.0"
+                    if text.get(start, f"{start}+1c") == "|":
+                        text.delete(start, f"{start}+1c")
+                    else:
+                        text.insert(start, "|")
+            text.mark_set("insert", cursor)
+            if selection:
+                text.tag_remove("sel", "1.0", "end")
+                text.tag_add("sel", start_mark, end_mark)
+            text.yview_moveto(view)
+            self.content_completed()
+        finally:
+            text.mark_unset(cursor)
+            if selection:
+                text.mark_unset(start_mark, end_mark)
         return "break"
 
     def on_find_text_changed(self, *_):

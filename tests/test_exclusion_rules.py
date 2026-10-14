@@ -4,22 +4,23 @@ import unittest
 from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
-from core.exclusion_rules import (
-    ExclusionValidationError, analyze_exclusion_list,
-    format_exclusion_diagnostics, prepare_exclusions,
+from core.exclusion_rules import ExclusionValidationError, prepare_exclusions
+from core.rule_lists import (
+    analyze_rule_list,
+    format_rule_diagnostics,
 )
 
 
 class ExclusionRuleTests(unittest.TestCase):
     def assert_match(self, pattern, path, expected=True, kind="file"):
-        result = analyze_exclusion_list(pattern, kind)
+        result = analyze_rule_list(pattern, kind)
         self.assertFalse(result.has_errors, result.diagnostics)
         self.assertEqual(result.matches(tuple(path.split("\\"))), expected)
 
     def test_only_lf_and_crlf_split_rules(self):
         text = "my notes.txt\nreport,final.txt\n;draft.txt\n[a].txt\n{x}.txt\n`a`.txt"
-        first = analyze_exclusion_list(text, "file")
-        second = analyze_exclusion_list(text.replace("\n", "\r\n"), "file")
+        first = analyze_rule_list(text, "file")
+        second = analyze_rule_list(text.replace("\n", "\r\n"), "file")
         self.assertEqual(first.normalized_text, text)
         self.assertEqual(first.normalized_text, second.normalized_text)
         self.assertEqual(len(first.rules), 6)
@@ -29,22 +30,22 @@ class ExclusionRuleTests(unittest.TestCase):
         for control in ("\r", "\t", "\v", "\f", "\x00", "\x1f"):
             with self.subTest(control=repr(control)):
                 self.assertTrue(
-                    analyze_exclusion_list("a" + control + "b", "file").has_errors,
+                    analyze_rule_list("a" + control + "b", "file").has_errors,
                 )
         self.assertFalse(
-            analyze_exclusion_list("a\u2028b", "file").has_errors,
+            analyze_rule_list("a\u2028b", "file").has_errors,
         )
 
     def test_quotes_empty_lines_and_mapping(self):
-        result = analyze_exclusion_list('\n""\n"cache"\n"   "\n<none>\n', "file")
+        result = analyze_rule_list('\n""\n"cache"\n"   "\n<none>\n', "file")
         self.assertEqual(result.normalized_text, "cache\n   \n<none>")
         self.assertEqual(result.line_map, (3, 4, 5))
         self.assertEqual(
             [(item.input_line, item.display_line) for item in result.diagnostics],
             [(4, 2), (5, 3)],
         )
-        direct = format_exclusion_diagnostics((("文件名单", result),), True)
-        displayed = format_exclusion_diagnostics((("文件名单", result),))
+        direct = format_rule_diagnostics((("文件名单", result),), True)
+        displayed = format_rule_diagnostics((("文件名单", result),))
         self.assertIn("第 4 行", direct)
         self.assertIn("第 2 行", displayed)
 
@@ -62,18 +63,18 @@ class ExclusionRuleTests(unittest.TestCase):
         }
         for raw, expected in examples.items():
             with self.subTest(raw=raw):
-                result = analyze_exclusion_list(raw, "file")
+                result = analyze_rule_list(raw, "file")
                 self.assertFalse(result.has_errors)
                 self.assertEqual(result.normalized_text, expected)
         for name in ("'a'.txt", "`a`.txt", "“a”.txt"):
             self.assert_match(name, name)
         self.assertTrue(
-            analyze_exclusion_list('"C:\\Project\\src"', "directory").has_errors,
+            analyze_rule_list('"C:\\Project\\src"', "directory").has_errors,
         )
 
     def test_disabled_body_is_not_interpreted(self):
         text = '|src/cache\n"|<none>:bad//??"\n|   \n|'
-        result = analyze_exclusion_list(text, "file")
+        result = analyze_rule_list(text, "file")
         self.assertEqual(
             result.normalized_text, "|src/cache\n|<none>:bad//??\n|   \n|",
         )
@@ -81,32 +82,32 @@ class ExclusionRuleTests(unittest.TestCase):
         self.assertFalse(result.has_warnings)
         self.assertEqual(result.rules, ())
         self.assertTrue(all(item.state == "disabled" for item in result.diagnostics))
-        restored = analyze_exclusion_list("src/cache", "file")
+        restored = analyze_rule_list("src/cache", "file")
         self.assertEqual(restored.normalized_text, "src\\cache")
         for invalid in (":|README", " |cache", "::README", "README:part"):
-            self.assertTrue(analyze_exclusion_list(invalid, "file").has_errors)
+            self.assertTrue(analyze_rule_list(invalid, "file").has_errors)
         self.assert_match(";draft.txt", ";draft.txt")
         self.assert_match(";draft.txt", "draft.txt", False)
 
     def test_whitespace_is_preserved_and_risk_has_error_priority(self):
         for text in ("   ", '"   "', ":   ", "\\   "):
             with self.subTest(text=text):
-                self.assertTrue(analyze_exclusion_list(text, "file").has_errors)
+                self.assertTrue(analyze_rule_list(text, "file").has_errors)
         for text in (" README*", ": README*", "\\ README*", "README ", "* .txt", "   .txt"):
             with self.subTest(text=text):
-                result = analyze_exclusion_list(text, "file")
+                result = analyze_rule_list(text, "file")
                 self.assertFalse(result.has_errors)
                 self.assertEqual(result.normalized_text, text)
                 self.assertEqual(result.has_warnings, text != "* .txt")
-        result = analyze_exclusion_list("report .txt", "file")
+        result = analyze_rule_list("report .txt", "file")
         self.assertFalse(result.has_warnings)
         self.assert_match(" my notes.txt ", " my notes.txt ")
         self.assert_match(" my notes.txt ", "my notes.txt", False)
-        result = analyze_exclusion_list(" bad|name ", "file")
+        result = analyze_rule_list(" bad|name ", "file")
         self.assertTrue(result.has_errors)
         self.assertFalse(result.has_warnings)
         self.assertTrue(
-            analyze_exclusion_list("folder \\file.txt", "file").has_errors,
+            analyze_rule_list("folder \\file.txt", "file").has_errors,
         )
 
     def test_no_extension_definition(self):
@@ -129,9 +130,9 @@ class ExclusionRuleTests(unittest.TestCase):
         self.assert_match(":\\README*", "README")
         self.assert_match(":\\README*", "src\\README", False)
         self.assert_match(":README*", "src\\README")
-        self.assertTrue(analyze_exclusion_list(":", "directory").has_errors)
+        self.assertTrue(analyze_rule_list(":", "directory").has_errors)
         for invalid in (":\\", ":/", "<none>", "<none>:README"):
-            self.assertTrue(analyze_exclusion_list(invalid, "file").has_errors)
+            self.assertTrue(analyze_rule_list(invalid, "file").has_errors)
 
     def test_directory_names_and_contiguous_paths(self):
         for path in ("cache", "a\\cache", "a\\b\\cache"):
@@ -185,11 +186,11 @@ class ExclusionRuleTests(unittest.TestCase):
         for path in ("tools", "tools\\sub", "a\\tools"):
             self.assert_match("tools\\**", path, kind="directory")
         self.assert_match("**", "a", kind="directory")
-        result = analyze_exclusion_list("**", "directory")
+        result = analyze_rule_list("**", "directory")
         self.assertFalse(result.matches(()))
         for invalid in ("a**b", "**.py", "***", "src\\**name\\a.py"):
             with self.subTest(invalid=invalid):
-                self.assertTrue(analyze_exclusion_list(invalid, "file").has_errors)
+                self.assertTrue(analyze_rule_list(invalid, "file").has_errors)
 
     def test_separators_trailing_cleanup_and_case(self):
         examples = {
@@ -203,14 +204,14 @@ class ExclusionRuleTests(unittest.TestCase):
         }
         for raw, normalized in examples.items():
             with self.subTest(raw=raw):
-                result = analyze_exclusion_list(raw, "file")
+                result = analyze_rule_list(raw, "file")
                 self.assertFalse(result.has_errors)
                 self.assertEqual(result.normalized_text, normalized)
-                repeated = analyze_exclusion_list(result.normalized_text, "file")
+                repeated = analyze_rule_list(result.normalized_text, "file")
                 self.assertEqual(repeated.normalized_text, normalized)
         self.assert_match("SRC\\README", "a\\src\\readme")
         self.assertEqual(
-            analyze_exclusion_list("SRC/README", "file").normalized_text,
+            analyze_rule_list("SRC/README", "file").normalized_text,
             "SRC\\README",
         )
 
@@ -237,7 +238,7 @@ class ExclusionRuleTests(unittest.TestCase):
         )
         for text in invalid:
             with self.subTest(text=text):
-                result = analyze_exclusion_list(text, "file")
+                result = analyze_rule_list(text, "file")
                 self.assertTrue(result.has_errors)
                 self.assertEqual(result.normalized_text, text)
                 self.assertEqual(result.rules, ())
@@ -250,7 +251,7 @@ class ExclusionRuleTests(unittest.TestCase):
         )
         for text in invalid:
             with self.subTest(text=text):
-                result = analyze_exclusion_list(text, "file")
+                result = analyze_rule_list(text, "file")
                 self.assertTrue(result.has_errors)
                 self.assertEqual(result.normalized_text, text)
         for codepoint in range(32):
@@ -258,8 +259,8 @@ class ExclusionRuleTests(unittest.TestCase):
                 continue
             text = "a" + chr(codepoint) + "b"
             with self.subTest(codepoint=codepoint):
-                self.assertTrue(analyze_exclusion_list(text, "file").has_errors)
-        self.assertFalse(analyze_exclusion_list("missing_file.txt", "file").has_errors)
+                self.assertTrue(analyze_rule_list(text, "file").has_errors)
+        self.assertFalse(analyze_rule_list("missing_file.txt", "file").has_errors)
 
     def test_reserved_device_names_and_wildcard_boundary(self):
         devices = (
@@ -272,26 +273,26 @@ class ExclusionRuleTests(unittest.TestCase):
             for component in (device, device.lower() + ".txt", device + " .txt"):
                 with self.subTest(component=component):
                     self.assertTrue(
-                        analyze_exclusion_list(component, "file").has_errors,
+                        analyze_rule_list(component, "file").has_errors,
                     )
                     self.assertTrue(
-                        analyze_exclusion_list(
+                        analyze_rule_list(
                             component + "\\file.txt", "file",
                         ).has_errors,
                     )
         for allowed in ("COM0", "COM10", "LPT0", "LPT10", "CONSOLE", "CON*", "COM?.txt"):
             with self.subTest(allowed=allowed):
-                self.assertFalse(analyze_exclusion_list(allowed, "file").has_errors)
+                self.assertFalse(analyze_rule_list(allowed, "file").has_errors)
 
     def test_duplicate_order_and_disabled_text_are_preserved(self):
         text = "cache\ncache\n|src/cache\nREADME"
-        result = analyze_exclusion_list(text, "file")
+        result = analyze_rule_list(text, "file")
         self.assertEqual(result.normalized_text, text)
         self.assertEqual(len(result.rules), 3)
         self.assertEqual(result.line_map, (1, 2, 3, 4))
 
     def test_compilation_occurs_during_preparation_not_matching(self):
-        import core.exclusion_rules as module
+        import core.rule_lists as module
         original = module._compile_segment
         with patch.object(module, "_compile_segment", wraps=original) as compile_segment:
             prepared = prepare_exclusions("src\\cache", "*.log\n:README*")

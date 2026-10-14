@@ -6,7 +6,7 @@ from core.constants import THEME
 from core.message_utils import resolve_output_file_conflict, safe_show_info
 from core.path_validation import normalize_windows_display_path
 from core.paths import build_output_path, open_path_with_default_app, validate_required_path
-from core.exclusion_rules import prepare_exclusions
+from core.exclusion_rules import PreparedExclusions
 from panels.base_panel import BasePanel
 from services.merge_service import merge_demand_files, merge_project_files
 from ui.dialogs import edit_exclude_settings, edit_extra_text_settings
@@ -64,10 +64,10 @@ class MergePanel(BasePanel):
         styled_button(row, "附加文本", self.open_extra_text_dialog, width=10).pack(
             side="left", padx=(0, 8),
         )
-        styled_button(row, "按需合并", self.open_demand_merge_dialog, width=12).pack(
+        styled_button(row, "按名单合并", self.open_demand_merge_dialog, width=12).pack(
             side="right", padx=(8, 0),
         )
-        styled_button(row, "常规合并", self.execute_regular_merge, width=12, accent=True).pack(
+        styled_button(row, "按目录合并", self.execute_regular_merge, width=12, accent=True).pack(
             side="right",
         )
 
@@ -109,13 +109,20 @@ class MergePanel(BasePanel):
         if cfg is None:
             return
         try:
-            exclusions = prepare_exclusions(cfg["exclude_folders"], cfg["exclude_files"])
+            exclusions = PreparedExclusions(
+                self.commits.prepare_rule(
+                    self.cfg, "exclude_folders", "directory", cfg["exclude_folders"],
+                ),
+                self.commits.prepare_rule(
+                    self.cfg, "exclude_files", "file", cfg["exclude_files"],
+                ),
+            )
             source = validate_required_path(cfg["source_folder"], "源文件夹")
             output, header, footer = self.resolve_common_output_and_markers(cfg, self.root)
             if output is None:
                 return
-            self.set_status("正在常规合并文件代码...")
-            self.log("用户启动：常规合并")
+            self.set_status("正在按目录合并文件代码...")
+            self.log("用户启动：按目录合并")
             self.commits.metrics["business_starts"] += 1
             result = merge_project_files(
                 source_folder=source, output_file=output,
@@ -124,13 +131,13 @@ class MergePanel(BasePanel):
                 code_header_line=header, code_footer_line=footer, log_func=self.log,
             )
         except (OSError, ValueError) as error:
-            self.handle_error("常规合并", error)
+            self.handle_error("按目录合并", error)
             return
 
-        self.set_status("常规文件代码合并完成")
+        self.set_status("按目录合并完成")
         safe_show_info(
             "成功",
-            f"常规合并完成！\n\n总共处理了 {result.total_files} 个文件。\n\n"
+            f"按目录合并完成！\n\n总共处理了 {result.total_files} 个文件。\n\n"
             f"已保存到：\n{result.output_file}",
             self.root,
         )
@@ -150,10 +157,10 @@ class MergePanel(BasePanel):
             from services.demand_rules import windows_path_key
             output_key = windows_path_key(output)
             if any(windows_path_key(path) == output_key for path in file_paths):
-                raise ValueError("输出文件被实际选中，不能执行按需合并。")
+                raise ValueError("输出文件被实际选中，不能执行按名单合并。")
 
-            self.set_status("正在按需合并文件代码...")
-            self.log("用户启动：按需合并")
+            self.set_status("正在按名单合并文件代码...")
+            self.log("用户启动：按名单合并")
             self.commits.metrics["business_starts"] += 1
             result = merge_demand_files(
                 file_paths=file_paths, output_file=output,
@@ -163,13 +170,13 @@ class MergePanel(BasePanel):
                 log_func=self.log,
             )
         except (OSError, ValueError) as error:
-            self.handle_error("按需合并", error, parent)
+            self.handle_error("按名单合并", error, parent)
             return False
 
-        self.set_status("按需文件代码合并完成")
+        self.set_status("按名单合并完成")
         safe_show_info(
             "成功",
-            f"按需合并完成！\n\n总共合并了 {result.total_files} 个文件。\n\n"
+            f"按名单合并完成！\n\n总共合并了 {result.total_files} 个文件。\n\n"
             f"已保存到：\n{result.output_file}",
             parent,
         )

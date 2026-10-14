@@ -87,7 +87,7 @@ class ExclusionGuiTests(unittest.TestCase):
         widget.event_generate("<FocusOut>")
         self.root.update()
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
-        self.assertEqual(self.value("exclude_files"), raw)
+        self.assertEqual(self.value("exclude_files"), raw.replace('"', ""))
         self.assertEqual(
             self.status.get(), "已修改，尚未保存；高亮对应当前原文",
         )
@@ -103,7 +103,7 @@ class ExclusionGuiTests(unittest.TestCase):
         tool.redo()
         self.root.update()
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
-        self.assertEqual(self.value("exclude_files"), raw)
+        self.assertEqual(self.value("exclude_files"), raw.replace('"', ""))
         for tag, line in (
             ("exclusion_error", "2.0"),
             ("exclusion_warning", "3.0"),
@@ -117,7 +117,7 @@ class ExclusionGuiTests(unittest.TestCase):
         self.replace("exclude_folders", '\n"src/cache/"\n|bad//<name>')
         self.replace("exclude_files", '"*.LOG"\n:""\n')
         before = dict(self.manager.metrics)
-        with patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=True):
+        with patch("ui.rule_list_editor.confirm_rule_diagnostics", return_value=True):
             self.assertTrue(self.session.save_and_close())
         self.assertFalse(self.dialog.winfo_exists())
         self.assertEqual(
@@ -144,7 +144,7 @@ class ExclusionGuiTests(unittest.TestCase):
             observed.extend(named_results)
             return False
 
-        with patch("ui.exclusion_editor.confirm_exclusion_diagnostics", side_effect=report):
+        with patch("ui.rule_list_editor.confirm_rule_diagnostics", side_effect=report):
             self.assertFalse(self.session.save_and_close())
         self.assertTrue(self.dialog.winfo_exists())
         self.assertEqual(self.path.read_bytes(), original)
@@ -169,7 +169,7 @@ class ExclusionGuiTests(unittest.TestCase):
         self.replace("exclude_files", " README*")
         widget = self.widgets["exclude_files"]
         self.assertTrue(widget.tag_ranges("exclusion_warning"))
-        with patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=False):
+        with patch("ui.rule_list_editor.confirm_rule_diagnostics", return_value=False):
             self.assertFalse(self.session.save_and_close())
         self.assertTrue(widget.tag_ranges("exclusion_warning"))
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
@@ -178,7 +178,7 @@ class ExclusionGuiTests(unittest.TestCase):
         self.assertEqual(
             self.status.get(), "已修改，尚未保存；高亮对应当前原文",
         )
-        with patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=True):
+        with patch("ui.rule_list_editor.confirm_rule_diagnostics", return_value=True):
             self.assertTrue(self.session.save_and_close())
         self.assertEqual(self.config["scan"]["exclude_files"], " LICENSE*")
 
@@ -187,7 +187,7 @@ class ExclusionGuiTests(unittest.TestCase):
         self.replace("exclude_folders", "src/cache/")
         self.replace("exclude_files", "test_*.py")
         with (
-            patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=True),
+            patch("ui.rule_list_editor.confirm_rule_diagnostics", return_value=True),
             patch("core.config.os.replace", side_effect=PermissionError("denied")),
             patch("ui.config_editing.safe_show_error"),
         ):
@@ -200,15 +200,15 @@ class ExclusionGuiTests(unittest.TestCase):
         self.assertIn("保存失败", self.status.get())
 
     def test_favorite_preparation_validates_without_accepting_config(self):
-        with patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=True):
-            prepared = self.session.prepare_favorite(
+        with patch("ui.rule_list_editor.confirm_rule_diagnostics", return_value=True):
+            prepared = self.session.list_editor.prepare_favorite(
                 "exclude_files", '"src/cache/*.log/"',
             )
         self.assertEqual(prepared, "src\\cache\\*.log")
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
-        with patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=False):
+        with patch("ui.rule_list_editor.confirm_rule_diagnostics", return_value=False):
             self.assertIsNone(
-                self.session.prepare_favorite("exclude_files", "<none>"),
+                self.session.list_editor.prepare_favorite("exclude_files", "<none>"),
             )
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
 
@@ -221,7 +221,7 @@ class ExclusionGuiTests(unittest.TestCase):
             self.widgets["exclude_files"]._content_operation_completed,
         )
         with (
-            patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=True),
+            patch("ui.rule_list_editor.confirm_rule_diagnostics", return_value=True),
             patch("ui.favorites.ask_favorite_name", return_value="new rules"),
         ):
             favorite.save_current_text_as_favorite()
@@ -241,7 +241,7 @@ class ExclusionGuiTests(unittest.TestCase):
         )
         before = self.path.read_bytes()
         with (
-            patch("ui.exclusion_editor.confirm_exclusion_diagnostics", return_value=False),
+            patch("ui.rule_list_editor.confirm_rule_diagnostics", return_value=False),
             patch("ui.favorites.ask_favorite_name") as ask_name,
         ):
             favorite.save_current_text_as_favorite()
@@ -261,7 +261,7 @@ class ExclusionGuiTests(unittest.TestCase):
         )
         self.root.update()
         self.assertEqual(
-            self.value("exclude_files"), ' "src/cache/"\n|bad/path',
+            self.value("exclude_files"), ' src/cache/\n|bad/path',
         )
         self.assertEqual(self.config["scan"]["exclude_files"], "*.log")
 

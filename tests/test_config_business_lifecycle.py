@@ -94,13 +94,13 @@ class BusinessLifecycleTests(unittest.TestCase):
         self.assertIs(result, parameters)
         prepare.assert_called_once_with(expected)
 
-    def test_business_precondition_failure_returns_false(self):
+    def test_business_precondition_failure_returns_no_parameters(self):
         self.manager.accept(self.config["scan"], {"source_folder": "new"})
         with (
             patch("core.config.os.replace", side_effect=PermissionError("denied")),
             patch("ui.config_editing.safe_show_error"),
         ):
-            self.assertFalse(self.controller.prepare_business("scan"))
+            self.assertIsNone(self.controller.prepare_business("scan"))
         self.assertTrue(self.manager.needs_save)
 
     def test_business_precondition_persists_deferred_session(self):

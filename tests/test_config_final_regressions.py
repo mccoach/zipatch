@@ -160,6 +160,97 @@ class ApplicationPageRegressionTests(unittest.TestCase):
             "99_归档\\test_backup",
         )
 
+    def test_running_log_preserves_more_than_old_limit_until_manual_clear(self):
+        text = self.app.log_text
+        text.configure(state="normal")
+        text.delete("1.0", "end")
+        text.configure(state="disabled")
+        self.app.log_auto_scroll = False
+        before = dict(self.app.config_manager.metrics)
+
+        for number in range(5105):
+            self.app.log(f"KEEP_LOG_{number:05d}")
+
+        content = text.get("1.0", "end-1c")
+        self.assertIn("KEEP_LOG_00000", content)
+        self.assertIn("KEEP_LOG_05104", content)
+        self.assertEqual(content.count("KEEP_LOG_"), 5105)
+        self.assertEqual(str(text.cget("state")), "disabled")
+        self.assertEqual(self.app.config_manager.metrics, before)
+
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+
+        clear = next(
+            widget for widget in descendants(text._text_editor_controller.parent)
+            if isinstance(widget, tk.Button) and widget.cget("text") == "清空"
+        )
+        clear.invoke()
+        self.assertEqual(text.get("1.0", "end-1c"), "")
+        self.app.log("AFTER_MANUAL_CLEAR")
+        self.assertIn("AFTER_MANUAL_CLEAR", text.get("1.0", "end-1c"))
+        self.assertNotIn("KEEP_LOG_", text.get("1.0", "end-1c"))
+
+    def test_result_history_appends_persists_and_only_manual_clear_removes(self):
+        self.app.show_panel("patch")
+        panel = self.app.current_panel
+        original = panel.cfg["last_result_text"]
+        first = "FIRST PREVIEW\n完整正文\n"
+        second = "SECOND EXECUTION\n完整结果\n"
+
+        with self.app.commits.operation():
+            self.assertTrue(panel.finish_result(first).persisted)
+            self.assertTrue(panel.finish_result(second).persisted)
+
+        expected = (
+            original + "\n\n" + first if original else first
+        ) + "\n\n" + second
+        self.assertEqual(panel.result_text.get("1.0", "end-1c"), expected)
+        self.assertEqual(panel.cfg["last_result_text"], expected)
+        loaded, changed = load_user_config(self.path)
+        self.assertFalse(changed)
+        self.assertEqual(loaded["patch"]["last_result_text"], expected)
+
+        panel.clear_result()
+        self.assertEqual(panel.result_text.get("1.0", "end-1c"), "")
+        self.assertEqual(panel.cfg["last_result_text"], "")
+        loaded, changed = load_user_config(self.path)
+        self.assertFalse(changed)
+        self.assertEqual(loaded["patch"]["last_result_text"], "")
+
+        with self.app.commits.operation():
+            self.assertTrue(panel.finish_result("AFTER CLEAR").persisted)
+        self.assertEqual(panel.result_text.get("1.0", "end-1c"), "AFTER CLEAR")
+
+    def test_result_save_failure_keeps_history_and_retry_does_not_append_again(self):
+        self.app.show_panel("patch")
+        panel = self.app.current_panel
+        with self.app.commits.operation():
+            self.assertTrue(panel.finish_result("OLD HISTORY").persisted)
+        original_disk = self.path.read_bytes()
+
+        with (
+            self.app.commits.operation(),
+            patch("core.config.os.replace", side_effect=PermissionError("denied")),
+            patch("panels.patch_panel.safe_show_error") as report,
+        ):
+            result = panel.finish_result("NEW FAILURE RECORD")
+        self.assertFalse(result.persisted)
+        report.assert_called_once()
+        expected = "OLD HISTORY\n\nNEW FAILURE RECORD"
+        self.assertEqual(panel.result_text.get("1.0", "end-1c"), expected)
+        self.assertEqual(panel.cfg["last_result_text"], expected)
+        self.assertEqual(self.path.read_bytes(), original_disk)
+        self.assertTrue(self.app.config_manager.needs_save)
+
+        self.assertTrue(self.app.commits.finish(self.root).persisted)
+        self.assertEqual(panel.result_text.get("1.0", "end-1c"), expected)
+        loaded, changed = load_user_config(self.path)
+        self.assertFalse(changed)
+        self.assertEqual(loaded["patch"]["last_result_text"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

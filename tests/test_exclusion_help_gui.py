@@ -10,14 +10,17 @@ from unittest.mock import patch
 from ui.dialogs import create_managed_text_box
 from core.config import ConfigSaveManager, deep_merge_config
 from core.constants import DEFAULT_CONFIG, THEME
-from core.exclusion_rules import analyze_exclusion_list
+
 from core.text_io import replace_text_keep_undo
 from ui.config_editing import ConfigCommitController
+from ui.rule_list_editor import (
+    RULE_DISABLED_BACKGROUND,
+    RULE_DISABLED_FOREGROUND,
+
+    RULE_WARNING_BACKGROUND,
+)
 from ui.exclusion_editor import (
-    EXCLUSION_DISABLED_BACKGROUND,
-    EXCLUSION_DISABLED_FOREGROUND,
     EXCLUSION_RULES_TEXT,
-    EXCLUSION_WARNING_BACKGROUND,
     ExclusionDraftSession,
     create_exclusion_dialog,
     show_exclusion_rules,
@@ -159,7 +162,9 @@ class ExclusionHelpGuiTests(unittest.TestCase):
         session, widgets, status = self.make_highlight_session(config)
 
         for field, widget in widgets.items():
-            self.assertEqual(widget.get("1.0", "end-1c"), config[field])
+            self.assertEqual(
+                widget.get("1.0", "end-1c"), config[field].replace('"', ""),
+            )
         self.assertEqual(
             str(widgets["exclude_folders"].tag_ranges("exclusion_disabled")[0]),
             "2.0",
@@ -173,14 +178,14 @@ class ExclusionHelpGuiTests(unittest.TestCase):
             self.assertEqual(str(file_widget.tag_ranges(tag)[0]), line)
         self.assertEqual(
             file_widget.tag_cget("exclusion_disabled", "foreground"),
-            EXCLUSION_DISABLED_FOREGROUND,
+            RULE_DISABLED_FOREGROUND,
         )
         self.assertEqual(
             file_widget.tag_cget("exclusion_disabled", "background"),
-            EXCLUSION_DISABLED_BACKGROUND,
+            RULE_DISABLED_BACKGROUND,
         )
-        self.assertNotEqual(EXCLUSION_DISABLED_BACKGROUND, THEME["bg_input"])
-        self.assertNotEqual(EXCLUSION_DISABLED_FOREGROUND, THEME["fg_dim"])
+        self.assertNotEqual(RULE_DISABLED_BACKGROUND, THEME["bg_input"])
+        self.assertNotEqual(RULE_DISABLED_FOREGROUND, THEME["fg_dim"])
         self.assertEqual(self.manager.metrics, metrics)
         self.assertEqual(self.path.read_bytes(), original)
         session.destroy()
@@ -243,7 +248,7 @@ class ExclusionHelpGuiTests(unittest.TestCase):
             ("exclusion_error", "4.0"),
         ):
             self.assertEqual(str(widget.tag_ranges(tag)[0]), line)
-        self.assertEqual(widget.get("1.0", "end-1c"), raw)
+        self.assertEqual(widget.get("1.0", "end-1c"), raw.replace('"', ""))
 
         widget._text_editor_controller.undo()
         self.root.update()
@@ -253,7 +258,7 @@ class ExclusionHelpGuiTests(unittest.TestCase):
 
         widget._text_editor_controller.redo()
         self.root.update()
-        self.assertEqual(widget.get("1.0", "end-1c"), raw)
+        self.assertEqual(widget.get("1.0", "end-1c"), raw.replace('"', ""))
         self.assertTrue(widget.tag_ranges("exclusion_disabled"))
         self.assertTrue(widget.tag_ranges("exclusion_warning"))
         self.assertTrue(widget.tag_ranges("exclusion_error"))
@@ -271,7 +276,7 @@ class ExclusionHelpGuiTests(unittest.TestCase):
         self.root.update()
         before = self.manager.metrics["successful_replaces"]
         with patch(
-            "ui.exclusion_editor.confirm_exclusion_diagnostics",
+            "ui.rule_list_editor.confirm_rule_diagnostics",
             return_value=True,
         ):
             self.assertTrue(session.save_and_close())
@@ -314,7 +319,7 @@ class ExclusionHelpGuiTests(unittest.TestCase):
                 for widget in widgets if isinstance(widget, tk.Label)
             ]
             self.assertIn(
-                "快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做。",
+                "快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做，Ctrl+` 逐行停用／启用。",
                 labels,
             )
             for description in (
@@ -334,8 +339,8 @@ class ExclusionHelpGuiTests(unittest.TestCase):
             }
             self.assertTrue({
                 THEME["danger_bg"],
-                EXCLUSION_WARNING_BACKGROUND,
-                EXCLUSION_DISABLED_BACKGROUND,
+                RULE_WARNING_BACKGROUND,
+                RULE_DISABLED_BACKGROUND,
             }.issubset(colors))
             help_button = next(
                 widget for widget in widgets

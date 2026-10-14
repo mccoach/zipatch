@@ -93,6 +93,11 @@ def validate_temporary_popups(root=None):
     for record in list(records):
         if not record["close_on_focus_out"]:
             continue
+        permission = record["dismissal_allowed"]
+        if permission is not None and not permission():
+            # 业务拥有者可能正在与兄弟名称窗口或原生确认窗口交互。
+            # 生命周期由拥有者判断；窗口管理器不复制其操作状态。
+            continue
         window = record["window"]
         if not _window_exists(window):
             continue
@@ -115,13 +120,104 @@ def validate_temporary_popups(root=None):
         close_registered_popup(window, restore_focus=False)
 
 
+def restore_editor_interaction(widget):
+    """明确编辑操作结束后的有条件恢复，不用于浮窗自动关闭抢焦点。"""
+    if not _window_exists(widget):
+        return False
+    root = widget._root()
+    if (
+        getattr(root, "_zipatch_closed", False)
+        or getattr(root, "_zipatch_closing", False)
+        or str(widget.cget("state")) != "normal"
+    ):
+        return False
+    owner = widget.winfo_toplevel()
+    modal = root.grab_current()
+    if modal is not None and modal is not owner:
+        return False
+    focused = get_focus_owner(root)
+    if focused is not None and not is_descendant_or_self(focused, owner):
+        return False
+    if root.tk.call("tk", "windowingsystem") == "win32":
+        if root.tk.getboolean(owner.attributes("-disabled")):
+            return False
+    # 用户明确返回本窗口编辑，且没有新的交互拥有者。
+    # Windows 上 focus_set 可能只更新 Tk 记录，未取得实际输入归属。
+    owner.lift()
+    widget.focus_force()
+    return True
+
+
+def release_modal_control(window):
+    context = getattr(window, "_zipatch_modal_context", None)
+    if context is None:
+        return
+    del window._zipatch_modal_context
+    root = window._root()
+    if (
+        not _window_exists(root)
+        or getattr(root, "_zipatch_closed", False)
+    ):
+        return
+    # 准备退出不是正式销毁；诊断返回后仍须归还原模态控制。
+    # 被其他窗口取得或已经主动释放时，不恢复过期前置上下文。
+    if root.grab_current() is not window:
+        return
+    previous_grab, previous_focus = context
+    window.grab_release()
+    if previous_grab is not None and _window_exists(previous_grab):
+        previous_grab.grab_set()
+    # 退出准备期间只归还模态所有权，不强制激活正文编辑。
+    if getattr(root, "_zipatch_closing", False):
+        return
+    focused = get_focus_owner(root)
+    if (
+        previous_focus is not None and _window_exists(previous_focus)
+        and (focused is None or is_descendant_or_self(focused, window))
+        and (
+            previous_grab is None
+            or is_descendant_or_self(previous_focus, previous_grab)
+        )
+    ):
+        if "state" not in previous_focus.keys():
+            previous_focus.focus_set()
+        elif str(previous_focus.cget("state")) == "normal":
+            restore_editor_interaction(previous_focus)
+
+
+def take_modal_control(window):
+    """取得者拥有归还边界；显式 destroy 在真实销毁之前归还。"""
+    if hasattr(window, "_zipatch_modal_context"):
+        raise RuntimeError("窗口不能重复取得模态控制")
+    root = window._root()
+    window._zipatch_modal_context = (
+        root.grab_current(), get_focus_owner(root),
+    )
+    window.grab_set()
+    original_destroy = window.destroy
+
+    def destroy():
+        release_modal_control(window)
+        original_destroy()
+
+    window.destroy = destroy
+
+    def destroyed(event):
+        if event.widget is window:
+            # 父窗口整体销毁等不经过实例 destroy 的路径：
+            # 只在仍拥有控制时归还，不复活已改变的上下文。
+            release_modal_control(window)
+
+    window.bind("<Destroy>", destroyed, add="+")
+
+
 def register_popup(
     window, close_callback=None, focus_on_register=True,
     close_on_focus_out=False, focus_guard_widgets=None,
-    prepare_close=None, exit_blocker=False,
+    prepare_close=None, exit_blocker=False, dismissal_allowed=None,
 ):
     cleanup_popup_stack()
-    unregister_popup(window)
+    unregister_popup(window, restore_context=False)
     root = window._root()
     _install_observer(root)
     _popup_stack.append({
@@ -131,6 +227,7 @@ def register_popup(
         "exit_blocker": exit_blocker,
         "close_on_focus_out": close_on_focus_out,
         "focus_guard_widgets": list(focus_guard_widgets or []),
+        "dismissal_allowed": dismissal_allowed,
     })
 
     def escape(event=None):
@@ -151,7 +248,9 @@ def register_popup(
         window.lift()
 
 
-def unregister_popup(window):
+def unregister_popup(window, restore_context=True):
+    if restore_context:
+        release_modal_control(window)
     _popup_stack[:] = [
         record for record in _popup_stack if record["window"] is not window
     ]
@@ -172,7 +271,13 @@ def close_registered_popup(window, restore_focus=True):
         window.destroy()
     unregister_popup(window)
     if restore_focus:
-        focus_top_popup(root)
+        modal = root.grab_current()
+        focused = get_focus_owner(root)
+        if modal is not None:
+            if focused is None or not is_descendant_or_self(focused, modal):
+                focus_window(modal)
+        else:
+            focus_top_popup(root)
     return True
 
 
