@@ -5,6 +5,7 @@ import tkinter as tk
 from core.constants import THEME
 
 
+
 def apply_global_theme(root):
     root.configure(bg=THEME["bg"])
     root.option_add("*Font", THEME["font_main"])
@@ -86,14 +87,6 @@ def styled_frame(parent, bg=None):
     return tk.Frame(parent, bg=bg or THEME["bg"])
 
 
-def styled_panel(parent):
-    return tk.Frame(
-        parent,
-        bg=THEME["bg_panel"],
-        highlightbackground=THEME["border"],
-        highlightthickness=1,
-    )
-
 
 def styled_label_frame(parent, text):
     return tk.LabelFrame(
@@ -115,6 +108,7 @@ def styled_entry(parent, textvariable):
 
     entry = tk.Entry(
         frame,
+        width=1,
         textvariable=textvariable,
         bg=THEME["bg_input"],
         fg=THEME["fg"],
@@ -123,7 +117,7 @@ def styled_entry(parent, textvariable):
         bd=4,
         font=THEME["font_main"],
     )
-    entry.pack(fill="x", expand=True)
+    entry.pack(side="left", fill="x", expand=True)
 
     return frame, entry
 
@@ -153,6 +147,7 @@ def styled_text_with_scrollbars(
 
     text = tk.Text(
         inner,
+        width=1,
         height=height,
         wrap=wrap,
         bg=THEME["bg_input"],

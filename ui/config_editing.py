@@ -4,9 +4,10 @@ from contextlib import contextmanager
 from copy import deepcopy
 from time import perf_counter
 
-from core.config import SaveStatus
-from core.message_utils import safe_show_error
-from core.text_io import get_text_value
+from core.config import SaveResult, SaveStatus
+from core.merged_format import OutputSettingsError, validate_output_settings
+from ui.message_dialogs import safe_show_error
+from ui.text_editor import get_text_value
 from core.rule_lists import RuleListResult, analyze_rule_list, clean_rule_quotes
 
 
@@ -30,7 +31,6 @@ class EditorBinding:
         self._suspend_depth = 0
         self._trace_id = None
         widget._config_binding = self
-        widget._commit_current_value = self.commit
 
         if variable is not None:
             self._trace_id = variable.trace_add("write", self.mark_dirty)
@@ -54,7 +54,12 @@ class EditorBinding:
     def read_current_value(self):
         if self.variable is not None:
             return self.variable.get()
-        return self.controller.read_text(self.widget)
+        return self.controller.read_text(
+            self.widget,
+            preserve_trailing_newlines=getattr(
+                self.widget, "_preserve_trailing_newlines", False,
+            ),
+        )
 
     def commit(self, prepared_text=None):
         self.controller.metrics["editor_accept_calls"] += 1
@@ -69,7 +74,12 @@ class EditorBinding:
         if not self.dirty:
             return False
 
-        value = self.read_current_value() if prepared_text is None else prepared_text.rstrip("\n")
+        if prepared_text is None:
+            value = self.read_current_value()
+        elif getattr(self.widget, "_preserve_trailing_newlines", False):
+            value = prepared_text
+        else:
+            value = prepared_text.rstrip("\n")
         value = self.normalizer(value)
 
         history = None
@@ -102,10 +112,26 @@ class EditorBinding:
 
     def on_focus_out(self, event=None):
         if not self.destroyed and not self._suspend_depth:
-            self.controller.submit_editors([self], self.widget.winfo_toplevel())
+            editors = (
+                self.controller.select(
+                    self.page, {"code_header_line", "code_footer_line"},
+                )
+                if self.page in ("merge", "restore")
+                and self.field in ("code_header_line", "code_footer_line")
+                else [self]
+            )
+            self.controller.submit_editors(editors, self.widget.winfo_toplevel())
 
     def on_return(self, event=None):
-        self.controller.submit_editors([self], self.widget.winfo_toplevel())
+        editors = (
+            self.controller.select(
+                self.page, {"code_header_line", "code_footer_line"},
+            )
+            if self.page in ("merge", "restore")
+            and self.field in ("code_header_line", "code_footer_line")
+            else [self]
+        )
+        self.controller.submit_editors(editors, self.widget.winfo_toplevel())
 
     @contextmanager
     def suspend_focus_commit(self):
@@ -142,9 +168,11 @@ class ConfigCommitController:
             "business_starts": 0,
         }
 
-    def prepare_rule(self, config, field, kind, text=None):
-        """只分析请求正文；对应当前配置的固定正文结果可以保留。"""
-        key = (id(config), field, kind)
+    def prepare_rule(self, config, field, kind, text=None, *, semantics="standard"):
+        """只分析请求正文；类别及分析语义相同才复用结果。"""
+        if semantics not in ("standard", "exclusion"):
+            raise ValueError("未知名单分析语义")
+        key = (id(config), field, kind, semantics)
         accepted = config[field]
         source = accepted if text is None else text
         cleaned = clean_rule_quotes(source)
@@ -155,7 +183,7 @@ class ConfigCommitController:
                 if source == accepted:
                     self.rule_results[key] = (config, result)
                 return result
-        result = analyze_rule_list(source, kind)
+        result = analyze_rule_list(source, kind, semantics=semantics)
         if source == accepted:
             # 固定业务正文等于当前配置时，首次结果必须保留。
             # 不接受另一份候选，也不以候选替换配置权威正文。
@@ -170,9 +198,9 @@ class ConfigCommitController:
             result.source_text, result.normalized_text,
         ):
             raise ValueError("名单结果不对应当前已接受正文")
-        self.rule_results[(id(config), field, result.object_kind)] = (
-            config, result,
-        )
+        self.rule_results[
+            (id(config), field, result.object_kind, result.semantics)
+        ] = (config, result)
 
     def register(self, *args, **kwargs):
         return EditorBinding(self, *args, **kwargs)
@@ -185,15 +213,70 @@ class ConfigCommitController:
         ]
 
     def accept_editors(self, editors):
-        changed = False
-        for editor in tuple(editors):
-            changed |= editor.commit()
-        return changed
+        """同次标记联合接受；其他字段保持既有逐编辑器接受语义。"""
+        editors = tuple(editors)
+        marker_groups = {}
+        ordinary = []
+        for editor in editors:
+            if (
+                editor.page in ("merge", "restore")
+                and editor.field in ("code_header_line", "code_footer_line")
+            ):
+                marker_groups.setdefault(
+                    (editor.page, id(editor.config)), [],
+                ).append(editor)
+            else:
+                ordinary.append(editor)
 
-    def commit_active_editor(self):
-        focused = self.root.focus_get()
-        commit = getattr(focused, "_commit_current_value", None)
-        return bool(commit()) if callable(commit) else False
+        changed = False
+        try:
+            for group in marker_groups.values():
+                pending = [
+                    editor for editor in group
+                    if not editor.destroyed and not editor._suspend_depth and editor.dirty
+                ]
+                if not pending:
+                    continue
+                config = pending[0].config
+                values = {
+                    editor.field: editor.normalizer(editor.read_current_value())
+                    for editor in pending
+                }
+                validate_output_settings(pending[0].page, {**config, **values})
+                # 配置联合接受前，先完成全部显示层准备。
+                for editor in pending:
+                    value = values[editor.field]
+                    if editor.variable.get() != value:
+                        editor.variable.set(value)
+                accepted = self.manager.accept(config, values)
+                histories = self.manager.config_data["entry_history"]
+                maximum = self.manager.config_data["settings"]["entry_history_max_items"]
+                for editor in pending:
+                    self.metrics["editor_accept_calls"] += 1
+                    value = values[editor.field]
+                    if editor.history_key and value:
+                        history = [value] + [
+                            previous for previous in histories.get(editor.history_key, [])
+                            if previous != value
+                        ]
+                        accepted |= self.manager.accept(
+                            histories, {editor.history_key: history[:maximum]},
+                        )
+                    editor.dirty = False
+                changed |= accepted
+                if accepted:
+                    for editor in pending:
+                        editor.widget.event_generate("<<ConfigAccepted>>")
+            for editor in ordinary:
+                changed |= editor.commit()
+        except OutputSettingsError as error:
+            with self.operation():
+                safe_show_error(
+                    "输出参数未接受",
+                    str(error) + "\n\n请修正当前草稿后再继续。",
+                    parent=self.root,
+                )
+        return changed
 
     @contextmanager
     def operation(self):
@@ -205,21 +288,30 @@ class ConfigCommitController:
             self.operation_depth -= 1
 
     def finish(self, parent=None, include_session=False):
-        result = self.manager.save(include_session=include_session)
+        try:
+            result = self.manager.save(include_session=include_session)
+        except OutputSettingsError as error:
+            with self.operation():
+                safe_show_error("输出配置无效", str(error), parent=parent or self.root)
+            return SaveResult(SaveStatus.REJECTED)
         if result.status is SaveStatus.FAILED:
             # 错误提示运行嵌套事件循环；提示返回前不能销毁调用者所属界面。
             # 这里只保护提示生命周期，不合并保存，也不接受其他草稿。
             with self.operation():
                 safe_show_error(
                     "配置保存失败",
-                    "最新配置尚未写入磁盘，可再次提交重试。\n\n"
-                    f"{result.error}",
+                    result.failure_description
+                    + "\n\n已接受内容仍保留在内存。"
+                    "\n重试保存不会自动重新执行业务。",
                     parent=parent or self.root,
                 )
         return result
 
     def submit_editors(self, editors, parent=None):
+        editors = tuple(editors)
         self.accept_editors(editors)
+        if any(getattr(editor, "dirty", False) for editor in editors):
+            return SaveResult(SaveStatus.REJECTED)
         return self.finish(parent)
 
     def submit_values(self, config, values, parent=None):
@@ -243,7 +335,10 @@ class ConfigCommitController:
 
     def prepare_business(self, page, fields=None, parent=None):
         """先接受并固定必要参数，再检查保存；失败不返回执行参数。"""
-        self.accept_editors(self.select(page, fields))
+        editors = self.select(page, fields)
+        self.accept_editors(editors)
+        if any(getattr(editor, "dirty", False) for editor in editors):
+            return None
         config = self.manager.config_data[page]
         selected_fields = config.keys() if fields is None else fields
         parameters = {
@@ -273,8 +368,13 @@ class ConfigCommitController:
         if not completed:
             safe_show_error(
                 "内容未保存",
-                "内容仍保留在当前窗口，请重试或选择放弃。\n\n"
-                f"{result.error}",
+                "候选内容仍保留在当前窗口，共享内存字段已恢复"
+                "到本次接受前的值。\n"
+                "内存恢复不代表磁盘已经恢复。\n\n"
+                + result.failure_description
+                + "\n\n重试本窗口保存会发布候选内容；"
+                "\n放弃草稿后的后续保存会发布当前已接受配置。"
+                "\n关闭草稿窗口本身不执行磁盘回滚。",
                 parent=parent,
             )
         return completed

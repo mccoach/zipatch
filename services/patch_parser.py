@@ -11,7 +11,7 @@ from core.constants import (
     SUPPORTED_PATCH_OPS,
     PATCH_TEXT_BLOCK_STARTERS,
 )
-from core.text_io import split_lines_keep_text
+
 from services.patch_ops import (
     OP_ALLOWED_HEAD_PARAMS,
     OP_REQUIRED_TEXT_BLOCKS,
@@ -43,8 +43,8 @@ def validate_boundary(boundary: str):
     if not boundary.startswith(PATCH_BOUNDARY_PREFIX):
         raise ValueError(f"boundary 必须以 {PATCH_BOUNDARY_PREFIX} 开头")
 
-    if not re.search(r"\d{14}", boundary):
-        raise ValueError("boundary 必须包含 14 位创建时间码 YYYYMMDDHHMMSS")
+    # 创建时间码是生成规范，不是解析资格。
+    # 读取端保留前缀、长度及字符约束，不以缺少时间码拒绝合法标识。
 
 
 def validate_op_id(op_id: str, line_no: int):
@@ -143,8 +143,7 @@ def parse_op_line(line: str, line_no: int):
     return attrs
 
 
-def join_text_block(lines):
-    return "\n".join(lines)
+from core import text_locations
 
 
 def ensure_no_duplicate_block(op, key, line_no):
@@ -230,20 +229,18 @@ def parse_patch_v3(text: str):
     都通过 boundary 文本块读取。OP 头只保留受严格字符集、整数
     或枚举约束的结构参数。
     """
-    lines = split_lines_keep_text(text)
-
     state = "WAIT_START"
     boundary = None
     operations = []
     seen_op_ids = set()
     current_op = None
     current_block_key = None
-    current_block_lines = []
+    current_block_start = None
+    current_block_end = None
     seen_start = False
     seen_end = False
 
-    for idx, raw_line in enumerate(lines, 1):
-        line = raw_line
+    for idx, line, line_start, next_start in text_locations.iter_physical_lines(text):
 
         if state == "WAIT_START":
             if not line.strip():
@@ -314,7 +311,8 @@ def parse_patch_v3(text: str):
                 ensure_no_duplicate_block(current_op, block_key, idx)
 
                 current_block_key = block_key
-                current_block_lines = []
+                current_block_start = next_start
+                current_block_end = next_start
                 state = "IN_BLOCK"
                 continue
 
@@ -349,15 +347,18 @@ def parse_patch_v3(text: str):
                 if current_op is None or current_block_key is None:
                     raise ValueError(f"第 {idx} 行内部状态错误：文本块无所属 OP")
 
-                current_op[current_block_key] = join_text_block(
-                    current_block_lines
-                )
+                # 最后正文行的结束偏移不包含紧邻 boundary 的协议
+                # 分行符；此前内部换行和用户真实末尾换行全部保留。
+                current_op[current_block_key] = text[
+                    current_block_start:current_block_end
+                ]
                 current_block_key = None
-                current_block_lines = []
+                current_block_start = None
+                current_block_end = None
                 state = "STRUCT"
                 continue
 
-            current_block_lines.append(line)
+            current_block_end = line_start + len(line)
             continue
 
         if state == "END":

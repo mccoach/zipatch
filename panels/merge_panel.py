@@ -3,15 +3,38 @@
 import tkinter as tk
 
 from core.constants import THEME
-from core.message_utils import resolve_output_file_conflict, safe_show_info
+from ui.message_dialogs import safe_show_info
+from ui.widgets import resolve_output_file_conflict, open_path_with_default_app
 from core.path_validation import normalize_windows_display_path
-from core.paths import build_output_path, open_path_with_default_app, validate_required_path
+from core.paths import build_output_path, validate_required_path
 from core.exclusion_rules import PreparedExclusions
 from panels.base_panel import BasePanel
 from services.merge_service import merge_demand_files, merge_project_files
 from ui.dialogs import edit_exclude_settings, edit_extra_text_settings
+from ui.newline_settings import edit_newline_settings
+from ui.text_output_settings import edit_output_format_settings, show_output_help
 from ui.theme import styled_button, styled_frame
 from ui.widgets import browse_folder, create_entry_row, make_checkbutton, open_output_file
+
+
+def merge_completion_message(result, mode):
+    incomplete = result.read_failure_count or result.mtime_failures
+    title = "合并完成，存在缺失信息" if incomplete else "合并完成"
+    message = (
+        f"{mode}成果已发布。\n\n处理文件：{result.total_files} 个。\n"
+        f"主动忽略：{result.excluded_count} 个。\n"
+        f"被动失败：{result.read_failure_count} 个。\n"
+        f"修改时间未取得：{len(result.mtime_failures)} 个。\n\n"
+        f"已保存到：\n{result.output_file}"
+    )
+    if result.excluded_count or result.read_failure_count:
+        message += "\n\n占位项未提供真实源码；成果保留对应文件路径和占位标识，请查看运行日志。"
+    if result.read_failure_count:
+        message += "\n被动失败项未成功读取或解码；请排查后重新合并，本次没有自动重试。"
+    if result.mtime_failures:
+        message += "\n\n以下文件的修改时间未取得，追溯信息不完整：\n"
+        message += "\n".join(path for path, _ in result.mtime_failures)
+    return title, message
 
 
 class MergePanel(BasePanel):
@@ -21,8 +44,7 @@ class MergePanel(BasePanel):
         body = self.make_body()
         for field, label in (
             ("source_folder", "源文件夹"), ("output_folder", "输出文件夹"),
-            ("output_filename", "输出文件名"), ("code_header_line", "开始标记"),
-            ("code_footer_line", "结束标记"),
+            ("output_filename", "输出文件名"),
         ):
             variable = tk.StringVar(value=self.cfg[field])
             setattr(self, field, variable)
@@ -49,6 +71,8 @@ class MergePanel(BasePanel):
         for field, label in (
             ("open_after_done", "完成后立即打开成果文件"),
             ("force_overwrite", "成果文件已存在时强制覆盖"),
+            ("normalize_text_newlines", "标准化文本换行"),
+            ("record_file_mtime", "记录文件修改时间"),
         ):
             variable = tk.BooleanVar(value=self.cfg[field])
             setattr(self, field, variable)
@@ -64,6 +88,20 @@ class MergePanel(BasePanel):
         styled_button(row, "附加文本", self.open_extra_text_dialog, width=10).pack(
             side="left", padx=(0, 8),
         )
+        styled_button(
+            row, "标记与占位",
+            lambda: edit_output_format_settings(
+                self.root, self.commits, self.cfg, "merge",
+            ),
+            width=10,
+        ).pack(side="left", padx=(0, 8))
+        styled_button(
+            row, "换行设置",
+            lambda: edit_newline_settings(self.root, self.commits), width=10,
+        ).pack(side="left", padx=(0, 8))
+        styled_button(
+            row, "正文规则", lambda: show_output_help(self.root), width=10,
+        ).pack(side="left", padx=(0, 8))
         styled_button(row, "按名单合并", self.open_demand_merge_dialog, width=12).pack(
             side="right", padx=(8, 0),
         )
@@ -105,6 +143,8 @@ class MergePanel(BasePanel):
             "exclude_folders", "exclude_files",
             "preamble_text", "ending_text", "code_header_line",
             "code_footer_line", "open_after_done", "force_overwrite",
+            "normalize_text_newlines", "record_file_mtime", "ignore_text",
+            "failure_text",
         })
         if cfg is None:
             return
@@ -112,10 +152,18 @@ class MergePanel(BasePanel):
             exclusions = PreparedExclusions(
                 self.commits.prepare_rule(
                     self.cfg, "exclude_folders", "directory", cfg["exclude_folders"],
+                    semantics="exclusion",
                 ),
                 self.commits.prepare_rule(
                     self.cfg, "exclude_files", "file", cfg["exclude_files"],
+                    semantics="exclusion",
                 ),
+            )
+            output_rules = (
+                self.commits.prepare_rule(
+                    self.config_data["settings"], "crlf_file_list", "file",
+                )
+                if cfg["normalize_text_newlines"] else None
             )
             source = validate_required_path(cfg["source_folder"], "源文件夹")
             output, header, footer = self.resolve_common_output_and_markers(cfg, self.root)
@@ -129,18 +177,18 @@ class MergePanel(BasePanel):
                 exclusions=exclusions,
                 preamble_text=cfg["preamble_text"], ending_text=cfg["ending_text"],
                 code_header_line=header, code_footer_line=footer, log_func=self.log,
+                normalize_text_newlines=cfg["normalize_text_newlines"],
+                record_file_mtime=cfg["record_file_mtime"],
+                ignore_text=cfg["ignore_text"], failure_text=cfg["failure_text"],
+                output_rules=output_rules,
             )
         except (OSError, ValueError) as error:
             self.handle_error("按目录合并", error)
             return
 
-        self.set_status("按目录合并完成")
-        safe_show_info(
-            "成功",
-            f"按目录合并完成！\n\n总共处理了 {result.total_files} 个文件。\n\n"
-            f"已保存到：\n{result.output_file}",
-            self.root,
-        )
+        title, message = merge_completion_message(result, "按目录合并")
+        self.set_status(title)
+        safe_show_info(title, message, self.root)
         if cfg["open_after_done"]:
             open_path_with_default_app(result.output_file, self.root)
 
@@ -168,18 +216,18 @@ class MergePanel(BasePanel):
                 ending_text=values["demand_ending_text"],
                 code_header_line=header, code_footer_line=footer,
                 log_func=self.log,
+                normalize_text_newlines=cfg["normalize_text_newlines"],
+                record_file_mtime=cfg["record_file_mtime"],
+                ignore_text=cfg["ignore_text"], failure_text=cfg["failure_text"],
+                output_rules=cfg["output_rules"],
             )
         except (OSError, ValueError) as error:
             self.handle_error("按名单合并", error, parent)
             return False
 
-        self.set_status("按名单合并完成")
-        safe_show_info(
-            "成功",
-            f"按名单合并完成！\n\n总共合并了 {result.total_files} 个文件。\n\n"
-            f"已保存到：\n{result.output_file}",
-            parent,
-        )
+        title, message = merge_completion_message(result, "按名单合并")
+        self.set_status(title)
+        safe_show_info(title, message, parent)
         if cfg["open_after_done"]:
             open_path_with_default_app(result.output_file, self.root)
         return True

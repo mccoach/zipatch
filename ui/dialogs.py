@@ -4,16 +4,37 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from core.constants import THEME
-from core.message_utils import safe_show_error, safe_show_info
-from core.paths import center_window
-from core.text_io import get_text_value, read_text_with_fallback_encodings, replace_text_keep_undo
+from ui.message_dialogs import safe_show_error, safe_show_info
+from ui.window_manager import center_window
+from core.file_observation import observe_file
+from core.text_io import decode_import_text_bytes
+from ui.text_editor import get_text_value, replace_text_keep_undo
 from ui.favorites import FavoriteTextBoxController, title_bar_button
 from ui.text_editor import TextEditorController
+from ui.text_statistics import TextStatistics
+
 from ui.theme import styled_button, styled_frame, styled_text_with_scrollbars
 from ui.window_manager import (
     register_popup, unregister_popup, restore_editor_interaction,
     take_modal_control,
 )
+
+
+def read_import_text(path, *, preserve_newlines=False):
+    """界面导入组织共享获取和用途解码；不写控件、配置或文件。
+
+    一次观察取得完整bytes，普通与精确用途共用获取，
+    候选编码及通用换行政策仍由纯解码能力拥有。
+    """
+    if type(preserve_newlines) is not bool:
+        raise TypeError("保留导入换行开关必须是布尔值")
+    observed = observe_file(path, include_bytes=True)
+    if observed.kind != "file":
+        raise FileNotFoundError(f"导入来源文件不存在：{observed.path}")
+    return decode_import_text_bytes(
+        observed.source_bytes, path=observed.path,
+        preserve_newlines=preserve_newlines,
+    )
 
 
 def create_managed_text_box(
@@ -22,14 +43,18 @@ def create_managed_text_box(
     enable_favorites=True, enable_clear=True, enable_wrap_toggle=True,
     enable_import_text=False, wrap_config_key=None,
     config=None, field=None, page=None, on_content_changed=None,
-    preserve_trailing_newlines=False,
+    preserve_trailing_newlines=False, preserve_import_newlines=False,
+    show_statistics=False,
 ):
     title_row = styled_frame(parent)
     title_row.pack(fill="x", pady=(8, 2))
-    tk.Label(
-        title_row, text=label_text, anchor="w", bg=THEME["bg"],
-        fg=THEME["fg_label"], font=THEME["font_main"],
-    ).pack(side="left", fill="x", expand=True)
+    title_label = tk.Label(
+        title_row, text=label_text, anchor="w", justify="left",
+        bg=THEME["bg"], fg=THEME["fg_label"], font=THEME["font_main"],
+    )
+    # 标题不与统计平分剩余空间；操作按钮先占位，
+    # 统计最后取得全部剩余宽度，文字变化不改变标题栏高度。
+    title_label.pack(side="left")
 
     wraps = commits.manager.config_data["text_wrap"]
     wrap_value = wraps[wrap_config_key] if wrap_config_key else wrap != "none"
@@ -92,7 +117,12 @@ def create_managed_text_box(
                     if not path:
                         return
                     try:
-                        content, encoding = read_text_with_fallback_encodings(path)
+                        if preserve_import_newlines:
+                            content, encoding = read_import_text(
+                                path, preserve_newlines=True,
+                            )
+                        else:
+                            content, encoding = read_import_text(path)
                     except (OSError, ValueError) as error:
                         safe_show_error("导入失败", str(error), text.winfo_toplevel())
                         return
@@ -112,7 +142,10 @@ def create_managed_text_box(
 
     if enable_clear:
         def clear():
-            if readonly and on_content_changed is not None and commits.operation_depth:
+            # 已锁定输入不得产生空配置接受；只读清空仍保留原有用途。
+            if commits.operation_depth:
+                return
+            if not readonly and str(text.cget("state")) != "normal":
                 return
             if readonly:
                 text.configure(state="normal")
@@ -140,6 +173,8 @@ def create_managed_text_box(
             activebackground=THEME["bg"], selectcolor=THEME["bg_input"],
             font=THEME["font_main"], relief="flat", bd=0, padx=4, pady=0,
         ).pack(side="right", padx=(0, 6))
+    if show_statistics and not readonly:
+        TextStatistics(text, title_row)
     return text
 
 

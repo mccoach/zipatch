@@ -89,7 +89,17 @@ class EntryHistoryPlugin:
         self.entry.icursor("end")
 
     def delete_history(self, value):
-        self.binding.commit()
+        editors = (
+            self.commits.select(
+                self.binding.page, {"code_header_line", "code_footer_line"},
+            )
+            if self.binding.page in ("merge", "restore")
+            and self.binding.field in ("code_header_line", "code_footer_line")
+            else [self.binding]
+        )
+        self.commits.accept_editors(editors)
+        if any(editor.dirty for editor in editors):
+            return
         histories = self.commits.manager.config_data["entry_history"]
         final = [item for item in histories.get(self.history_key, []) if item != value]
         self.commits.manager.accept(histories, {self.history_key: final})

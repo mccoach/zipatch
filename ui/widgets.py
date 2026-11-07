@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 
 import os
+import subprocess
+import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
 
 from core.constants import THEME
-from core.paths import build_output_path, get_initial_dir_from_path, open_path_with_default_app
-from core.message_utils import safe_show_error
+from core.paths import (
+    build_output_path, get_available_renamed_path, get_initial_dir_from_path,
+)
+from ui.message_dialogs import safe_show_error
+from ui.window_manager import center_window, register_popup, unregister_popup
 from ui.entry_history import EntryHistoryPlugin
 from ui.theme import styled_button, styled_entry, styled_frame
 
@@ -136,9 +141,16 @@ def open_output_file(output_folder_var, output_filename_var, parent):
     if not folder or not name:
         safe_show_error("打开失败", "输出文件夹或输出文件名为空。", parent)
         return
-    path = build_output_path(folder, name)
-    if not os.path.isfile(path):
-        safe_show_error("打开失败", f"成果文件不存在：\n{path}", parent)
+    from core.recovery_paths import checked_chain
+    try:
+        path, chain = checked_chain(
+            build_output_path(folder, name), include_observation=True,
+        )
+        if chain[-1][1] != "file":
+            safe_show_error("打开失败", f"成果普通文件不存在：\n{path}", parent)
+            return
+    except (OSError, ValueError) as error:
+        safe_show_error("打开失败", str(error), parent)
         return
     open_path_with_default_app(path, parent)
 
@@ -195,3 +207,84 @@ def make_radiobutton(
         font=THEME["font_title"] if danger else THEME["font_main"],
     )
     return add_tooltip(widget, tooltip_text)
+
+def open_path_with_default_app(path, parent=None):
+    """外部打开前检查原路径和普通对象，不resolve后追踪链接目标。
+
+    只交付本次检查过的路径，不承诺控制外部程序内部访问。
+    .lnk和.url自身仍按普通文件交给系统，不新增用途限制。
+    """
+    if not path:
+        safe_show_error("打开失败", "路径为空。", parent)
+        return
+    from core.recovery_paths import checked_chain
+    try:
+        absolute, chain = checked_chain(path, include_observation=True)
+        if chain[-1][1] == "absent":
+            safe_show_error("打开失败", f"路径不存在：\n{absolute}", parent)
+            return
+        if sys.platform == "win32":
+            os.startfile(str(absolute))
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(absolute)], check=True)
+        else:
+            subprocess.run(["xdg-open", str(absolute)], check=True)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        safe_show_error(
+            "打开失败", f"无法自动打开：\n{path}\n\n错误：{error}", parent,
+        )
+
+
+def resolve_output_file_conflict(output_file, force_overwrite, parent=None):
+    """原链及普通成果政策先于强制覆盖或成果冲突交互。"""
+    from core.recovery_paths import checked_chain
+    target, chain = checked_chain(output_file, include_observation=True)
+    kind = chain[-1][1]
+    if kind not in ("absent", "file"):
+        raise IsADirectoryError(f"成果目标不是普通文件：{target}")
+    output_file = str(target)
+    if force_overwrite or kind == "absent":
+        return output_file
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("成果文件已存在")
+    dialog.configure(bg=THEME["bg"])
+    center_window(dialog, 580, 200)
+    dialog.transient(parent)
+    dialog.grab_set()
+    dialog.resizable(False, False)
+    result = {"action": "cancel"}
+
+    tk.Label(
+        dialog, text="成果文件已存在，请选择处理方式：",
+        bg=THEME["bg"], fg=THEME["fg"], font=THEME["font_title"],
+    ).pack(fill="x", padx=20, pady=(20, 6))
+    tk.Label(
+        dialog, text=output_file, bg=THEME["bg"], fg=THEME["fg_dim"],
+        font=THEME["font_main"], anchor="w", justify="left", wraplength=540,
+    ).pack(fill="x", padx=20, pady=(0, 16))
+    button_row = styled_frame(dialog)
+    button_row.pack(fill="x", padx=20, pady=(0, 20))
+
+    def choose(action):
+        result["action"] = action
+        dialog.destroy()
+
+    styled_button(
+        button_row, "取消", lambda: choose("cancel"), width=10,
+    ).pack(side="right", padx=(6, 0))
+    styled_button(
+        button_row, "自动改名", lambda: choose("rename"), width=10,
+    ).pack(side="right", padx=6)
+    styled_button(
+        button_row, "覆盖", lambda: choose("overwrite"), width=10, accent=True,
+    ).pack(side="right", padx=6)
+    register_popup(dialog, lambda: choose("cancel"), exit_blocker=True)
+    parent.wait_window(dialog)
+    unregister_popup(dialog)
+
+    if result["action"] == "overwrite":
+        return output_file
+    if result["action"] == "rename":
+        return get_available_renamed_path(output_file)
+    return None

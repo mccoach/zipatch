@@ -1,7 +1,17 @@
 # -*- coding: utf-8 -*-
 
 import json
-import os
+import sys
+
+from core.content_publication import (
+    ContentPublicationError, ContentPublicationResult,
+    dispose_content_artifact, prepare_content_artifact, publish_content,
+)
+from core.file_observation import FileObservation, observe_file
+from core.filesystem_changes import (
+    FilesystemChangeError, execute_filesystem_change,
+    prepare_directory_creation,
+)
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -12,6 +22,7 @@ from time import perf_counter
 
 from core.constants import DEFAULT_CONFIG
 from core.favorite_order import order_favorites
+from core.merged_format import OutputSettingsError, validate_output_settings
 from core.paths import get_config_path
 
 
@@ -90,6 +101,8 @@ def normalize_config(config):
         histories[key] = unique[:maximum]
     config["entry_history"] = histories
 
+    # 加载前已经完整校验收藏结构；这里只规范化合法条目，
+    # 不过滤错误数据，也不把损坏类别替换为空列表。
     for key, values in config["favorites"].items():
         config["favorites"][key] = order_favorites([
             {
@@ -98,23 +111,69 @@ def normalize_config(config):
                 **({"pinned": True} if value.get("pinned", False) else {}),
             }
             for value in values
-            if isinstance(value, dict)
-            and isinstance(value.get("name"), str)
-            and isinstance(value.get("content"), str)
         ])
 
     if config["patch"]["patch_mode"] not in ("apply", "restore"):
         config["patch"]["patch_mode"] = "apply"
-    if config["restore"]["existing_file_policy"] not in ("overwrite", "rename", "skip"):
-        config["restore"]["existing_file_policy"] = "overwrite"
+    validate_restore_settings(config["restore"])
 
     return config
+
+
+def validate_restore_settings(settings):
+    """正式拆分配置不接受已废弃政策或未知目标模式。"""
+    if not isinstance(settings, dict):
+        raise OutputSettingsError("配置 restore 必须是对象；原文件未修改。")
+    for field in ("source_text", "last_result_text"):
+        if field in settings and type(settings[field]) is not str:
+            raise OutputSettingsError(
+                f"restore.{field} 必须是字符串；原文件未修改。"
+            )
+    if (
+        "backup_enabled" in settings
+        and type(settings["backup_enabled"]) is not bool
+    ):
+        raise OutputSettingsError(
+            "restore.backup_enabled 必须是布尔值；原文件未修改。"
+        )
+    if "backup_dir" in settings and type(settings["backup_dir"]) is not str:
+        raise OutputSettingsError(
+            "restore.backup_dir 必须是字符串；原文件未修改。"
+        )
+
+    execution_mode = settings.get(
+        "execution_mode", DEFAULT_CONFIG["restore"]["execution_mode"],
+    )
+    if type(execution_mode) is not str or execution_mode not in ("split", "restore"):
+        raise OutputSettingsError(
+            "restore.execution_mode 必须是 split 或 restore；原文件未修改。"
+        )
+
+    mode = settings.get("target_mode", DEFAULT_CONFIG["restore"]["target_mode"])
+    policy = settings.get(
+        "existing_file_policy",
+        DEFAULT_CONFIG["restore"]["existing_file_policy"],
+    )
+    if type(mode) is not str or mode not in ("directory", "in_place"):
+        raise OutputSettingsError(
+            "restore.target_mode 必须是 directory 或 in_place；原文件未修改。"
+        )
+    if type(policy) is not str or policy not in ("overwrite", "skip"):
+        raise OutputSettingsError(
+            "restore.existing_file_policy 必须是 overwrite 或 skip；"
+            "原文件未修改。"
+        )
 
 
 def validate_rule_config_source(source):
     """名单结构先于默认合并检查；非法规则正文仍保留。"""
     if not isinstance(source, dict):
         raise ValueError("配置顶层必须是 JSON 对象；原文件未修改。")
+    for section_name in ("merge", "restore"):
+        if section_name in source:
+            validate_output_settings(section_name, source[section_name])
+    if "restore" in source:
+        validate_restore_settings(source["restore"])
     for section_name, fields in (
         ("scan", ("exclude_folders", "exclude_files")),
         ("merge", ("exclude_folders", "exclude_files")),
@@ -132,76 +191,140 @@ def validate_rule_config_source(source):
                     "不能将错误内容当成空名单或默认名单加载。"
                 )
 
+    if "patch" in source:
+        patch_settings = source["patch"]
+        if not isinstance(patch_settings, dict):
+            raise ValueError("配置 patch 必须是对象；原文件未修改。")
+        if (
+            "normalize_text_newlines" in patch_settings
+            and type(patch_settings["normalize_text_newlines"]) is not bool
+        ):
+            raise ValueError(
+                "配置 patch.normalize_text_newlines 必须是布尔值；"
+                "原文件未修改。"
+            )
+
     if "text_wrap" in source:
         wraps = source["text_wrap"]
         if not isinstance(wraps, dict):
             raise ValueError("配置 text_wrap 必须是对象；原文件未修改。")
-        if (
-            "settings.crlf_file_list" in wraps
-            and not isinstance(wraps["settings.crlf_file_list"], bool)
+        for field in (
+            "settings.crlf_file_list", "merge.ignore_text", "restore.ignore_text",
+            "merge.failure_text", "restore.failure_text",
+            "merge.code_header_line", "merge.code_footer_line",
+            "restore.code_header_line", "restore.code_footer_line",
         ):
+            if field in wraps and type(wraps[field]) is not bool:
+                raise ValueError(
+                    f"配置 text_wrap.{field} 必须是布尔值；原文件未修改。"
+                )
+
+    for section_name in ("patch", "restore"):
+        if section_name not in source:
+            continue
+        section = source[section_name]
+        if not isinstance(section, dict):
             raise ValueError(
-                "配置 text_wrap.settings.crlf_file_list 必须是布尔值；原文件未修改。"
+                f"配置 {section_name} 必须是对象；原文件未修改。"
             )
+        for field, expected_type in (
+            ("restore_source_dir", str),
+            ("keep_restore_source_path", bool),
+            ("restore_backup_enabled", bool),
+            ("open_backup_after_done", bool),
+        ):
+            if field in section and type(section[field]) is not expected_type:
+                raise ValueError(
+                    f"配置 {section_name}.{field} 类型无效；原文件未修改。"
+                )
 
     if "favorites" not in source:
         return
     favorites = source["favorites"]
     if not isinstance(favorites, dict):
         raise ValueError("配置 favorites 必须是对象；原文件未修改。")
-    # pinned 是所有收藏条目的可选布尔字段；错误类型不能静默丢失。
+
+    # 必须先于默认合并检查，防止未知类别或字段被重建过程静默丢弃。
+    # 类别权威来自当前正式配置；名称按收藏消费者的精确字符串定位。
+    supported_categories = DEFAULT_CONFIG["favorites"]
+    allowed_fields = {"name", "content", "pinned"}
     for key, entries in favorites.items():
+        if key not in supported_categories:
+            raise ValueError(
+                f"收藏 favorites.{key} 是未知类别；原文件未修改。"
+            )
         if not isinstance(entries, list):
-            continue
+            raise ValueError(
+                f"收藏 favorites.{key} 必须是数组；原文件未修改。"
+            )
+        first_names = {}
         for number, entry in enumerate(entries, 1):
-            if (
-                isinstance(entry, dict)
-                and "pinned" in entry
-                and type(entry["pinned"]) is not bool
-            ):
+            location = f"收藏 favorites.{key} 第 {number} 项"
+            if not isinstance(entry, dict):
                 raise ValueError(
-                    f"收藏 favorites.{key} 第 {number} 项 pinned 必须是布尔值；"
-                    "原文件未修改。"
+                    f"{location} 必须是对象；原文件未修改。"
                 )
-    for key in (
-        "scan_exclude_folders", "scan_exclude_files",
-        "merge_exclude_folders", "merge_exclude_files", "crlf_file_list",
-    ):
-        if key not in favorites:
-            continue
-        entries = favorites[key]
-        if not isinstance(entries, list):
-            raise ValueError(f"名单收藏 favorites.{key} 必须是数组；原文件未修改。")
-        for number, entry in enumerate(entries, 1):
-            if (
-                not isinstance(entry, dict)
-                or not isinstance(entry.get("name"), str)
-                or not isinstance(entry.get("content"), str)
-            ):
+            unknown_fields = set(entry) - allowed_fields
+            if unknown_fields:
+                fields = "、".join(sorted(unknown_fields))
                 raise ValueError(
-                    f"名单收藏 favorites.{key} 第 {number} 项结构错误："
-                    "name 和 content 必须是字符串；原文件未修改。"
+                    f"{location} 包含未知字段：{fields}；原文件未修改。"
                 )
+            for field in ("name", "content"):
+                if field not in entry:
+                    raise ValueError(
+                        f"{location} 缺少必要字段 {field}；原文件未修改。"
+                    )
+                if not isinstance(entry[field], str):
+                    raise ValueError(
+                        f"{location} 字段 {field} 必须是字符串；"
+                        "原文件未修改。"
+                    )
+            if "pinned" in entry and type(entry["pinned"]) is not bool:
+                raise ValueError(
+                    f"{location} pinned 必须是布尔值；原文件未修改。"
+                )
+            name = entry["name"]
+            if name in first_names:
+                raise ValueError(
+                    f"{location} 字段 name 与第 {first_names[name]} 项"
+                    f"精确重名：{name!r}；原文件未修改。"
+                )
+            first_names[name] = number
 
 
-def load_user_config(path=None):
+def load_user_config(path=None, *, notices=None):
     """只有文件不存在才创建默认配置；损坏或读取故障不重建、不覆盖。"""
     path = Path(path) if path is not None else get_config_path()
 
-    try:
-        with path.open("r", encoding="utf-8") as stream:
-            source = json.load(stream)
-    except FileNotFoundError:
+    observed = observe_file(path, include_bytes=True)
+    if observed.kind == "absent":
         return normalize_config(deep_merge_config(DEFAULT_CONFIG, {})), True
+
+    try:
+        source = json.loads(observed.source_bytes.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise ValueError(
             f"配置内容无法解析：{path}\n{error}\n"
             "原配置文件未修改，请修正配置后重新启动。"
         ) from error
 
+    # 仅在加载边界转换明确的旧保存值；其他未知值仍按正式契约拒绝。
+    restore_source = source.get("restore") if isinstance(source, dict) else None
+    converted = (
+        isinstance(restore_source, dict)
+        and restore_source.get("existing_file_policy") == "rename"
+    )
+    if converted:
+        restore_source["existing_file_policy"] = "skip"
     validate_rule_config_source(source)
     config = normalize_config(deep_merge_config(DEFAULT_CONFIG, source))
-    return config, config != source
+    if converted and notices is not None:
+        notices.append(
+            "代码拆分已取消自动改名；原“自动改名”设置"
+            "已调整为“跳过已有文件”，请核对。"
+        )
+    return config, converted or config != source
 
 
 class SaveStatus(Enum):
@@ -210,12 +333,80 @@ class SaveStatus(Enum):
     FAILED = "failed"
     QUEUED = "queued"
     DEFERRED = "deferred"
+    REJECTED = "rejected"
 
 
 @dataclass(frozen=True)
 class SaveResult:
     status: SaveStatus
-    error: OSError | None = None
+    error: OSError | ValueError | None = None
+    publication: ContentPublicationResult | None = None
+    directory_results: tuple = ()
+    phase: str = ""
+
+    @property
+    def failure_description(self):
+        """消费本次目标及目录结果，不把零改变等同于磁盘已确认。"""
+        if self.status is not SaveStatus.FAILED:
+            raise ValueError("只有失败保存结果可以提供失败说明")
+
+        publication = self.publication
+        if publication is None:
+            fact = (
+                "配置目标的正式替换尚未发起，也未开始原对象正文写回。\n"
+                "本次配置内容未由保存流程发布。"
+            )
+        else:
+            fact = (
+                f"配置目标：{publication.target}\n"
+                f"发布机制：{publication.mechanism}\n"
+                f"失败阶段：{publication.phase}\n"
+                "目标改变调用已发起："
+                f"{'是' if publication.mutation_attempted else '否'}\n"
+                f"名称替换状态：{publication.replacement}\n"
+                "完整配置正文已确认："
+                f"{'是' if publication.content_completed else '否'}\n"
+                "本次必要确认已完成："
+                f"{'是' if publication.confirmation_completed else '否'}\n"
+                f"应急成果状态：{publication.emergency_state}"
+            )
+            if publication.emergency_path is not None:
+                fact += f"\n应急成果位置：{publication.emergency_path}"
+            if not publication.mutation_attempted:
+                fact += (
+                    "\n本次没有发起配置目标改变；"
+                    "这不能证明当前磁盘仍等于旧成功快照。"
+                )
+            fact += (
+                "\n本次不算保存成功；旧快照不再提供免写资格。\n"
+                "下一次保存必须实际发布当前已接受内存配置，"
+                "即使草稿已放弃或内存值已改回旧值。"
+            )
+            if publication.mechanism == "in_place":
+                fact += (
+                    "\n没有名称替换不代表没有原地改变；"
+                    "关联硬链接名称共享同一对象正文。\n"
+                    "发布失败后的完整应急不自动删除。"
+                )
+
+        if self.phase:
+            fact += f"\n配置保存流程阶段：{self.phase}"
+        if self.directory_results:
+            fact += "\n必要目录步骤："
+            for result in self.directory_results:
+                fact += (
+                    f"\n- {result.target}；改变调用已发起="
+                    f"{'是' if result.attempted else '否'}；"
+                    f"正常完成={'是' if result.succeeded else '否'}"
+                )
+            fact += "\n目录调用失败不能证明该目录没有创建副作用。"
+
+        return (
+            fact
+            + "\n当前已接受内存配置仍可再次保存；"
+            "没有自动重试、磁盘回滚或重新执行业务。"
+            + f"\n\n{self.error}"
+        )
 
     @property
     def persisted(self):
@@ -229,13 +420,13 @@ class SaveResult:
 
 
 class ConfigSaveManager:
+
     """唯一配置持久化入口。batch 合并请求，不承担配置回滚。"""
 
     def __init__(self, config_data, path=None, needs_write=False):
         self.config_data = config_data
         self.path = Path(path) if path is not None else get_config_path()
         self.last_save_error = None
-        self.last_cleanup_error = None
         self.required_write = needs_write
         self._pending = False
         self._session_pending = False
@@ -253,9 +444,7 @@ class ConfigSaveManager:
             "successful_replaces": 0,
             "json_seconds": 0.0,
             "compare_seconds": 0.0,
-            "write_seconds": 0.0,
-            "fsync_seconds": 0.0,
-            "replace_seconds": 0.0,
+            "publication_seconds": 0.0,
         }
         self._saved_snapshot = None if needs_write else self._serialize()
         self.last_result = SaveResult(SaveStatus.UNCHANGED)
@@ -268,6 +457,19 @@ class ConfigSaveManager:
         """接受准备完毕的字段；不接受尚未明确恢复的异常批次。"""
         if self._batch_aborted:
             raise RuntimeError("异常批次尚未恢复，禁止继续接受配置或保存。")
+
+        if target is self.config_data.get("restore"):
+            validate_restore_settings({**target, **values})
+
+        output_fields = {
+            "code_header_line", "code_footer_line", "ignore_text", "failure_text",
+            "normalize_text_newlines", "record_file_mtime",
+        }
+        if output_fields.intersection(values):
+            for section_name in ("merge", "restore"):
+                if target is self.config_data.get(section_name):
+                    validate_output_settings(section_name, {**target, **values})
+                    break
 
         changes = {
             key: value for key, value in values.items()
@@ -332,47 +534,101 @@ class ConfigSaveManager:
         return snapshot
 
     def _write_snapshot(self, snapshot):
-        temporary = self.path.with_name(self.path.name + ".tmp")
+        """固定目标、必要目录和完整bytes直接消费唯一正式发布。"""
+        content = snapshot.encode("utf-8")
         self.metrics["write_attempts"] += 1
-        self.last_cleanup_error = None
+        start = perf_counter()
+        artifact = None
+        publication = None
+        directory_results = []
+        phase = "配置目标固定观察"
 
         try:
-            start = perf_counter()
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-                stream.write(snapshot)
-                stream.flush()
-                self.metrics["write_seconds"] += perf_counter() - start
-                start = perf_counter()
-                os.fsync(stream.fileno())
-                self.metrics["fsync_seconds"] += perf_counter() - start
+            expected = observe_file(self.path, include_digest=True)
+            phase = "固定必要配置目录创建"
+            for index, (directory, kind) in enumerate(expected.chain[:-1]):
+                if kind != "absent":
+                    continue
+                absent = FileObservation(
+                    directory, expected.chain[:index + 1], "absent",
+                    None, None, None, None, None, None,
+                )
+                try:
+                    result = execute_filesystem_change(
+                        prepare_directory_creation(absent),
+                    )
+                except FilesystemChangeError as error:
+                    directory_results.append(error.result)
+                    raise
+                directory_results.append(result)
 
-            start = perf_counter()
-            os.replace(temporary, self.path)
-            self.metrics["replace_seconds"] += perf_counter() - start
-        except OSError as error:
+            phase = "完整配置成果准备"
+            artifact = prepare_content_artifact(expected, content)
+            phase = "配置成果正式发布"
             try:
-                temporary.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                self.last_cleanup_error = cleanup_error
-            self.last_save_error = error
-            # 已经尝试持久化的状态失败后属于待重试内容，
-            # 包括原本仅延后的会话字段；普通提交无需重新编辑即可重试。
-            self._pending = True
-            return SaveResult(SaveStatus.FAILED, error)
+                publication = publish_content(artifact)
+            except ContentPublicationError as error:
+                publication = error.result
+                raise
 
-        self.metrics["successful_replaces"] += 1
+        except (OSError, ValueError) as error:
+            self.last_save_error = error
+            self._pending = True
+            if publication is not None:
+                # 零本次改变也可能来自固定目标漂移拒绝。
+                # 不增加失败现场读取去重新认证旧快照，
+                # 后续明确保存直接重新发布当前已接受配置。
+                self.required_write = True
+            return SaveResult(
+                SaveStatus.FAILED, error, publication,
+                tuple(directory_results), phase,
+            )
+        finally:
+            if artifact is not None:
+                # 程序缺陷可能在改变目标后自然传播，缺少正式结果
+                # 不能恢复免写资格。成功结果在下面统一收口。
+                if artifact._lifecycle in ("attempted", "completed"):
+                    self.required_write = True
+                    self._pending = True
+                if artifact._lifecycle not in ("completed", "disposed"):
+                    if not (
+                        artifact.mechanism == "in_place"
+                        and artifact._lifecycle == "attempted"
+                    ):
+                        try:
+                            dispose_content_artifact(artifact)
+                        except (OSError, ValueError) as cleanup_error:
+                            print(
+                                f"[配置自有暂存清理失败] {artifact.path}："
+                                f"{cleanup_error}",
+                                file=sys.stderr,
+                            )
+            self.metrics["publication_seconds"] += perf_counter() - start
+
+        # 名称替换指标不把硬链接原对象写回冒充os.replace。
+        if publication.mechanism == "atomic_replace":
+            self.metrics["successful_replaces"] += 1
         self._saved_snapshot = snapshot
         self.required_write = False
         self._pending = False
         self._session_pending = False
         self.last_save_error = None
-        return SaveResult(SaveStatus.SAVED)
+        return SaveResult(
+            SaveStatus.SAVED, publication=publication,
+            directory_results=tuple(directory_results), phase="completed",
+        )
 
     def save(self, include_session=False):
+
         self.metrics["save_requests"] += 1
         if self._batch_aborted:
             raise RuntimeError("异常批次尚未恢复，禁止保存半完成配置。")
+
+        for section_name in ("merge", "restore"):
+            if section_name in self.config_data:
+                validate_output_settings(section_name, self.config_data[section_name])
+        if "restore" in self.config_data:
+            validate_restore_settings(self.config_data["restore"])
 
         if self._batch_depth:
             self._save_requested = True

@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
 
-import os
+"""程序位置、资源查找及路径候选；原对象检查使用共享路径政策。"""
+
 import sys
-import subprocess
 from pathlib import Path
 
-
 from core.constants import CONFIG_FILENAME
+from core.recovery_paths import checked_chain
 
 
 def get_app_dir():
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-
     return Path(__file__).resolve().parents[1]
 
 
@@ -21,128 +20,84 @@ def get_config_path():
 
 
 def is_frozen_app():
-    """
-    判断当前是否为 PyInstaller 封装后的程序。
-
-    用途：
-    - 开发模式：允许维护类功能，例如从 Markdown 更新内置协议文档；
-    - 封装 exe：隐藏维护入口，避免用户误以为可以修改 exe 内部资源。
-    """
+    """封装环境隐藏维护入口，不允许更新exe内置协议模块。"""
     return bool(getattr(sys, "frozen", False))
 
 
 def get_asset_path(relative_path):
+    """外置资源优先，其次打包资源；只在候选不存在时继续查找。
+
+    交给Tk或Pillow之前检查原路径和普通文件类型。
+    不支持对象、权限或路径故障直接暴露，不回退到另一份资源掩盖。
+    全部不存在时返回外置候选，供调用方表达资源缺失。
     """
-    获取应用静态资源路径。
+    relative = Path(relative_path)
+    if relative.is_absolute() or relative.drive or ".." in relative.parts:
+        raise ValueError("静态资源必须使用程序内的明确相对路径")
 
-    兼容三种运行场景：
-    1. 开发模式：从项目根目录读取；
-    2. PyInstaller onefile/onedir：从 sys._MEIPASS 读取打包内置资源；
-    3. 后台外置覆盖：exe 同级目录存在同名资源时，优先使用外置资源。
+    external = get_app_dir() / relative
+    candidates = [external]
+    if is_frozen_app() and hasattr(sys, "_MEIPASS"):
+        bundled = Path(sys._MEIPASS) / relative
+        if bundled != external:
+            candidates.append(bundled)
 
-    查找顺序：
-    - 先查应用目录 / exe 同级目录，允许后台直接替换资源；
-    - 再查 PyInstaller 解包临时目录 sys._MEIPASS；
-    - 都不存在时返回应用目录路径，用于生成清晰报错。
-    """
-    external_path = get_app_dir() / relative_path
-
-    if external_path.exists():
-        return external_path
-
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        bundled_path = Path(sys._MEIPASS) / relative_path
-
-        if bundled_path.exists():
-            return bundled_path
-
-    return external_path
-
-
-def center_window(win, width=980, height=760):
-    """调用方传入存活窗口；几何设置失败自然暴露，不伪装完成。"""
-    win.update_idletasks()
-    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-    x = int((sw - width) / 2)
-    y = int((sh - height) / 3)
-    win.geometry(f"{width}x{height}+{x}+{y}")
-
-
-def raise_and_focus(win):
-    try:
-        win.deiconify()
-        win.lift()
-        win.attributes("-topmost", True)
-        win.focus_force()
-        win.after(200, lambda: win.attributes("-topmost", False))
-    except Exception:
-        pass
-
-
-def open_path_with_default_app(path, parent=None):
-    from core.message_utils import safe_show_error
-
-    if not path:
-        safe_show_error("打开失败", "路径为空。", parent)
-        return
-    try:
-        absolute = Path(path).resolve()
-        if not absolute.exists():
-            safe_show_error("打开失败", f"路径不存在：\n{absolute}", parent)
-            return
-        if sys.platform == "win32":
-            os.startfile(str(absolute))
-        elif sys.platform == "darwin":
-            subprocess.run(["open", str(absolute)], check=True)
-        else:
-            subprocess.run(["xdg-open", str(absolute)], check=True)
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
-        safe_show_error("打开失败", f"无法自动打开：\n{path}\n\n错误：{error}", parent)
+    external_target = None
+    for candidate in candidates:
+        target, chain = checked_chain(candidate, include_observation=True)
+        if external_target is None:
+            external_target = target
+        kind = chain[-1][1]
+        if kind == "file":
+            return target
+        if kind != "absent":
+            raise IsADirectoryError(f"静态资源不是普通文件：{target}")
+    return external_target
 
 
 def get_initial_dir_from_path(path):
-    path = (path or "").strip()
-
-    if not path:
+    """选择器初始位置保留既有展开政策，检查前不resolve隐藏链接。"""
+    selected = (path or "").strip()
+    if not selected:
         return None
-
-    abs_path = Path(path).expanduser().resolve()
-
-    if abs_path.is_dir():
-        return str(abs_path)
-
-    parent = abs_path.parent
-    if parent.exists() and parent.is_dir():
-        return str(parent)
-
+    target, chain = checked_chain(
+        Path(selected).expanduser(), include_observation=True,
+    )
+    if chain[-1][1] == "directory":
+        return str(target)
+    parent = target.parent
+    checked_parent, parent_chain = checked_chain(
+        parent, include_observation=True,
+    )
+    if parent_chain[-1][1] == "directory":
+        return str(checked_parent)
     return None
 
 
-def ensure_parent_dir(file_path):
-    path = Path(file_path)
-    if path.parent:
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-
 def build_output_path(output_folder, output_filename):
-    return str((Path(output_folder) / output_filename).resolve())
+    """交互和正式输出共用原链检查，不先resolve隐藏链接入口。"""
+    return str(checked_chain(Path(output_folder) / output_filename))
 
 
 def get_available_renamed_path(file_path):
-    path = Path(file_path)
+    """成果自动改名保留；每个实际候选均检查原链及普通文件政策。"""
+    target, chain = checked_chain(file_path, include_observation=True)
+    if chain[-1][1] == "absent":
+        return str(target)
+    if chain[-1][1] != "file":
+        raise IsADirectoryError(f"成果目标不是普通文件：{target}")
 
-    if not path.exists():
-        return str(path)
-
-    folder = path.parent
-    stem = path.stem
-    suffix = path.suffix
     index = 1
-
     while True:
-        candidate = folder / f"{stem}_{index}{suffix}"
-        if not candidate.exists():
-            return str(candidate)
+        candidate = target.parent / f"{target.stem}_{index}{target.suffix}"
+        checked, candidate_chain = checked_chain(
+            candidate, include_observation=True,
+        )
+        kind = candidate_chain[-1][1]
+        if kind == "absent":
+            return str(checked)
+        if kind != "file":
+            raise IsADirectoryError(f"成果改名候选不是普通文件：{checked}")
         index += 1
 
 

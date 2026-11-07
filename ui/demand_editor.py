@@ -12,9 +12,9 @@ from time import monotonic
 from tkinter import messagebox
 
 from core.constants import THEME
-from core.message_utils import safe_show_error, safe_show_info
-from core.paths import center_window
-from core.text_io import replace_text_keep_undo
+from ui.message_dialogs import safe_show_error, safe_show_info
+from ui.window_manager import center_window
+from ui.text_editor import replace_text_keep_undo
 from services.demand_rules import (
     DemandCheckCancelled,
     DemandMatch,
@@ -28,7 +28,7 @@ from ui.dialogs import TextDraftSession, create_managed_text_box
 from ui.theme import styled_button, styled_frame, styled_text_with_scrollbars
 from ui.window_manager import register_popup, unregister_popup, take_modal_control
 from ui.list_text_editing import ListTextEditing
-from core.rule_lists import clean_rule_quotes
+from core.rule_lists import clean_rule_quotes, is_exclusion_layout_line
 
 
 DEBOUNCE_SECONDS = 0.2
@@ -63,9 +63,15 @@ docs\*.md
 二、引号、空行和空格
 ────────────────────────────────────────
 • 半角双引号 " 在输入、粘贴和回填时实时删除，包括路径内部的双引号。
-• 删除双引号后完全为空的行不选择任何文件。
-• 不自动删除首尾空格，空格会参与文件名匹配。
-• 只有空格的行不是有效规则。
+• 删除双引号后完全为空、或仅含半角空格的行属于排版。
+• 排版行原样保留位置、数量和半角空格数量；不选择文件、不高亮、不提醒。
+• 开头、中间、末尾及连续排版行都保留，保存和收藏不压缩。
+• 实际规则不自动删除首尾空格；空格参与文件名匹配，不增加专门警告。
+• 全角空格、NBSP 等 Unicode 空白不是排版，保留并按实际名称检查。
+  存在对应文件时可以选择；不存在时显示正常的文件选择错误。
+• Tab、孤立回车和禁用控制字符不是排版；启用行含这些字符时报红。
+  行首 | 停用的正文不接受路径检查。
+• 整份名单只有排版或停用行时，没有可合并文件，不能执行。
 • 不展开环境变量或 ~，请填写实际路径。
 • 不支持行尾注释；说明文字不要写在启用规则后面。
 • 换行请使用普通回车换行，不用 Tab 分隔规则。
@@ -372,7 +378,7 @@ class DemandDraftSession(TextDraftSession):
                 self.next_identifier += 1
                 rule = RuleState(self.next_identifier, raw)
                 expression = clean_rule_quotes(raw)
-                if expression == "":
+                if is_exclusion_layout_line(expression):
                     rule.match = DemandMatch(completed=True, empty=True)
                 elif expression.startswith("|"):
                     rule.match = DemandMatch(completed=True, disabled=True)
@@ -640,7 +646,11 @@ class DemandDraftSession(TextDraftSession):
             }
             if action == "execute" else {"source_folder"}
         )
-        self.commits.accept_editors(self.commits.select("merge", fields))
+        editors = self.commits.select("merge", fields)
+        self.commits.accept_editors(editors)
+        if any(editor.dirty for editor in editors):
+            self.status.set("主面板参数尚未有效接受，请修正后再继续")
+            return False
         self.on_source_accepted()
         values = self.values()
         self.reconcile(values["demand_file_list_text"])
@@ -651,8 +661,18 @@ class DemandDraftSession(TextDraftSession):
                 "source_folder", "output_folder", "output_filename",
                 "code_header_line", "code_footer_line",
                 "force_overwrite", "open_after_done",
+                "normalize_text_newlines", "record_file_mtime",
+                "ignore_text", "failure_text",
             )
         }
+        self._final_parameters["output_rules"] = (
+            self.commits.prepare_rule(
+                self.commits.manager.config_data["settings"],
+                "crlf_file_list", "file",
+            )
+            if action == "execute"
+            and self._final_parameters["normalize_text_newlines"] else None
+        )
         self._final_check_finished = False
         self._operation_scope = self.commits.operation()
         self._operation_scope.__enter__()
@@ -664,7 +684,7 @@ class DemandDraftSession(TextDraftSession):
                 expression = clean_rule_quotes(rule.raw)
                 rule.match = (
                     DemandMatch(completed=True, empty=True)
-                    if expression == "" else
+                    if is_exclusion_layout_line(expression) else
                     DemandMatch(completed=True, disabled=True)
                     if expression.startswith("|") else None
                 )
@@ -870,10 +890,13 @@ def open_demand_editor(panel):
 
     body = styled_frame(dialog)
     body.pack(fill="both", expand=True, padx=16, pady=4)
+    body.grid_columnconfigure(0, weight=1, uniform="demand_text_columns")
+    body.grid_columnconfigure(1, weight=1, uniform="demand_text_columns")
+    body.grid_rowconfigure(0, weight=1)
     left = styled_frame(body)
     right = styled_frame(body)
-    left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-    right.pack(side="left", fill="both", expand=True, padx=(8, 0))
+    left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
     widgets = {}
     for field, label, parent, favorite, wrap_key, height in (
         ("demand_file_list_text", "文件选择规则", left, "demand_file_list", "merge.demand_file_list", 21),

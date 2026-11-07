@@ -5,7 +5,7 @@
 import tkinter as tk
 
 from core.constants import THEME
-from core.paths import center_window
+from ui.window_manager import center_window
 from ui.dialogs import TextDraftSession, create_managed_text_box
 from ui.rule_list_editor import (
     RULE_DISABLED_BACKGROUND, RULE_WARNING_BACKGROUND, RuleListEditor,
@@ -19,11 +19,21 @@ NEWLINE_HELP = r"""CRLF 文件名单填写规则
 LF、CRLF 都表示换行。
 LF 常用于跨平台文本，CRLF 常用于 Windows 批处理。
 初始名单为 *.bat 和 *.CMD，大小写不影响匹配。
-命中任意启用规则使用 CRLF；未命中使用 LF。
-空名单或全部停用时，实际写入的文本全部使用 LF。
 
-本设置用于修改包文本写入和代码拆分还原。
-不影响备份恢复、扫描合并或文件复制移动。
+修改包“标准化文本换行”默认打开：
+打开时，命中任意启用规则使用 CRLF；未命中使用 LF。
+空名单或全部停用时，修改包实际写入的文本使用 LF。
+关闭时，保留最终正文原有换行，不使用或校验本名单。
+开启标准化只转换换行形式，不裁剪空白、不补末尾换行。
+关闭标准化不表示保留原文件编码或 BOM。
+
+合并与代码拆分还原各有独立标准化开关，默认关闭：
+开启时命中使用 CRLF，未命中使用 LF；
+关闭时保留完整正文，不使用或校验本名单。
+修改包的开关不控制代码拆分还原，也不控制合并。
+合并逐正文转换，容器结构保持 CRLF；不补源码末尾换行。
+
+本设置不影响备份恢复、路径全景扫描或文件复制移动。
 
 一、每行一条文件规则
 填写完整名称、通配符或相对路径，不用逗号、分号分隔规则。
@@ -44,11 +54,19 @@ tools\**\*.bat
 
 二、路径和根限定
 修改包以本次项目根目录为基准。
-代码拆分还原以本次目标根目录为基准。
-自动改名后，按实际最终文件名匹配。
+代码拆分的指定目录模式以指定目录为基准，保留根限定。
+原位模式按实际绝对目标路径尾部匹配，忽略开头根限定。
+拆分只有覆盖或跳过，不自动改名；按实际目标决定换行。
+按目录合并相对于本次源文件夹匹配，开头斜杠限定该根。
+按名单合并从来源绝对路径尾部向前匹配，开头斜杠不限定盘符根：
+\scripts\*.cmd 和 scripts\*.cmd 都能匹配
+E:\scripts\a.cmd 与 E:\Project\scripts\a.cmd。
+普通路径段必须连续；跨层级使用 scripts\**\*.cmd。
+此区别只作用于合并换行选择，不改变文件选择名单或排除规则。
 
 不加开头斜杠，可以从任意层级开始匹配。
-开头一个 \ 或 /，只从业务根目录开始匹配。
+开头一个 \ 或 /，在指定目录模式只从指定目录根开始匹配；
+原位模式忽略此根限定，从实际绝对目标路径尾部匹配。
 scripts\*.cmd 匹配 scripts 当前层级的 CMD 文件。
 \*.cmd 只匹配根层文件，不匹配 scripts\start.cmd。
 
@@ -181,9 +199,12 @@ def edit_newline_settings(parent, commits):
     header.pack(fill="x", padx=16, pady=(12, 4))
     tk.Label(
         header,
-        text="LF、CRLF 都表示换行。LF 常用于跨平台文本，CRLF 常用于 Windows 批处理。\n"
-             "初始名单为 *.bat 和 *.CMD；命中使用 CRLF，未命中使用 LF。\n"
-             "用于修改包文本写入和代码拆分还原，不影响备份恢复及复制移动。\n"
+        text="LF、CRLF 都表示换行。初始名单为 *.bat 和 *.CMD。\n"
+             "修改包标准化默认打开；打开时命中使用 CRLF，未命中使用 LF。\n"
+             "修改包关闭标准化时保留原换行，不使用或校验本名单。\n"
+             "合并与拆分各有独立开关，默认关闭；开启时才使用本名单。\n"
+             "按目录相对于源目录；按名单从绝对路径尾部匹配。\n"
+             "备份恢复、路径扫描及复制移动不受影响。\n"
              "快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做，Ctrl+` 逐行停用／启用。",
         bg=THEME["bg"], fg=THEME["fg_label"], font=THEME["font_main"],
         anchor="w", justify="left", wraplength=740,

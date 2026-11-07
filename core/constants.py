@@ -93,6 +93,7 @@ CODE_FOOTER_LINE = "---源代码结束---"
 FILE_SECTION_START_TEMPLATE = "---第{index}个文件---"
 
 MESSAGE_FILE_EXCLUDED = "文件命中排除名单，内容略"
+MESSAGE_FILE_FAILED = "文件读取或解码失败，内容未提供"
 MESSAGE_CANNOT_READ = "无法读取或为非文本文件"
 MESSAGE_READ_ERROR = "*** 读取文件时发生错误"
 
@@ -170,6 +171,17 @@ TEXT_WRAP_DEFAULTS = {
     "patch.protocol_doc_text": True,
     "app.log_text": True,
     "settings.crlf_file_list": True,
+    "merge.code_header_line": True,
+    "merge.code_footer_line": True,
+    "restore.code_header_line": True,
+    "restore.code_footer_line": True,
+    "merge.ignore_text": True,
+    "restore.ignore_text": True,
+    "merge.failure_text": True,
+    "restore.failure_text": True,
+    "restore.source_text": True,
+    "restore.preview_text": True,
+    "restore.result_text": False,
 }
 
 # --- 主题配色 ---
@@ -242,24 +254,42 @@ DEFAULT_CONFIG = {
         "demand_file_list_text": "",
         "demand_preamble_text": "",
         "demand_ending_text": "",
+        "normalize_text_newlines": False,
+        "record_file_mtime": True,
+        "ignore_text": MESSAGE_FILE_EXCLUDED,
+        "failure_text": MESSAGE_FILE_FAILED,
     },
     "restore": {
-        "source_txt_file": "",
+        "source_text": "",
+        "last_result_text": "",
         "target_folder": "",
+        "backup_enabled": True,
+        "backup_dir": "",
+        "target_mode": "directory",
+        "execution_mode": "split",
+        "restore_source_dir": "",
+        "keep_restore_source_path": False,
+        "restore_backup_enabled": True,
+        "open_backup_after_done": False,
         "code_header_line": CODE_HEADER_LINE,
         "code_footer_line": CODE_FOOTER_LINE,
         "existing_file_policy": "overwrite",
         "open_after_done": True,
+        "normalize_text_newlines": False,
+        "ignore_text": MESSAGE_FILE_EXCLUDED,
+        "failure_text": MESSAGE_FILE_FAILED,
     },
     "patch": {
         "project_root": "",
         "patch_mode": "apply",
         "allow_delete": False,
         "allow_multi_replace_exact": False,
+        "normalize_text_newlines": True,
         "backup_enabled": True,
         "backup_dir": "99_归档/AI文件修改备份",
         "restore_source_dir": "",
         "keep_restore_source_path": False,
+        "restore_backup_enabled": True,
         "patch_text": "",
         "last_result_text": "",
         "open_backup_after_done": False,
@@ -275,6 +305,15 @@ DEFAULT_CONFIG = {
         "merge_regular_ending": [],
         "merge_exclude_folders": [],
         "merge_exclude_files": [],
+
+        "merge_code_header_line": [],
+        "merge_code_footer_line": [],
+        "merge_ignore_text": [],
+        "merge_failure_text": [],
+        "restore_code_header_line": [],
+        "restore_code_footer_line": [],
+        "restore_ignore_text": [],
+        "restore_failure_text": [],
 
         "demand_file_list": [],
         "demand_preamble": [],

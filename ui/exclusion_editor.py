@@ -2,7 +2,7 @@
 
 import tkinter as tk
 from core.constants import THEME
-from core.paths import center_window
+from ui.window_manager import center_window
 from ui.rule_list_editor import (
     RULE_DISABLED_BACKGROUND, RULE_WARNING_BACKGROUND, RuleListEditor,
 )
@@ -48,10 +48,11 @@ README.md
 • 不用逗号、分号或空格分隔多条规则。
 • 名称内部的空格、逗号、分号、方括号等是普通字符。
 • 输入、粘贴和收藏回填时实时删除全部半角双引号 "，包括路径内部的双引号。
-• 删除双引号后完全为空的行会移除。
+• 空行和仅含半角空格的行是排版，保留位置、数量和空格数量。
+• 开头、中间、末尾及连续空行都保留；排版不高亮、不参与排除。
 • 不自动删除重复行，不调整顺序。
-• 不自动去掉首尾空格，空格参与匹配。
-• 只有空格的行是无效规则。
+• 实际规则的首尾空格仍参与匹配，不自动删除。
+• Tab、孤立回车及禁用控制字符不是排版，启用行仍按非法内容处理。
 • 不支持行尾注释，备注可单独写成停用行。
 • 不展开环境变量或 ~。
 • 规则不要求对应文件或目录目前真实存在。
@@ -60,7 +61,7 @@ README.md
 例：
 "src/cache/"    → src\cache
 "*.log"         → *.log
-""              → 移除空行
+""              → 删除双引号，保留这条空白排版行
 
 单引号、反引号和中文引号不会自动删除。
 填写绝对路径或网络共享路径无效；
@@ -249,7 +250,8 @@ src\**name\a.py
 • 盘符路径、网络共享路径或重复开头分隔符。
 • 内部空路径段、独立 . 或 .. 路径段。
 • 不独占路径段的双星号。
-• 名称正文只包含半角空格。
+• 根限定符或无扩展名条件之后的模式正文只包含半角空格。
+  整行只有半角空格时属于排版，不是非法规则。
 • 名称组件以句点结尾，或句点后只有半角空格。
 • 中间路径段以半角空格结尾。
 • Windows 保留设备名，包括带扩展名的形式。
@@ -303,19 +305,41 @@ CON*、COM?.txt 等带通配符的写法可以作为模式。
 十、核对提示与保存
 ────────────────────────────────────────
 红：无效，必须修正或停用后才能保存。
-黄：有效，有首尾空格风险，保存时需要确认。
+黄：有效，可能是首尾半角空格风险，也可能是结构等价重复。
 灰：临时停用，不参与排除。
+空白排版没有高亮。
+
+同一名单中，标准化结构相同的合法启用规则，
+后续项标黄并引用最早项的实际行号。
+例如 *.LOG 与 *.log，SRC/cache/ 与 src\cache。
+只比较相同结构及 ASCII 字母大小写差异，不判断一般包含关系。
+cache 与 \cache、README* 与 :README*、
+带实际空格与不带空格的规则不同。
+
+重复项保留，不删除、不合并，也不增加确认。
+首尾半角空格风险仍需要确认；同一行的原因一起展示。
+插入光标移入对应物理行，可在底部状态区查看原因。
+有选区时仍按插入光标所在行显示；离开后恢复实际状态。
+确认、保存和关闭决定期间优先显示操作状态；
+取消或返回修改后仍能继续编辑并查看当前原因。
+保存失败提示保留至业务名单成功保存，不会被行诊断掩盖。
 
 编辑时的颜色对应当前填写内容。
-双引号实时删除；保存时再整理空行和斜杠，行号可能随之变化；
-请按提示中显示的当前行号检查。
+双引号实时删除；保存时整理合法规则的斜杠，不删除排版。
+空白行也占据行号，请按当前实际物理行检查。
 
 仅看到文字已整理，不代表保存成功；
 如提示保存失败，请重试，草稿仍保留在窗口。
 
 收藏保存同样校验对应名单。
 收藏回填只实时删除半角双引号，其他正文保留；正式保存名单时再整理。
-空名单可以保存，空正文不能添加为收藏。
+业务名单可以为空或只有排版，表示没有启用排除规则。
+收藏新增、覆盖和改名校验至少需要一条非排版行；
+| 或 |   这样的停用行也满足最低内容要求，红项仍不能保存收藏。
+仅排版收藏操作会先拒绝，不为这次拒绝整理当前草稿。
+历史仅排版收藏仍可显示、回填供编辑，不自动删除。
+收藏和明确保存保留全部排版与重复项。
+只修改空行或空格行也属于未保存变化，关闭时仍需决定保存或放弃。
 
 
 十一、确认排除效果
@@ -326,7 +350,10 @@ CON*、COM?.txt 等带通配符的写法可以作为模式。
 
 按目录合并：
 排除文件仍保留文件路径和段落，
-正文显示“文件命中排除名单，内容略”；
+正文使用本次“主动忽略标识”，默认“文件命中排除名单，内容略”；
+明确可处理的正文失败使用独立“被动失败标识”并继续。
+具体原因只记运行日志，不写块外JSON或占位正文；
+完成弹窗分别提示主动忽略和被动失败数量。
 排除目录内部不生成文件段落。
 
 本次输出文件自身自动跳过。
@@ -378,6 +405,7 @@ class ExclusionDraftSession(TextDraftSession):
         self.status = status
         self.list_editor = RuleListEditor(
             dialog, commits, widgets, EXCLUSION_FIELDS, status, config,
+            semantics="exclusion",
         )
 
     def values(self):
@@ -387,16 +415,37 @@ class ExclusionDraftSession(TextDraftSession):
         return self.list_editor.has_changes()
 
     def accept(self, values):
-        results = self.list_editor.prepare(values)
-        if not self.list_editor.confirm(results):
-            return False
-        completed = super().accept({
-            field: result.normalized_text for field, result in results.items()
-        })
-        if completed:
-            self.list_editor.accepted(results)
-        self.status.set("已保存" if completed else "保存失败，内容仍在当前窗口")
-        return completed
+        editor = self.list_editor
+        with editor.operation_status("正在校验并保存排除名单"):
+            completed = False
+            try:
+                results = editor.prepare(values)
+                if not editor.confirm(results):
+                    editor.set_status(
+                        "本次未保存：名单需要修正"
+                        if any(result.has_errors for result in results.values())
+                        else "本次未保存：空格风险确认已取消"
+                    )
+                    return False
+                completed = super().accept({
+                    field: result.normalized_text
+                    for field, result in results.items()
+                })
+                if completed:
+                    editor.accepted(results)
+                    editor.set_status("已保存")
+                else:
+                    editor.mark_save_failed()
+                return completed
+            finally:
+                # 自然传播程序异常，同时保留操作未完成事实。
+                # 红项拒绝和取消未尝试持久化，不登记保存失败。
+                if not completed and editor.base_status == "校验完成，等待确认或保存":
+                    editor.set_status("保存未完成，内容仍在当前窗口")
+
+    def prepare_close(self):
+        with self.list_editor.operation_status("正在处理排除名单关闭决定"):
+            return super().prepare_close()
 
 
 def create_exclusion_dialog(parent, title, config, commits, page):
@@ -428,7 +477,7 @@ def create_exclusion_dialog(parent, title, config, commits, page):
     ).pack(side="left", padx=(0, 8))
     for color, description in (
         (THEME["danger_bg"], "红：无效，阻止保存"),
-        (RULE_WARNING_BACKGROUND, "黄：有效，有空格风险"),
+        (RULE_WARNING_BACKGROUND, "黄：空格风险或结构重复"),
         (RULE_DISABLED_BACKGROUND, "灰：临时停用，不参与排除"),
     ):
         tk.Label(
@@ -456,16 +505,30 @@ def create_exclusion_dialog(parent, title, config, commits, page):
     session = ExclusionDraftSession(dialog, commits, config, widgets, status)
     buttons = styled_frame(dialog)
     buttons.pack(fill="x", padx=16, pady=12)
-    tk.Label(
-        buttons, textvariable=status, anchor="w",
-        bg=THEME["bg"], fg=THEME["fg_dim"], font=THEME["font_main"],
-    ).pack(side="left", fill="x", expand=True)
-    styled_button(buttons, "取消", session.close, width=10).pack(
+
+    # 先为按钮保留完整空间，提示只消费剩余宽度。
+    actions = styled_frame(buttons)
+    actions.pack(side="right", anchor="s", padx=(12, 0))
+    styled_button(actions, "取消", session.close, width=10).pack(
         side="right", padx=(8, 0),
     )
     styled_button(
-        buttons, "保存", session.save_and_close, width=10, accent=True,
+        actions, "保存", session.save_and_close, width=10, accent=True,
     ).pack(side="right")
+
+    # width=1 避免长提示提出过大的横向尺寸请求；
+    # 实际宽度由剩余空间决定，窗口缩放时同步调整换行宽度。
+    status_label = tk.Label(
+        buttons, textvariable=status, anchor="w", justify="left",
+        width=1, wraplength=1,
+        bg=THEME["bg"], fg=THEME["fg_dim"], font=THEME["font_main"],
+    )
+    status_label.pack(side="left", fill="x", expand=True)
+
+    def resize_status_wrap(event):
+        status_label.configure(wraplength=max(1, event.width))
+
+    status_label.bind("<Configure>", resize_status_wrap)
     register_popup(dialog, session.close, prepare_close=session.prepare_close)
     parent.wait_window(dialog)
     return session.saved and not getattr(parent._root(), "_zipatch_closed", False)

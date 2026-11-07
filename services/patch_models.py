@@ -7,11 +7,12 @@ from dataclasses import dataclass
 class PatchPreviewResult:
     preview_text: str
     patch: dict
-    valid_patch: dict
+
     has_errors: bool
     success_count: int
     failed_count: int
     execution: object
+    check_results: tuple
     has_global_errors: bool = False
 
 
@@ -19,6 +20,7 @@ class PatchPreviewResult:
 class PatchApplyResult:
     log_text: str
     backup_root: str
+    unit_results: tuple
 
 
 @dataclass
@@ -42,3 +44,4 @@ class BackupRestorePreviewResult:
 class BackupRestoreApplyResult:
     log_text: str
     backup_root: str
+    complete_original_state: bool

@@ -321,3 +321,44 @@ def prepare_all_for_exit(root):
             focus_window(record["window"])
             return False
     return True
+
+def center_window(win, width=980, height=760):
+    """调用方传入存活窗口；几何设置失败自然暴露，不伪装完成。"""
+    win.update_idletasks()
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    x = int((sw - width) / 2)
+    y = int((sh - height) / 3)
+    win.geometry(f"{width}x{height}+{x}+{y}")
+
+
+def raise_and_focus(win):
+    """窗口拥有唯一临时置顶回调；销毁取消，具体错误自然传播。"""
+    pending = getattr(win, "_zipatch_raise_after_id", None)
+    if pending is not None:
+        win.after_cancel(pending)
+        win._zipatch_raise_after_id = None
+
+    if getattr(win, "_zipatch_raise_destroy_binding", None) is None:
+        def cancel_on_destroy(event):
+            if event.widget is not win:
+                return
+            pending = win._zipatch_raise_after_id
+            if pending is not None:
+                win.after_cancel(pending)
+                win._zipatch_raise_after_id = None
+
+        win._zipatch_raise_after_id = None
+        win._zipatch_raise_destroy_binding = win.bind(
+            "<Destroy>", cancel_on_destroy, add="+",
+        )
+
+    def restore_topmost():
+        win._zipatch_raise_after_id = None
+        if win.winfo_exists():
+            win.attributes("-topmost", False)
+
+    win.deiconify()
+    win.lift()
+    win.attributes("-topmost", True)
+    win.focus_force()
+    win._zipatch_raise_after_id = win.after(200, restore_topmost)

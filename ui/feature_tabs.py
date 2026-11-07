@@ -40,29 +40,8 @@ class DraggableFeatureTabs(tk.Frame):
         self.refresh()
 
     def get_order(self):
-        order = self.config_data.get("ui", {}).get("feature_order", [])
-
-        if not isinstance(order, list):
-            order = []
-
-        known = set(self.feature_registry.keys())
-        result = []
-        seen = set()
-
-        for key in order:
-            if key in known and key not in seen:
-                result.append(key)
-                seen.add(key)
-
-        for key, item in sorted(
-            self.feature_registry.items(),
-            key=lambda pair: pair[1].get("default_order", 9999),
-        ):
-            if key not in seen:
-                result.append(key)
-                seen.add(key)
-
-        return result
+        # 启动时由配置层统一整理；返回副本，避免右键排序直接修改配置。
+        return list(self.config_data["ui"]["feature_order"])
 
     def refresh(self):
         for child in self.winfo_children():

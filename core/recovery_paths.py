@@ -10,6 +10,15 @@ from pathlib import Path
 from core.path_validation import normalize_rel_path
 
 
+class UnsafePathError(ValueError):
+    """明确安全阻塞；checked_chain补充到达阻塞位置的实际观察。"""
+
+    def __init__(self, message, *, kind="unsafe"):
+        super().__init__(message)
+        self.kind = kind
+        self.observation = ()
+
+
 _REPARSE_POINT = 0x400
 _WINDOWS_INVALID = re.compile(r'[<>:"|?*\x00-\x1f]')
 _WINDOWS_DEVICE = re.compile(
@@ -45,7 +54,10 @@ def validate_component(name):
         or _WINDOWS_INVALID.search(name)
         or _WINDOWS_DEVICE.fullmatch(name.split(".", 1)[0].rstrip(" "))
     ):
-        raise ValueError(f"不支持的 Windows 名称或路径别名：{name!r}")
+        raise UnsafePathError(
+            f"不支持的 Windows 名称或路径别名：{name!r}",
+            kind="invalid_name",
+        )
 
 
 def entity_type(path):
@@ -53,34 +65,64 @@ def entity_type(path):
         attributes = Path(path).lstat()
     except FileNotFoundError:
         return "absent"
+    return entity_type_from_attributes(path, attributes)
+
+
+def entity_type_from_attributes(path, attributes):
+    """消费不跟随的已观察属性，共用唯一普通对象政策。"""
     if stat.S_ISLNK(attributes.st_mode):
-        raise ValueError(f"不支持符号链接：{path}")
+        raise UnsafePathError(
+            f"不支持符号链接：{path}", kind="symbolic_link",
+        )
     if getattr(attributes, "st_file_attributes", 0) & _REPARSE_POINT:
-        raise ValueError(f"不支持 Windows 重解析点：{path}")
+        raise UnsafePathError(
+            f"不支持 Windows 重解析点：{path}", kind="reparse_point",
+        )
     if stat.S_ISREG(attributes.st_mode):
         return "file"
     if stat.S_ISDIR(attributes.st_mode):
         return "directory"
-    raise ValueError(f"不支持特殊文件系统对象：{path}")
+    raise UnsafePathError(
+        f"不支持特殊文件系统对象：{path}",
+        kind=f"special_entity_{stat.S_IFMT(attributes.st_mode)}",
+    )
 
 
-def checked_chain(path):
+def checked_chain(path, *, include_observation=False):
     # abspath 在 Windows 上可能消除尾随句点、空格及上级跳转。
     # 必须先检查原始名称与原路径链，不能用转换后的目标冒充原路径。
     original = Path(path)
     if os.name == "nt" and original.drive and not original.root:
-        raise ValueError(f"不支持依赖驱动器当前目录的路径：{path}")
+        raise UnsafePathError(
+            f"不支持依赖驱动器当前目录的路径：{path}",
+            kind="drive_relative",
+        )
     if not original.is_absolute():
         original = Path.cwd() / original
 
+    observation = []
     for component in (*reversed(original.parents), original):
-        # .. 本身是导航段，但到达它之前经过的目录仍须逐层检查。
-        if component.name and component.name not in (".", ".."):
-            validate_component(component.name)
-        kind = entity_type(component)
+        # 失败观察止于实际阻塞位置，不跟随链接或访问受阻后代。
+        # 安全模块拥有事实；消费者不解析诊断文字。
+        try:
+            if component.name and component.name not in (".", ".."):
+                validate_component(component.name)
+            kind = entity_type(component)
+        except UnsafePathError as error:
+            error.observation = tuple(observation) + (
+                (component, error.kind),
+            )
+            raise
+        observation.append((component, kind))
         if component != original and kind not in ("directory", "absent"):
-            raise ValueError(f"父路径不是普通目录：{component}")
-    return absolute_path(original)
+            error = UnsafePathError(
+                f"父路径不是普通目录：{component}",
+                kind="parent_not_directory",
+            )
+            error.observation = tuple(observation)
+            raise error
+    target = absolute_path(original)
+    return (target, tuple(observation)) if include_observation else target
 
 
 def checked_root(path):
@@ -105,27 +147,3 @@ def relative_path(root, target):
     return absolute_path(target).relative_to(absolute_path(root)).as_posix()
 
 
-def tree_inventory(path):
-    """单次目录枚举，拒绝链接和特殊对象；结果供完整性计算消费。"""
-    root = checked_chain(path)
-    kind = entity_type(root)
-    if kind != "directory":
-        return kind, ()
-    records = [("", root, "directory")]
-    pending = [root]
-    while pending:
-        folder = pending.pop()
-        with os.scandir(folder) as entries:
-            for entry in entries:
-                validate_component(entry.name)
-                child = Path(entry.path)
-                child_kind = entity_type(child)
-                if child_kind == "absent":
-                    raise OSError(f"检查期间目录项消失：{child}")
-                records.append((
-                    child.relative_to(root).as_posix(), child, child_kind,
-                ))
-                if child_kind == "directory":
-                    pending.append(child)
-    records.sort(key=lambda record: record[0].encode("utf-8"))
-    return kind, tuple(records)

@@ -5,9 +5,9 @@ from contextlib import contextmanager
 
 from core.constants import THEME
 from core.favorite_order import order_favorites
-from core.message_utils import safe_ask_yes_no, safe_show_error
-from core.paths import center_window
-from core.text_io import replace_text_keep_undo
+from ui.message_dialogs import safe_ask_yes_no, safe_show_error
+from ui.window_manager import center_window
+from ui.text_editor import replace_text_keep_undo
 from ui.theme import styled_entry, styled_frame
 from ui.widgets import add_tooltip
 from ui.window_manager import (

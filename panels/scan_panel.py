@@ -3,9 +3,10 @@
 import tkinter as tk
 
 from core.constants import THEME
-from core.message_utils import resolve_output_file_conflict, safe_show_info
+from ui.message_dialogs import safe_show_info
+from ui.widgets import resolve_output_file_conflict, open_path_with_default_app
 from core.path_validation import normalize_windows_display_path
-from core.paths import build_output_path, open_path_with_default_app, validate_required_path
+from core.paths import build_output_path, validate_required_path
 from core.exclusion_rules import PreparedExclusions
 from panels.base_panel import BasePanel
 from services.scan_service import panoramic_scan
@@ -98,9 +99,11 @@ class ScanPanel(BasePanel):
             exclusions = PreparedExclusions(
                 self.commits.prepare_rule(
                     self.cfg, "exclude_folders", "directory", cfg["exclude_folders"],
+                    semantics="exclusion",
                 ),
                 self.commits.prepare_rule(
                     self.cfg, "exclude_files", "file", cfg["exclude_files"],
+                    semantics="exclusion",
                 ),
             )
             source = validate_required_path(cfg["source_folder"], "源文件夹")

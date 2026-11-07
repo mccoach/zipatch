@@ -2,7 +2,6 @@
 
 """名单写入过滤及正文完成边界，不解释规则、不保存或扫描。"""
 
-import sys
 from contextlib import contextmanager
 
 from core.rule_lists import clean_rule_quotes
@@ -30,7 +29,17 @@ class ListTextEditing:
 
         self.original_command = widget._w + "_zipatch_original"
         widget.tk.call("rename", widget._w, self.original_command)
-        widget.tk.createcommand(widget._w, self.command)
+        # Tkinter 的正式回调注册负责报告 Python 缺陷，避免 Python
+        # 异常滞留在 Tcl 桥接层。底层 Tcl 失败则由下面的 Tcl 命令归还。
+        self.python_command = widget._register(self.command)
+        widget.tk.call(
+            "proc", widget._w, "args",
+            f"set response [{self.python_command} {{*}}$args]\n"
+            "if {[llength $response] != 2} {\n"
+            '    return -code error "名单编辑代理失败；详见 Python 回调错误"\n'
+            "}\n"
+            "return -options [lindex $response 0] [lindex $response 1]",
+        )
         widget._list_text_editing = self
         widget._edit_text_scope = self.edit_group
 
@@ -57,8 +66,9 @@ class ListTextEditing:
         widget.bind("<Destroy>", self.on_destroy, add="+")
 
     def command(self, *arguments):
+        """返回 Tcl 选项和结果；不把底层 Tcl 错误抛出 Python 回调。"""
         attempted = False
-        completed = False
+        success_options = ("-code", 0, "-level", 0)
         try:
             command = arguments[0]
             history_action = (
@@ -70,18 +80,16 @@ class ListTextEditing:
                 history_action is not None
             )
             if mutation and str(self.widget.cget("state")) != "normal":
-                completed = True
-                return ""
+                return success_options, ""
 
             if history_action is not None:
                 capability = "canundo" if history_action == "undo" else "canredo"
                 available = self.widget.tk.call(
                     self.original_command, "edit", capability,
                 )
-                # 没有历史是正常无操作，不制造跨 Tcl 的异常。
+                # 没有历史是正常无操作，不制造撤销失败。
                 if not self.widget.tk.getboolean(available):
-                    completed = True
-                    return ""
+                    return success_options, ""
 
             if command in ("insert", "replace"):
                 arguments = list(arguments)
@@ -92,29 +100,30 @@ class ListTextEditing:
                     arguments[index]
                     for index in range(first, len(arguments), 2)
                 ):
-                    completed = True
-                    return ""
+                    return success_options, ""
                 if command == "replace" and len(arguments) == 4:
                     if self.widget.get(arguments[1], arguments[2]) == arguments[3]:
-                        completed = True
-                        return ""
+                        return success_options, ""
 
             attempted = mutation
-            result = self.widget.tk.call(self.original_command, *arguments)
-            completed = True
-            return result
+            # apply 使用局部变量，嵌套代理调用不共享结果状态。
+            # Tcl catch 保留底层返回选项（含 errorInfo/errorCode），
+            # 不判断错误消息、不吞错；由控件 Tcl 命令恢复失败语义。
+            response = self.widget.tk.call(
+                "apply",
+                (
+                    "args",
+                    "catch {uplevel #0 $args} result options\n"
+                    "list $options $result",
+                ),
+                self.original_command,
+                *arguments,
+            )
+            return self.widget.tk.splitlist(response)
         finally:
             if attempted:
                 # 失败尝试也使旧关联失效，后续收口核验实际正文。
                 self.revision += 1
-            if not completed:
-                # 正常清理命令也可能继承外层正在传播的异常上下文。
-                # 只有本次命令未成功返回，才报告其自身的原异常。
-                error_type, error, trace = sys.exc_info()
-                if error_type is not None:
-                    self.widget._root().report_callback_exception(
-                        error_type, error, trace,
-                    )
 
     def complete(self, prepared_text=None):
         if self.destroyed or self.depth:
@@ -186,7 +195,8 @@ class ListTextEditing:
         if event.widget is not self.widget or self.destroyed:
             return
         self.destroyed = True
-        self.widget.tk.deletecommand(self.widget._w)
+        self.widget.tk.call("rename", self.widget._w, "")
+        self.widget.deletecommand(self.python_command)
         self.widget._list_text_editing = None
         self.widget._edit_text_scope = None
         self.on_text = None

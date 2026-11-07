@@ -9,7 +9,11 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.rule_lists import clean_rule_quotes
+from core.rule_lists import clean_rule_quotes, is_exclusion_layout_line
+from core.recovery_paths import (
+    UnsafePathError, checked_chain, entity_type_from_attributes,
+    validate_component,
+)
 
 
 class DemandCheckCancelled(Exception):
@@ -77,7 +81,8 @@ def windows_path_key(path):
 
 def parse_demand_rule(raw):
     expression = clean_rule_quotes(raw)
-    if expression == "":
+    # 复用排除名单的精确排版定义；原表达保留，不扩大到 Unicode 空白。
+    if is_exclusion_layout_line(expression):
         return ParsedDemandRule(expression, False, False, "", (), False)
     if expression.startswith("|"):
         return ParsedDemandRule(expression, True, False, "", (), False)
@@ -124,8 +129,6 @@ def parse_demand_rule(raw):
 
     if _INVALID_BODY.search(remaining):
         raise ValueError("路径语法错误：包含非法字符或控制字符。")
-    if not body.strip():
-        raise ValueError("路径语法错误：正文不能只有空白。")
 
     # 用末尾 . 保留目录要求，不把 a.md\ 偷偷变成文件 a.md。
     trailing_separator = bool(remaining) and remaining.endswith("\\")
@@ -138,8 +141,8 @@ def parse_demand_rule(raw):
     for segment in segments:
         if "**" in segment and segment != "**":
             raise ValueError("** 必须独立占据一个路径段。")
-        if segment and not segment.strip():
-            raise ValueError("路径语法错误：路径段不能只有空白。")
+        if segment and not segment.strip(" "):
+            raise ValueError("路径语法错误：路径段不能只有半角空格。")
         if segment not in (".", ".."):
             if segment.rstrip(" ").endswith("."):
                 raise ValueError("路径语法错误：名称组件不能以句点结尾。")
@@ -174,8 +177,17 @@ def _segment_pattern(segment):
 
 def _checked_stat(path, cancel):
     check_cancel(cancel)
-    attributes = os.stat(path)
+    path = Path(path)
+    # 父链先检查；末级一次不跟随查询同时取得并分类属性。
+    # 不先abspath消除link/..，不重复查询末级属性。
+    checked_chain(path.parent)
     check_cancel(cancel)
+    # 盘符根没有末级名称，不能把合法根目录当成空文件名拒绝。
+    if path.name and path.name not in (".", ".."):
+        validate_component(path.name)
+    attributes = os.stat(path, follow_symlinks=False)
+    check_cancel(cancel)
+    entity_type_from_attributes(path, attributes)
     return attributes
 
 
@@ -204,6 +216,8 @@ def _exact_file(rule, base, cancel):
         attributes = _checked_stat(target, cancel)
     except FileNotFoundError:
         return DemandMatch(issue="指定文件不存在。")
+    except UnsafePathError as error:
+        return DemandMatch(issue=f"指定文件路径不受支持：{error}")
     except OSError as error:
         return DemandMatch(issue=f"无法检查指定文件：{error}")
     check_cancel(cancel)
@@ -227,7 +241,8 @@ def _wildcard_files(rule, base, cancel):
         index for index, segment in enumerate(segments)
         if "*" in segment or "?" in segment
     )
-    scope = Path(os.path.abspath(base.joinpath(*segments[:first_wildcard])))
+    # 固定前缀保留原路径；检查之前不能消除链接及导航段。
+    scope = base.joinpath(*segments[:first_wildcard])
     patterns = {
         index: _segment_pattern(segment)
         for index, segment in enumerate(segments)
@@ -299,7 +314,7 @@ def _wildcard_files(rule, base, cancel):
             }
             if parent_positions:
                 check_cancel(cancel)
-                parent = Path(os.path.abspath(folder / ".."))
+                parent = checked_chain(folder / "..")
                 # 显式 .. 不是递归链接进入；状态集合负责限制重复推进。
                 stack.append((parent, parent_positions, frozenset()))
             if not active:
@@ -317,8 +332,10 @@ def _wildcard_files(rule, base, cancel):
                 if not matched:
                     return
                 check_cancel(cancel)
-                is_directory = stat.S_ISDIR(entry_attributes.st_mode)
-                is_file = stat.S_ISREG(entry_attributes.st_mode)
+                validate_component(name)
+                entry_kind = entity_type_from_attributes(path, entry_attributes)
+                is_directory = entry_kind == "directory"
+                is_file = entry_kind == "file"
                 if is_directory:
                     next_positions = {
                         position if segments[position] == "**" else position + 1
@@ -380,7 +397,7 @@ def _wildcard_files(rule, base, cancel):
                     entry_attributes = None
                     if matched:
                         check_cancel(cancel)
-                        entry_attributes = entry.stat(follow_symlinks=True)
+                        entry_attributes = entry.stat(follow_symlinks=False)
                         check_cancel(cancel)
                     cached.append((entry.name, entry.path, entry_attributes))
                     if entry_attributes is not None:
@@ -390,6 +407,10 @@ def _wildcard_files(rule, base, cancel):
     except FileNotFoundError as error:
         return DemandMatch(
             issue=f"无法完整检查指定目录范围：路径不存在或检查期间消失：{error}"
+        )
+    except UnsafePathError as error:
+        return DemandMatch(
+            issue=f"无法完整检查指定目录范围，包含不支持对象：{error}"
         )
     except OSError as error:
         return DemandMatch(issue=f"无法完整检查指定目录范围：{error}")
@@ -406,9 +427,6 @@ def _wildcard_files(rule, base, cancel):
     return DemandMatch(issue="通配符未命中任何文件。")
 
 
-def inspect_demand_rule(raw, source_folder, cancel):
-    return inspect_demand_rules(((0, raw),), source_folder, cancel)[0]
-
 
 def inspect_demand_rules(jobs, source_folder, cancel):
     """规则解析一次，源基准每任务检查一次；取消不交付部分结果。"""
@@ -423,7 +441,7 @@ def inspect_demand_rules(jobs, source_folder, cancel):
         except ValueError as error:
             results[identifier] = DemandMatch(issue=str(error))
             continue
-        if rule.expression == "":
+        if is_exclusion_layout_line(rule.expression):
             results[identifier] = DemandMatch(completed=True, empty=True)
             continue
         if rule.disabled:

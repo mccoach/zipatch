@@ -22,10 +22,12 @@ class PreparedExclusions:
         if (
             not isinstance(self.directories, RuleListResult)
             or self.directories.object_kind != "directory"
+            or self.directories.semantics != "exclusion"
             or not isinstance(self.files, RuleListResult)
             or self.files.object_kind != "file"
+            or self.files.semantics != "exclusion"
         ):
-            raise TypeError("排除必须消费类别正确的目录和文件名单结果")
+            raise TypeError("排除必须消费排除语义且类别正确的目录和文件名单结果")
         if self.directories.has_errors or self.files.has_errors:
             raise ExclusionValidationError(
                 format_rule_diagnostics(
@@ -37,6 +39,6 @@ class PreparedExclusions:
 
 def prepare_exclusions(directory_text, file_text):
     return PreparedExclusions(
-        analyze_rule_list(directory_text, "directory"),
-        analyze_rule_list(file_text, "file"),
+        analyze_rule_list(directory_text, "directory", semantics="exclusion"),
+        analyze_rule_list(file_text, "file", semantics="exclusion"),
     )
