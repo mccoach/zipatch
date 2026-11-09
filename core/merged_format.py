@@ -7,7 +7,7 @@ from datetime import datetime
 
 from core.constants import (
     CODE_FOOTER_LINE, CODE_HEADER_LINE, MESSAGE_FILE_EXCLUDED,
-    MESSAGE_FILE_FAILED,
+    MESSAGE_FILE_FAILED, MERGE_MODES,
 )
 from core.text_newlines import normalize_newlines
 
@@ -68,6 +68,11 @@ def validate_output_settings(section_name, settings):
         switches = ["normalize_text_newlines"]
         if section_name == "merge":
             switches.append("record_file_mtime")
+            mode = settings.get("merge_mode", MERGE_MODES[0])
+            if type(mode) is not str or mode not in MERGE_MODES:
+                raise OutputSettingsError(
+                    "merge_mode 必须是 directory、list 或 combined"
+                )
         for field in switches:
             if field in settings and type(settings[field]) is not bool:
                 raise OutputSettingsError(f"{field} 必须是布尔值")

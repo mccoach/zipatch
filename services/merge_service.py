@@ -7,9 +7,11 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 
 from core.constants import (
     FILE_SECTION_START_TEMPLATE, MESSAGE_FILE_EXCLUDED, MESSAGE_FILE_FAILED,
+    MERGE_MODES,
 )
 from core.file_observation import FileObservation, observe_file
 from core.file_walk import iter_project_entries
@@ -19,13 +21,16 @@ from core.merged_format import (
 )
 from core.rule_lists import validate_file_rules
 from core.recovery_paths import (
-    UnsafePathError, checked_chain, entity_type_from_attributes,
+    UnsafePathError, checked_chain, contains, entity_type_from_attributes,
     validate_component,
 )
 from core.text_io import TextDecodingError, decode_text_bytes
 from core.text_newlines import normalize_newlines
 from core.time_utils import current_timestamp_text
-from services.demand_rules import windows_path_key
+from services.demand_rules import (
+    build_demand_selection, demand_physical_lines,
+    inspect_demand_rules, windows_path_key,
+)
 from services.stream_output import (
     StreamOutputPostError, StreamOutputResult, publish_stream_output,
 )
@@ -173,14 +178,15 @@ def write_merge_file(
                     )
 
             if normalize_text_newlines:
+                # 目录范围内保持源目录根语义；补充的外部文件使用路径尾部匹配。
+                # 仅列表没有目录根，全部文件继续使用列表的尾部匹配语义。
+                within_root = root is not None and contains(root, display_path)
                 parts = (
                     Path(display_path).relative_to(root).parts
-                    if root is not None else Path(display_path).parts[1:]
+                    if within_root else Path(display_path).parts[1:]
                 )
-                matched = (
-                    output_rules.matches(parts)
-                    if root is not None else
-                    output_rules.matches(parts, ignore_root=True)
+                matched = output_rules.matches(
+                    parts, ignore_root=not within_root,
                 )
                 body = normalize_newlines(body, "\r\n" if matched else "\n")
 
@@ -248,50 +254,85 @@ def _log_completed(result, mode, log_func):
         ) from error
 
 
-def merge_project_files(
-    source_folder, output_file, exclusions, preamble_text, ending_text,
-    code_header_line, code_footer_line, log_func=None, *,
-    normalize_text_newlines=False, record_file_mtime=True,
+def merge_files(
+    mode, source_folder, list_text, output_file, exclusions,
+    preamble_text, ending_text, code_header_line, code_footer_line,
+    log_func=None, *, normalize_text_newlines=False, record_file_mtime=True,
     ignore_text=MESSAGE_FILE_EXCLUDED, failure_text=MESSAGE_FILE_FAILED,
     output_rules=None,
 ):
+    """唯一合并入口：按模式形成一次有序清单，然后生成和发布一次。
+
+    目录排除只作用于目录选择。列表是明确包含：
+    与目录已有路径重复时保留目录顺序，但提供真实正文；
+    其余列表文件追加在目录文件之后。去重不读取文件正文。
+    编辑窗口的检查结果不作为执行资格，本次重新检查所需列表一次。
+    """
+    if type(mode) is not str or mode not in MERGE_MODES:
+        raise ValueError("合并模式必须是 directory、list 或 combined")
+    if mode in ("directory", "combined") and not source_folder:
+        # 不允许空路径经checked_chain隐式变为当前工作目录。
+        raise ValueError("源文件夹不能为空；本次没有选择目录或发布成果")
+
+    selected_files = ()
+    if mode in ("list", "combined"):
+        jobs = tuple(enumerate(demand_physical_lines(list_text), 1))
+        matches = inspect_demand_rules(jobs, source_folder, Event())
+        ordered_matches = tuple(matches[number] for number, _ in jobs)
+        selection = build_demand_selection(ordered_matches)
+        if not selection.complete or selection.has_errors:
+            reasons = [
+                f"合并列表第 {number} 行：{match.issue}"
+                for number, match in zip(
+                    (number for number, _ in jobs), ordered_matches,
+                )
+                if match.issue
+            ]
+            raise ValueError(
+                "合并列表检查未通过，本次未发布成果。\n"
+                + "\n".join(reasons)
+            )
+        selected_files = selection.files
+        if mode == "list" and not selected_files:
+            raise ValueError("仅列表模式至少需要一条实际选中文件的启用规则")
+
     expected = observe_file(output_file, include_digest=True)
+    output_key = windows_path_key(expected.path)
+    if any(windows_path_key(path) == output_key for path in selected_files):
+        raise ValueError("合并列表选中了本次输出文件，不能合并")
+
     if log_func:
-        log_func("开始按目录合并")
-        log_func(f"源文件夹：{source_folder}")
+        log_func(f"开始合并：{mode}")
+        if mode in ("directory", "combined"):
+            log_func(f"源文件夹：{source_folder}")
         log_func(f"输出文件：{expected.path}")
-    plan = build_regular_merge_plan(source_folder, exclusions, expected.path)
+
+    plan = (
+        build_regular_merge_plan(source_folder, exclusions, expected.path)
+        if mode in ("directory", "combined") else []
+    )
+    positions = {
+        windows_path_key(entry["path"]): index
+        for index, entry in enumerate(plan)
+    }
+    for entry in build_demand_merge_plan(selected_files):
+        key = windows_path_key(entry["path"])
+        previous = positions.get(key)
+        if previous is not None:
+            # 明确包含优先于目录文件排除，不创建重复块或重复正文读取。
+            plan[previous]["merge_content"] = True
+        else:
+            positions[key] = len(plan)
+            plan.append(entry)
+
     result = write_merge_file(
         plan, expected, preamble_text, ending_text,
         code_header_line, code_footer_line, log_func,
         normalize_text_newlines=normalize_text_newlines,
         record_file_mtime=record_file_mtime,
         ignore_text=ignore_text, failure_text=failure_text,
-        output_rules=output_rules, match_root=source_folder,
-    )
-    _log_completed(result, "按目录合并", log_func)
-    return result
-
-
-def merge_demand_files(
-    file_paths, output_file, preamble_text, ending_text,
-    code_header_line, code_footer_line, log_func=None, *,
-    normalize_text_newlines=False, record_file_mtime=True,
-    ignore_text=MESSAGE_FILE_EXCLUDED, failure_text=MESSAGE_FILE_FAILED,
-    output_rules=None,
-):
-    expected = observe_file(output_file, include_digest=True)
-    if log_func:
-        log_func("开始按名单合并")
-        log_func(f"输出文件：{expected.path}")
-    result = write_merge_file(
-        build_demand_merge_plan(file_paths),
-        expected, preamble_text, ending_text,
-        code_header_line, code_footer_line, log_func,
-        normalize_text_newlines=normalize_text_newlines,
-        record_file_mtime=record_file_mtime,
-        ignore_text=ignore_text, failure_text=failure_text,
         output_rules=output_rules,
+        match_root=source_folder if mode in ("directory", "combined") else None,
     )
-    _log_completed(result, "按名单合并", log_func)
+    _log_completed(result, "合并", log_func)
     return result

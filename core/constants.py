@@ -99,6 +99,8 @@ MESSAGE_READ_ERROR = "*** 读取文件时发生错误"
 
 SKIPPED_LOG_FILENAME = "_RESTORE_SKIPPED_FILES_.log"
 
+MERGE_MODES = ("directory", "list", "combined")
+
 # --- 修改包执行器协议常量 ---
 
 PATCH_PROTOCOL_NAME = "ZIPATCH_V3"
@@ -164,8 +166,6 @@ TEXT_WRAP_DEFAULTS = {
     "merge.regular_preamble": True,
     "merge.regular_ending": True,
     "merge.demand_file_list": True,
-    "merge.demand_preamble": True,
-    "merge.demand_ending": True,
     "patch.patch_text": False,
     "patch.result_text": False,
     "patch.protocol_doc_text": True,
@@ -240,6 +240,7 @@ DEFAULT_CONFIG = {
         "force_overwrite": True,
     },
     "merge": {
+        "merge_mode": "directory",
         "source_folder": "",
         "output_folder": "",
         "output_filename": "merged_code.txt",
@@ -252,8 +253,6 @@ DEFAULT_CONFIG = {
         "open_after_done": True,
         "force_overwrite": True,
         "demand_file_list_text": "",
-        "demand_preamble_text": "",
-        "demand_ending_text": "",
         "normalize_text_newlines": False,
         "record_file_mtime": True,
         "ignore_text": MESSAGE_FILE_EXCLUDED,

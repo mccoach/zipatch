@@ -5,7 +5,7 @@
 import tkinter as tk
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
+
 from dataclasses import dataclass
 from threading import Event
 from time import monotonic
@@ -42,7 +42,7 @@ DEMAND_HIGHLIGHT_STYLES = (
     ("demand_disabled", "#555555", "#c6c6c6", "灰：主动停用"),
 )
 
-DEMAND_HELP = r"""按名单合并名单填写规则
+DEMAND_HELP = r"""合并列表填写规则
 
 一、每行选择一个文件或一组文件
 ────────────────────────────────────────
@@ -220,18 +220,42 @@ a**b
 颜色是最近一次检查的结果，不代表文件以后不会变化。
 
 
-九、保存与执行前核对
+九、保存与主页面合并
 ────────────────────────────────────────
-保存和收藏保留你填写的规则表达，
-不会把通配符改写为一长串具体文件路径。
-重复行和末尾空行会保留。
+本窗口只编辑合并列表，不执行文件合并，也不设置前言、后语。
+顶部说明、颜色图例、规则检查和检查记录仍保留。
 
-有红项时可以保存名单，留待以后修改，但不能执行。
+保存保留规则表达，不把通配符改写为具体文件清单。
+重复行、排版行和末尾空行都保留。
+有红项可以保存，留待以后修改；主页面合并时仍须完整检查通过。
+
+主页面只有一个“合并”按钮，通过单选模式确定来源：
+• 仅目录：只读取源文件夹，使用排除名单，不使用合并列表。
+• 仅列表：只选择合并列表文件，不使用排除名单。
+• 目录+列表：先选择目录文件，再补充列表文件。
+
+仅目录和目录+列表必须填写有效源文件夹；
+不会把空源文件夹当成程序当前工作目录。
+仅列表全部使用绝对路径时，可以不填写源文件夹；
+相对路径仍需要有效源文件夹作为基准。
+
+目录+列表按目录排序在前、列表顺序在后。
+同一路径只出现一次，保留首次位置。
+列表明确选中的目录排除文件提供真实正文；
+排除目录中的文件也可以通过列表明确补入。
+这不改变排除名单本身。
+
+所有模式的前言和后语统一来自主页面“附加文本”。
+本窗口保存不会开始合并、创建成果目录或发布成果文件。
+主页面执行时重新检查本次所需列表，不直接使用旧颜色作为执行资格。
+
 执行前请确认：
-• 没有红项。
-• 至少选中一个文件。
+• 所需列表没有红项。
+• 仅列表模式至少选中一个文件。
 • 文件清单及顺序符合预期。
-• 没有选中本次输出文件本身。
+• 没有选中本次输出文件。
+• 相对路径所需的源文件夹正确。
+• 目录+列表可以使用空列表，表示没有额外补充文件。
 """
 
 
@@ -260,7 +284,7 @@ def descendants(widget):
 def show_demand_help(parent):
 
     dialog = tk.Toplevel(parent)
-    dialog.title("按名单合并 - 填写规则")
+    dialog.title("合并列表 - 填写规则")
     dialog.configure(bg=THEME["bg"])
     dialog.transient(parent)
     take_modal_control(dialog)
@@ -311,7 +335,6 @@ class DemandDraftSession(TextDraftSession):
         self._poll_id = None
         self._writing_text = False
         self._final_values = None
-        self._final_parameters = None
         self._operation_scope = None
         self._final_check_finished = False
         self._locked_widgets = []
@@ -476,7 +499,7 @@ class DemandDraftSession(TextDraftSession):
                             self.finish_final(request.final_action, selection)
                         else:
                             self.status.set(
-                                "自动检查完成；保存和执行仍会完整重新检查"
+                                "自动检查完成；保存及主页面合并会重新检查所需列表"
                             )
                 finally:
                     if request.final_action and self.busy and not delivered:
@@ -618,7 +641,6 @@ class DemandDraftSession(TextDraftSession):
                 scope, self._operation_scope = self._operation_scope, None
                 scope.__exit__(None, None, None)
             self._final_values = None
-            self._final_parameters = None
             self._final_check_finished = False
 
     def cancel_final(self):
@@ -635,44 +657,19 @@ class DemandDraftSession(TextDraftSession):
         return True
 
     def start_final(self, action):
-        if action not in ("save", "execute", "close"):
-            raise ValueError(f"未知按名单合并操作：{action}")
+        if action not in ("save", "close"):
+            raise ValueError(f"未知合并列表保存操作：{action}")
         if self._destroyed or self.busy or self.commits.operation_depth:
             return False
-        fields = (
-            {
-                "source_folder", "output_folder", "output_filename",
-                "code_header_line", "code_footer_line",
-            }
-            if action == "execute" else {"source_folder"}
-        )
-        editors = self.commits.select("merge", fields)
+        editors = self.commits.select("merge", {"source_folder"})
         self.commits.accept_editors(editors)
         if any(editor.dirty for editor in editors):
-            self.status.set("主面板参数尚未有效接受，请修正后再继续")
+            self.status.set("源文件夹尚未有效接受，请修正后再继续")
             return False
         self.on_source_accepted()
         values = self.values()
         self.reconcile(values["demand_file_list_text"])
         self._final_values = values
-        self._final_parameters = {
-            field: deepcopy(self.panel.cfg[field])
-            for field in (
-                "source_folder", "output_folder", "output_filename",
-                "code_header_line", "code_footer_line",
-                "force_overwrite", "open_after_done",
-                "normalize_text_newlines", "record_file_mtime",
-                "ignore_text", "failure_text",
-            )
-        }
-        self._final_parameters["output_rules"] = (
-            self.commits.prepare_rule(
-                self.commits.manager.config_data["settings"],
-                "crlf_file_list", "file",
-            )
-            if action == "execute"
-            and self._final_parameters["normalize_text_newlines"] else None
-        )
         self._final_check_finished = False
         self._operation_scope = self.commits.operation()
         self._operation_scope.__enter__()
@@ -695,8 +692,8 @@ class DemandDraftSession(TextDraftSession):
                 monotonic(), action,
             )
             self.status.set(
-                "等待旧任务取消，随后进行完整最终检查"
-                if self.running is not None else "等待完整最终检查"
+                "等待旧任务取消，随后完整检查并保存列表"
+                if self.running is not None else "等待完整检查并保存列表"
             )
             prepared = True
             return True
@@ -710,32 +707,16 @@ class DemandDraftSession(TextDraftSession):
             if self.cancel_button is not None:
                 self.cancel_button.configure(state="disabled")
             values = dict(self._final_values)
-            parameters = dict(self._final_parameters)
             values["demand_file_list_text"] = clean_rule_quotes(
-                values["demand_file_list_text"]
+                values["demand_file_list_text"],
             )
             if not selection.complete:
-                self.status.set("最终检查未完整完成，未保存、未执行")
+                self.status.set("最终检查未完整完成，列表未保存")
                 return
-            if action == "execute":
-                if selection.has_errors:
-                    self.status.set("存在红色规则，未执行；可以修改或保存草稿")
-                    safe_show_error(
-                        "名单需要修正",
-                        "存在选择错误，请查看当前行号诊断。整份名单未执行。",
-                        self.dialog,
-                    )
-                    return
-                if not selection.files:
-                    self.status.set("没有可合并文件，未执行")
-                    safe_show_error(
-                        "名单为空", "请至少启用一条实际选中文件的规则。",
-                        self.dialog,
-                    )
-                    return
-
+            # 与排除名单一样，本窗口只接受配置。
+            # 文件选择错误允许保存草稿，执行时由唯一合并入口重新检查。
             if not super().accept(values):
-                self.status.set("保存失败，草稿仍保留在窗口")
+                self.status.set("保存失败，列表草稿仍保留在窗口")
                 return
             self._writing_text = True
             try:
@@ -749,32 +730,23 @@ class DemandDraftSession(TextDraftSession):
                 self.rule_text.edit_modified(False)
                 for rule in self.rules:
                     rule.raw = clean_rule_quotes(rule.raw)
-                # 正文整体替换会移除标签；清洗不改变选择语义，
-                # 使用本次已完成的匹配结果重建展示，不重新访问文件系统。
                 self.render()
             finally:
                 self._writing_text = False
 
             self.status.set(
-                "已保存；仍存在选择错误，暂不能执行"
-                if selection.has_errors else "已保存规则表达"
+                "列表已保存；仍有选择错误，使用列表合并前需要修正"
+                if selection.has_errors else
+                "合并列表已保存；请在主页面选择模式并点击合并"
             )
             if selection.has_errors:
                 safe_show_info(
-                    "名单已保存",
-                    "规则表达已保存，但仍有红色选择错误，暂不能执行。",
+                    "合并列表已保存",
+                    "规则表达已保存，但仍有红色选择错误。\n"
+                    "使用列表的合并模式执行前需要修正。",
                     self.dialog,
                 )
-            if action == "execute":
-                completed = self.panel.execute_demand_merge(
-                    parameters, values, selection.files, self.dialog,
-                )
-                if completed:
-                    self.release_final()
-                    self.destroy()
-                else:
-                    self.status.set("按名单合并未完成；规则已保存，未宣称执行成功")
-            elif action == "close":
+            if action == "close":
                 self.release_final()
                 self.destroy()
         finally:
@@ -796,7 +768,7 @@ class DemandDraftSession(TextDraftSession):
                 return True
             with self.commits.operation():
                 choice = messagebox.askyesnocancel(
-                    "内容已修改", "是否完整检查后保存当前规则和附加文本？",
+                    "内容已修改", "是否完整检查后保存当前合并列表？",
                     parent=self.dialog,
                 )
             if choice is None:
@@ -848,7 +820,7 @@ class DemandDraftSession(TextDraftSession):
 
 def open_demand_editor(panel):
     dialog = tk.Toplevel(panel.root)
-    dialog.title("按名单合并")
+    dialog.title("合并列表")
     dialog.configure(bg=THEME["bg"])
     dialog.transient(panel.root)
     take_modal_control(dialog)
@@ -897,25 +869,26 @@ def open_demand_editor(panel):
     right = styled_frame(body)
     left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
     right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-    widgets = {}
-    for field, label, parent, favorite, wrap_key, height in (
-        ("demand_file_list_text", "文件选择规则", left, "demand_file_list", "merge.demand_file_list", 21),
-        ("demand_preamble_text", "前言文本", right, "demand_preamble", "merge.demand_preamble", 8),
-        ("demand_ending_text", "后语文本", right, "demand_ending", "merge.demand_ending", 8),
-    ):
-        widgets[field] = create_managed_text_box(
-            parent, label, panel.cfg[field], height=height,
-            mono=parent is left, commits=panel.commits,
-            favorite_key=favorite, wrap_config_key=wrap_key,
-            preserve_trailing_newlines=field == "demand_file_list_text",
-        )
+    widgets = {
+        "demand_file_list_text": create_managed_text_box(
+            left, "合并列表", panel.cfg["demand_file_list_text"],
+            height=30, mono=True, commits=panel.commits,
+            favorite_key="demand_file_list",
+            wrap_config_key="merge.demand_file_list",
+            preserve_trailing_newlines=True,
+        ),
+    }
+    tk.Label(
+        right, text="名单检查记录", anchor="w",
+        bg=THEME["bg"], fg=THEME["fg_label"], font=THEME["font_main"],
+    ).pack(fill="x", pady=(8, 2))
     frame, result_text = styled_text_with_scrollbars(
-        left, height=11, mono=True, wrap="none", readonly=True,
+        right, height=30, mono=True, wrap="none", readonly=True,
     )
-    frame.pack(fill="both", expand=True, pady=(8, 0))
+    frame.pack(fill="both", expand=True)
     status = tk.StringVar(master=dialog, value="待检查")
     session = DemandDraftSession(panel, dialog, widgets, result_text, status)
-    history_buttons = styled_frame(left)
+    history_buttons = styled_frame(right)
     history_buttons.pack(fill="x", pady=(4, 0))
     styled_button(
         history_buttons, "清空检查记录",
@@ -931,10 +904,7 @@ def open_demand_editor(panel):
     styled_button(bottom, "关闭", session.close, width=8).pack(
         side="right", padx=(8, 0),
     )
-    styled_button(
-        bottom, "执行按名单合并", lambda: session.start_final("execute"),
-        width=14, accent=True,
-    ).pack(side="right", padx=(8, 0))
+
     styled_button(
         bottom, "保存", session.save_and_close, width=8,
     ).pack(side="right")

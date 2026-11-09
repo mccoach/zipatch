@@ -463,7 +463,7 @@ class ConfigSaveManager:
 
         output_fields = {
             "code_header_line", "code_footer_line", "ignore_text", "failure_text",
-            "normalize_text_newlines", "record_file_mtime",
+            "normalize_text_newlines", "record_file_mtime", "merge_mode",
         }
         if output_fields.intersection(values):
             for section_name in ("merge", "restore"):
