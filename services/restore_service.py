@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""拆分的完整准备、固定跳过、一次确认及共享version 3执行。
+"""拆分的完整准备、固定跳过、一次确认及共享version 4保护。
 
 路径解释、占位分类和正文编码归本业务。
 观察、必要目录、完整成果、发布和正式保护直接消费共享核心。
@@ -201,7 +201,7 @@ class RestoreExecutionError(OSError):
             "工作目标、保护材料、恢复清单和辅助日志分别判断。",
             "没有名称替换不代表没有原地改变；unknown不认证正文完成。",
             "前序文件和已创建目录不自动撤销；旧任务永久失效。",
-            "只有严格预检通过的version 3清单及引用材料提供恢复依据。",
+            "只有严格预检通过的version 4清单及引用材料提供恢复依据。",
             "不自动重试、回滚、删除正式材料或重新拆分。",
             str(result.error),
         ))
@@ -501,6 +501,7 @@ class RestoreTask:
             task_id = plan.backup_root.name.rsplit("_", 1)[-1]
             self.protection = RecoveryProtectionSession(
                 plan.projection, plan.backup_root, task_id, "split",
+                material_base=plan.base if plan.mode == "directory" else None,
             )
         elif plan.backup_enabled and plan.files:
             raise ValueError("开启备份的待写拆分计划缺少固定任务目录")

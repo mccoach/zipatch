@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""严格version 3正式恢复：决定、确认及唯一整任务核心消费。"""
+"""严格version 4正式恢复：决定、确认及唯一整任务核心消费。"""
 
 import sys
 import uuid
@@ -350,7 +350,9 @@ class BackupRestoreExecutor:
     def format_preview(self):
         summary = self.risk_summary
         lines = [
-            "【严格version 3备份还原预演】",
+            "【严格version 4备份还原预演】",
+            "材料保留原文件名和目录结构；按清单material位置读取，"
+            "恢复目标仍使用清单target绝对位置。",
             f"业务定位根／相对备份基准：{self.root}",
             "恢复目标直接使用清单绝对位置，不映射到上述目录。",
             f"备份来源：{self.source}",

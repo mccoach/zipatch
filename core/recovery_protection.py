@@ -4,7 +4,7 @@
 
 不解析OP、不决定用户选择、不执行工作改变。
 任务位置由所属业务固定；内部创建只消费固定不存在链。
-正式消费者在R4集中迁移，不调用旧version 2能力。
+正式材料保留原名和目录关系；只读取version 4，不兼容旧布局。
 """
 
 import sys
@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 
+from core.backup_material_layout import build_backup_material_paths
 from core.content_publication import (
     ContentPublicationError,
     ContentPublicationOptions,
@@ -217,7 +218,7 @@ class RecoveryProtectionSession:
 
     def __init__(
         self, projection, task_root, task_id, task_kind, *,
-        durable_publication=True,
+        durable_publication=True, material_base=None,
     ):
         if not isinstance(projection, ProtectionProjection):
             raise TypeError("保护协调必须消费唯一ProtectionProjection")
@@ -251,6 +252,23 @@ class RecoveryProtectionSession:
         self._objects = {
             member.object_id: member for member in projection.objects
         }
+        self.material_paths = build_backup_material_paths(
+            projection, base=material_base,
+        )
+        # 全部位置在首个材料准备之前固定；逐单元保护不改变布局。
+        self._material_expected = {
+            member.object_id: observe_file(
+                task_root / "files" / self.material_paths[member.object_id],
+            )
+            for member in projection.objects
+            if member.original_type != "absent"
+        }
+        if any(
+            expected.kind != "absent"
+            for expected in self._material_expected.values()
+        ):
+            raise ValueError("本任务材料位置必须固定为不存在")
+        self._material_directories = {}
         self._units = {
             member.unit_id: member for member in projection.units
         }
@@ -364,6 +382,36 @@ class RecoveryProtectionSession:
             self._create_directory(self._files_expected, "编号材料目录")
             self._files_created = True
 
+    def _ensure_material_parents(self, expected):
+        """只创建预演固定的材料父目录，正常创建结果复用一次。"""
+        self._ensure_files_directory()
+        root = self.task_root / "files"
+        for path, kind in expected.chain[:-1]:
+            if identity(path) == identity(root) or not contains(root, path):
+                continue
+            if kind != "absent":
+                raise ValueError("新任务材料父目录没有固定不存在前提")
+            key = identity(path)
+            created = self._material_directories.get(key)
+            if created is not None:
+                target, chain = checked_chain(path, include_observation=True)
+                if chain[-1][1] != "directory":
+                    raise ValueError("已创建材料父目录存在性或类型变化")
+                attributes = target.lstat()
+                if (
+                    ObjectIdentity(attributes.st_dev, attributes.st_ino)
+                    != created.object_identity
+                ):
+                    raise ValueError("已创建材料父目录身份变化")
+                continue
+            self._create_directory(
+                _absent_from_chain(expected, path), "材料路径目录",
+            )
+            receipt = self._directory_results[-1]
+            if not receipt.succeeded or receipt.created_directory is None:
+                raise RuntimeError("正常材料目录创建缺少正式对象结果")
+            self._material_directories[key] = receipt.created_directory
+
     def _check_materials(self):
         for observed in self._material_observations.values():
             self._stage("已发布编号材料", observed.path, "正式引用材料复核")
@@ -469,13 +517,13 @@ class RecoveryProtectionSession:
                         continue
                     if number in self._material_results:
                         continue
-                    self._ensure_files_directory()
+                    expected = self._material_expected[number]
+                    self._ensure_material_parents(expected)
                     self._stage(
-                        "编号材料", member.target, "固定最初来源材料准备",
+                        "原名材料", member.target, "固定最初来源材料准备",
                     )
                     material = prepare_internal_material(
-                        source,
-                        observe_file(self.task_root / "files" / number),
+                        source, expected,
                         durable_publication=self.durable_publication,
                     )
                     self._active_material = material

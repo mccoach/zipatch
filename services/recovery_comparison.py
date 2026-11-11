@@ -234,7 +234,7 @@ _CHANGE_LABELS = {
 
 
 def format_execution_fact(identifier, state, changes):
-    """消费严格version 3事实的只读展示，不读取、校验或授权工作。
+    """消费严格version 4事实的只读展示，不读取、校验或授权工作。
 
     changes来自已严格校验文档或其直接派生索引。
     步骤完成、正文确认和必要确认分别展示，不重新推导成功。

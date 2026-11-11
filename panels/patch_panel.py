@@ -91,7 +91,7 @@ class PatchPanel(BasePanel):
             ),
             open_command=lambda: open_restore_source(self),
             tooltip_text=(
-                "填写完整绝对任务目录；仅支持严格version 3 recovery.json。"
+                "填写完整绝对任务目录；仅支持严格version 4 recovery.json。"
                 "恢复目标使用清单记录的绝对位置，不使用项目根目录。"
                 "旧格式不转换或兼容读取，不删除备份材料。"
             ),
@@ -122,7 +122,7 @@ class PatchPanel(BasePanel):
             ("allow_delete", "允许删除文件/文件夹（危险）", "allow_delete_check", "允许修改包中的删除操作；仍保留路径校验和执行确认。"),
             ("allow_multi_replace_exact", "允许多处精确替换", "allow_multi_replace_check", "允许按修改包声明替换多处完全相同文本。"),
             ("normalize_text_newlines", "标准化文本换行", "normalize_text_newlines_check", "默认打开：按本次固定名单转换为 LF 或 CRLF，不裁剪空白、不补末尾换行。关闭：保留最终正文中的 CRLF、LF 和单独 CR，不校验换行名单。仅影响修改包文本写入，不影响复制、移动或备份恢复。"),
-            ("backup_enabled", "自动备份", "backup_enabled_check", "勾选：每个实际执行单元改变文件前，先将必要的操作前原状态和严格version 3恢复依据保存到本次备份任务目录。覆盖保存旧文件原字节及修改时间，删除保存必要原对象，新增记录原先不存在；对应保护失败时不开始该单元的文件修改。不勾选：不保存这份旧状态，覆盖或删除的内容可能无法找回。两种选择都保留执行确认、路径及必要前提检查；失败不自动回滚，可用已生成的完整任务目录手动备份还原。本选项不控制恢复模式的“还原前保护”或拆分自动备份，也不取消硬链接写入必须准备的新成果应急文件。"),
+            ("backup_enabled", "自动备份", "backup_enabled_check", "勾选：每个实际执行单元改变文件前，先将必要的操作前原状态和严格version 4恢复依据保存到本次备份任务目录。材料保留原文件名和项目相对目录，可直接手工取用。覆盖保存旧文件原字节及修改时间，删除保存必要原对象，新增记录原先不存在；对应保护失败时不开始该单元的文件修改。不勾选：不保存这份旧状态，覆盖或删除的内容可能无法找回。两种选择都保留执行确认、路径及必要前提检查；失败不自动回滚，可用已生成的完整任务目录手动备份还原。本选项不控制恢复模式的“还原前保护”或拆分自动备份，也不取消硬链接写入必须准备的新成果应急文件。"),
             ("restore_backup_enabled", "还原前保护", "restore_backup_enabled_check", "只保护本次恢复最终实际改变的当前状态；全部必要保护成功后才开始恢复。"),
             ("keep_restore_source_path", "保留备份来源路径", "keep_restore_source_path_check", "不勾选时，仅在还原成功后清空来源，不删除备份文件。"),
             ("open_backup_after_done", "完成后打开本次备份", "open_backup_after_done_check", "修改时打开本次修改备份；恢复时打开本次还原前保护任务。没有生成则不自动打开来源或历史目录。"),

@@ -70,6 +70,9 @@ def format_split_preview(plan):
             "自动备份已开启：每个动作必要原状态及started依据"
             "保存成功之后，才开始该动作工作。",
             f"绝对备份目录：{plan.backup_dir}",
+            "恢复依据使用严格version 4；材料保留原名及目录结构。",
+            "指定目录模式以指定目录为基准；原位模式按盘符分组，"
+            "各组去掉共同父目录，不压平不同位置的同名文件。",
             "必要保护对象：",
         ))
         lines.extend(
@@ -252,7 +255,7 @@ class RestorePanel(BasePanel):
             ),
             open_command=lambda: open_restore_source(self),
             tooltip_text=(
-                "填写完整绝对任务目录；仅支持严格version 3 recovery.json。"
+                "填写完整绝对任务目录；仅支持严格version 4 recovery.json。"
                 "可以恢复修改包、拆分或还原前保护产生的材料。"
                 "恢复目标使用清单绝对位置，不使用拆分指定目录。"
             ),
@@ -687,7 +690,7 @@ class RestorePanel(BasePanel):
         if result.backup_root:
             message += (
                 f"\n本次备份目录：\n{result.backup_root}"
-                "\n严格version 3材料；请保留完整任务目录。"
+                "\n严格version 4材料，保留原名及目录结构；请保留完整任务目录。"
                 "\n可在本页“备份还原”或修改包页面预检和恢复。"
             )
         elif result.backup_enabled:

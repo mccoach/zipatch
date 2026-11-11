@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""修改包完整准备、13类OP共享执行及严格version 3事实。
+"""修改包完整准备、13类OP共享执行及严格version 4恢复事实。
 
 正文复用已有定位和组合；观察、保护及文件系统变更
 直接消费正式核心。固定机制、一次资格、失败停止。
@@ -479,6 +479,7 @@ class PatchExecutor:
                         )
                         self.protection = RecoveryProtectionSession(
                             self.projection, self.backup_root, task_id, "patch",
+                            material_base=self.root,
                         )
                     for action in self.plan.actions:
                         for observed in action.expectations:
@@ -510,7 +511,9 @@ class PatchExecutor:
                 "全部替换一次组合，全部追加按声明顺序连接。"
                 "\n非连续成员在首次OP位置共同发布，不产生逐成员中间成果。"
                 "\n全部正文在预演阶段组合、转换和编码；执行只复核、保护及发布。"
-                "\n正式保护及工作事实使用严格version 3。"
+                "\n正式保护及工作事实使用严格version 4。"
+                "\n备份材料保留原文件名及项目相对目录；"
+                "清单分别记录绝对目标和材料相对位置。"
                 "\n名称机制准备时固定；原生报错停止，不切换复制删除。"
                 "\n正文确认、工作完成、保护和辅助输出分别表达。"
                 "\n这些检查不是文件锁；失败停止，不自动重试或回滚。"
@@ -907,7 +910,7 @@ class PatchExecutor:
             "正文确认不等于整体工作正常完成；没有替换不代表没有原地改变。",
             "unknown不认证正文；前序真实步骤不自动撤销。",
             "旧任务永久失效，不自动重试、回滚或删除正式材料。",
-            "可通过严格version 3正式恢复入口预检和恢复；"
+            "可通过严格version 4正式恢复入口预检和恢复；"
             "当前开发候选仍须完成必要验证，不直接用于真实项目业务。",
             str(error),
         ))

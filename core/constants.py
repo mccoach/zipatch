@@ -218,7 +218,7 @@ THEME = {
 DEFAULT_CONFIG = {
     "active_mode": "merge",
     "settings": {
-        "entry_history_max_items": 10,
+        "entry_history_max_items": 20,
         "crlf_file_list": "*.bat\n*.CMD",
     },
     "entry_history": {},

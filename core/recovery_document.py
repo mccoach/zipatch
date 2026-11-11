@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""最终version 3严格结构、编码及实际步骤事实投影。
+"""最终version 4严格结构、直观材料位置及实际步骤事实投影。
 
 不读取旧版本，不查询磁盘，不发布依据或执行恢复。
 结构校验不是文件系统执行证明；完成仍须由所属协调
@@ -20,13 +20,13 @@ from core.internal_materials import InternalMaterialResult
 from core.name_moves import NativeNameMoveResult
 from core.protection_projection import (
     ContentState, ProtectionProjection, validate_absolute_path,
-    validate_content_state,
+    validate_content_state, validate_relative_position,
 )
 from core.recovery_paths import contains, identity, overlaps
 
 
 FORMAT = "ZIPATCH_RECOVERY"
-VERSION = 3
+VERSION = 4
 _OBJECT_ID = re.compile(r"o[0-9]{6,}")
 _UNIT_ID = re.compile(r"u[0-9]{6,}")
 _FACT_STATES = frozenset(("prepared", "started", "completed", "uncertain"))
@@ -375,7 +375,7 @@ def validate_document(value):
         or type(value["version"]) is not int
         or value["version"] != VERSION
     ):
-        raise ValueError("只支持严格version 3；旧格式不转换或适配")
+        raise ValueError("只支持严格version 4；旧格式不转换或适配")
     if (
         type(value["task_id"]) is not str or not value["task_id"]
         or type(value["task_kind"]) is not str
@@ -387,6 +387,7 @@ def validate_document(value):
 
     objects = {}
     roots = []
+    material_positions = []
     for member in value["objects"]:
         _fields(member, (
             "id", "target", "original", "material", "file_times",
@@ -402,10 +403,23 @@ def validate_document(value):
             raise ValueError("原状态对象重复或父子重叠")
         roots.append(target)
         _validate_state(member["original"])
-        if member["material"] != (
-            None if member["original"]["kind"] == "absent" else number
-        ):
-            raise ValueError("原材料必须由对象编号唯一定位")
+        material = member["material"]
+        if member["original"]["kind"] == "absent":
+            if material is not None:
+                raise ValueError("原不存在对象不得携带材料位置")
+        else:
+            if type(material) is not str or not material:
+                raise ValueError("既有原对象必须具有非空材料相对位置")
+            validate_relative_position(material)
+            key = material.casefold()
+            if any(
+                key == previous
+                or key.startswith(previous + "/")
+                or previous.startswith(key + "/")
+                for previous in material_positions
+            ):
+                raise ValueError("材料位置重复或父子重叠")
+            material_positions.append(key)
         times = member["file_times"]
         if type(times) is not list or any(
             type(record) is not list or len(record) != 2
@@ -555,9 +569,11 @@ def build_document(
     if set(material_results) != required:
         raise ValueError("材料结果必须准确覆盖本次已保护既有对象")
     entries = []
+    material_root = task / "files"
     for member in objects:
         if overlaps(member.target, task):
             raise ValueError("任务材料与工作原对象重叠")
+        material = None
         if member.original_type != "absent":
             receipt = material_results[member.object_id]
             if not isinstance(receipt, InternalMaterialResult):
@@ -565,14 +581,17 @@ def build_document(
             if (
                 not receipt.succeeded
                 or identity(receipt.source) != identity(member.target)
-                or identity(receipt.target) != identity(task / "files" / member.object_id)
+                or not contains(material_root, receipt.target)
+                or identity(receipt.target) == identity(material_root)
                 or receipt.kind != member.original_type
             ):
-                raise ValueError("材料未正常完成或不对应固定对象及编号")
+                raise ValueError("材料未正常完成或不对应固定原对象及材料范围")
+            material = receipt.target.relative_to(material_root).as_posix()
+            validate_relative_position(material)
         entries.append({
             "id": member.object_id, "target": str(member.target),
             "original": _state_value(member.original),
-            "material": None if member.original_type == "absent" else member.object_id,
+            "material": material,
             "file_times": _plain(member.file_times),
         })
     value = {
