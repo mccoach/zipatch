@@ -166,6 +166,7 @@ TEXT_WRAP_DEFAULTS = {
     "merge.regular_preamble": True,
     "merge.regular_ending": True,
     "merge.demand_file_list": True,
+    "merge.demand_check_history": False,
     "patch.patch_text": False,
     "patch.result_text": False,
     "patch.protocol_doc_text": True,

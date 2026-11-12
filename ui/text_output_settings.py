@@ -213,8 +213,9 @@ def edit_output_format_settings(parent, commits, config, page):
         text=f"当前只编辑“{page_title}”，不会修改另一个功能页。\n"
              "开始／结束标记必须非空、单行且不同；双占位可以多行，"
              "非空且不能换行等价。首尾空白保留。\n"
-             "自动换行只改变显示；清空、导入和收藏回填只改变草稿，"
-             "四项点击保存后联合生效。收藏管理独立保存。",
+             "自动换行只改变显示；清空、导入和收藏回填只改变草稿。"
+             "应用：四项联合保存但不关闭；保存：成功后关闭；"
+             "取消：放弃未应用的修改并关闭。收藏管理独立保存。",
         bg=THEME["bg"], fg=THEME["fg_label"],
         font=THEME["font_main"],
         justify="left", anchor="w", wraplength=950,
@@ -253,12 +254,13 @@ def edit_output_format_settings(parent, commits, config, page):
         )
 
     session = OutputFormatDraftSession(dialog, commits, config, widgets, page)
-    styled_button(row, "取消", session.close, width=10).pack(
+    styled_button(row, "取消", session.cancel, width=10).pack(
         side="right", padx=(8, 0),
     )
     styled_button(
         row, "保存", session.save_and_close, width=10, accent=True,
-    ).pack(side="right")
+    ).pack(side="right", padx=(8, 0))
+    styled_button(row, "应用", session.apply, width=10).pack(side="right")
     register_popup(dialog, session.close, prepare_close=session.prepare_close)
     parent.wait_window(dialog)
     return session.saved and not getattr(parent._root(), "_zipatch_closed", False)

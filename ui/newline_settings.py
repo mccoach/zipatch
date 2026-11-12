@@ -113,8 +113,11 @@ Ctrl+` 逐行切换行首一个 |；无选区处理光标行，有选区各行�
 
 六、保存和收藏
 编辑、查找替换、撤销重做、清空和失焦只改变草稿。
-明确保存时整理正文并校验；看到正文整理不代表保存成功。
-保存失败保留窗口和草稿，可以重试或选择放弃。
+应用和保存都会整理正文并校验；看到正文整理不代表保存成功。
+应用：保存成功后保持窗口打开。
+保存：保存成功后关闭；失败保留窗口和草稿。
+取消：放弃尚未应用的修改并关闭，不撤销已经成功应用的设置。
+标题关闭和 Esc 仍会在存在未保存变化时询问是否保存。
 空名单可以保存，空正文不能添加为收藏。
 
 收藏保存校验当前收藏正文，不提交未保存的业务名单。
@@ -246,8 +249,13 @@ def edit_newline_settings(parent, commits):
         row, textvariable=status, bg=THEME["bg"], fg=THEME["fg_dim"],
         font=THEME["font_main"], anchor="w",
     ).pack(side="left", fill="x", expand=True)
-    styled_button(row, "取消", session.close, width=10).pack(side="right", padx=(8, 0))
-    styled_button(row, "保存", session.save_and_close, width=10, accent=True).pack(side="right")
+    styled_button(row, "取消", session.cancel, width=10).pack(
+        side="right", padx=(8, 0),
+    )
+    styled_button(row, "保存", session.save_and_close, width=10, accent=True).pack(
+        side="right", padx=(8, 0),
+    )
+    styled_button(row, "应用", session.apply, width=10).pack(side="right")
     register_popup(dialog, session.close, prepare_close=session.prepare_close)
     parent.wait_window(dialog)
     return session.saved and not getattr(parent._root(), "_zipatch_closed", False)

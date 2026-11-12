@@ -170,7 +170,7 @@ class PatchPanel(BasePanel):
         self.newline_settings_button.pack(side="left", padx=(8, 0))
         self.apply_button = styled_button(row, "预演并执行", self.apply, width=12, danger=True)
         self.apply_button.pack(side="right", padx=(8, 0))
-        self.preview_button = styled_button(row, "Dry Run 预演", self.preview, width=14, accent=True)
+        self.preview_button = styled_button(row, "仅预演", self.preview, width=14, accent=True)
         self.preview_button.pack(side="right")
         styled_button(row, "修改包协议规范", self.show_protocol_doc, width=16).pack(
             side="right", padx=(0, 8),
@@ -207,7 +207,7 @@ class PatchPanel(BasePanel):
             if visible:
                 widget.pack(side="left", padx=(0, 6))
         self.mode_hint.configure(text="当前为备份还原模式，请谨慎操作" if restore else "")
-        self.preview_button.configure(text="预演还原" if restore else "Dry Run 预演")
+        self.preview_button.configure(text="仅预演")
         color = THEME["danger"] if restore else THEME["warning"]
         self.apply_button.configure(
             text="预演并还原" if restore else "预演并执行",

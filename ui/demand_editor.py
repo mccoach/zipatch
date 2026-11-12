@@ -225,9 +225,17 @@ a**b
 本窗口只编辑合并列表，不执行文件合并，也不设置前言、后语。
 顶部说明、颜色图例、规则检查和检查记录仍保留。
 
-保存保留规则表达，不把通配符改写为具体文件清单。
-重复行、排版行和末尾空行都保留。
+应用和保存都会完整检查当前名单并保存规则表达，
+不把通配符改写为具体文件清单；重复行、排版行和末尾空行都保留。
+应用：保存成功后保持窗口打开，可以继续编辑。
+保存：保存成功后关闭；检查或保存未完成时保留窗口和草稿。
+取消：放弃尚未应用的修改并关闭，不撤销此前成功应用的设置。
+检查期间取消会关闭窗口并停止后台检查，不保存本次草稿。
+配置接受和保存期间不能提前关闭，避免留下半次提交。
+标题关闭和 Esc 在有未保存变化时仍询问是否保存。
 有红项可以保存，留待以后修改；主页面合并时仍须完整检查通过。
+右侧检查记录使用统一文本框：标题栏清空、自动换行，Ctrl+F 查找。
+清空只删除显示记录，不改变名单、当前检查结果或已保存设置。
 
 主页面只有一个“合并”按钮，通过单选模式确定来源：
 • 仅目录：只读取源文件夹，使用排除名单，不使用合并列表。
@@ -606,14 +614,6 @@ class DemandDraftSession(TextDraftSession):
             self.result_text.see("end")
         return selection
 
-    def clear_check_history(self):
-        """仅主动清空显示历史，不改变规则、匹配和业务配置。"""
-        if self._destroyed or self.busy or self.commits.operation_depth:
-            return False
-        self.result_text.configure(state="normal")
-        self.result_text.delete("1.0", "end")
-        self.result_text.configure(state="disabled")
-        return True
 
     def lock_inputs(self):
         candidates = list(descendants(self.dialog)) + list(descendants(self.panel))
@@ -634,7 +634,7 @@ class DemandDraftSession(TextDraftSession):
                 if widget.winfo_exists():
                     widget.configure(state=previous)
             if self.cancel_button is not None and self.cancel_button.winfo_exists():
-                self.cancel_button.configure(state="disabled")
+                self.cancel_button.configure(state="normal")
         finally:
             self._locked_widgets.clear()
             if self._operation_scope is not None:
@@ -643,21 +643,27 @@ class DemandDraftSession(TextDraftSession):
             self._final_values = None
             self._final_check_finished = False
 
-    def cancel_final(self):
-        # 取消只终止检查，不能在保存或成果执行阶段提前解除生命周期保护。
-        if not self.busy or self._final_check_finished:
+    def cancel(self):
+        """关闭草稿并撤销检查，不等待只访问文件系统的后台任务。
+
+        已进入配置接受或保存阶段时不能从嵌套事件循环提前销毁。
+        检查结果只由本窗口轮询消费；销毁会取消轮询及任务。
+        """
+        if self._destroyed:
+            return True
+        if self._close_in_progress or self._final_check_finished:
+            return False
+        if self.commits.operation_depth and not self.busy:
             return False
         self.pending = None
         self.cancel_running()
-        if self.running is None:
+        if self.busy:
             self.release_final()
-            self.status.set("最终检查已取消，未保存、未执行")
-        else:
-            self.status.set("取消中；等待任务退出，未保存、未执行")
+        self.destroy()
         return True
 
     def start_final(self, action):
-        if action not in ("save", "close"):
+        if action not in ("apply", "save"):
             raise ValueError(f"未知合并列表保存操作：{action}")
         if self._destroyed or self.busy or self.commits.operation_depth:
             return False
@@ -746,12 +752,15 @@ class DemandDraftSession(TextDraftSession):
                     "使用列表的合并模式执行前需要修正。",
                     self.dialog,
                 )
-            if action == "close":
+            if action == "save":
                 self.release_final()
                 self.destroy()
         finally:
             if self.busy:
                 self.release_final()
+
+    def apply(self):
+        return self.start_final("apply")
 
     def save_and_close(self):
         return self.start_final("save")
@@ -775,8 +784,8 @@ class DemandDraftSession(TextDraftSession):
                 return False
             if choice:
                 action = (
-                    "save" if getattr(self.dialog._root(), "_zipatch_closing", False)
-                    else "close"
+                    "apply" if getattr(self.dialog._root(), "_zipatch_closing", False)
+                    else "save"
                 )
                 self.start_final(action)
                 return False
@@ -824,7 +833,10 @@ def open_demand_editor(panel):
     dialog.configure(bg=THEME["bg"])
     dialog.transient(panel.root)
     take_modal_control(dialog)
-    center_window(dialog, 1180, 840)
+    # 屏幕边缘预留空间，避免标题栏及底部动作超出可见范围。
+    center_window(
+        dialog, 1180, min(700, dialog.winfo_screenheight() - 100),
+    )
 
     header = styled_frame(dialog)
     header.pack(fill="x", padx=16, pady=(12, 4))
@@ -860,6 +872,9 @@ def open_demand_editor(panel):
             font=THEME["font_main"],
         ).pack(side="left", padx=(0, 16))
 
+    # 先分配底部动作空间，正文区再消费剩余高度。
+    bottom = styled_frame(dialog)
+    bottom.pack(side="bottom", fill="x", padx=16, pady=(6, 14))
     body = styled_frame(dialog)
     body.pack(fill="both", expand=True, padx=16, pady=4)
     body.grid_columnconfigure(0, weight=1, uniform="demand_text_columns")
@@ -878,40 +893,25 @@ def open_demand_editor(panel):
             preserve_trailing_newlines=True,
         ),
     }
-    tk.Label(
-        right, text="名单检查记录", anchor="w",
-        bg=THEME["bg"], fg=THEME["fg_label"], font=THEME["font_main"],
-    ).pack(fill="x", pady=(8, 2))
-    frame, result_text = styled_text_with_scrollbars(
-        right, height=30, mono=True, wrap="none", readonly=True,
+    result_text = create_managed_text_box(
+        right, "名单检查记录", "", height=30, mono=True, readonly=True,
+        commits=panel.commits, enable_favorites=False, wrap="none",
+        wrap_config_key="merge.demand_check_history",
     )
-    frame.pack(fill="both", expand=True)
     status = tk.StringVar(master=dialog, value="待检查")
     session = DemandDraftSession(panel, dialog, widgets, result_text, status)
-    history_buttons = styled_frame(right)
-    history_buttons.pack(fill="x", pady=(4, 0))
-    styled_button(
-        history_buttons, "清空检查记录",
-        session.clear_check_history, width=12,
-    ).pack(side="right")
 
-    bottom = styled_frame(dialog)
-    bottom.pack(fill="x", padx=16, pady=(6, 14))
     tk.Label(
         bottom, textvariable=status, bg=THEME["bg"], fg=THEME["fg_dim"],
         font=THEME["font_main"], anchor="w", wraplength=750,
     ).pack(side="left", fill="x", expand=True)
-    styled_button(bottom, "关闭", session.close, width=8).pack(
-        side="right", padx=(8, 0),
-    )
-
-    styled_button(
-        bottom, "保存", session.save_and_close, width=8,
-    ).pack(side="right")
     session.cancel_button = styled_button(
-        bottom, "取消本次检查", session.cancel_final, width=12,
+        bottom, "取消", session.cancel, width=10,
     )
-    session.cancel_button.configure(state="disabled")
-    session.cancel_button.pack(side="right", padx=(0, 8))
+    session.cancel_button.pack(side="right", padx=(8, 0))
+    styled_button(
+        bottom, "保存", session.save_and_close, width=10, accent=True,
+    ).pack(side="right", padx=(8, 0))
+    styled_button(bottom, "应用", session.apply, width=10).pack(side="right")
     register_popup(dialog, session.close, prepare_close=session.prepare_close)
     return session

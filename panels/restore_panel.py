@@ -330,7 +330,7 @@ class RestorePanel(BasePanel):
         )
         self.apply_button.pack(side="right", padx=(8, 0))
         self.preview_button = styled_button(
-            self.buttons, "独立预演", self.preview, width=14, accent=True,
+            self.buttons, "仅预演", self.preview, width=14, accent=True,
         )
         self.preview_button.pack(side="right")
         self.refresh_mode_ui()
@@ -387,9 +387,7 @@ class RestorePanel(BasePanel):
         self.mode_hint.configure(
             text="当前为备份还原模式，请谨慎操作" if restore else "",
         )
-        self.preview_button.configure(
-            text="预演还原" if restore else "独立预演",
-        )
+        self.preview_button.configure(text="仅预演")
         color = THEME["danger"] if restore else THEME["warning"]
         self.apply_button.configure(
             text="预演并还原" if restore else "预演并执行",

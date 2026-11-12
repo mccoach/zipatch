@@ -213,7 +213,15 @@ class TextDraftSession:
         self.saved = True
         return True
 
+    def apply(self):
+        """接受当前草稿并保存，成功后继续留在窗口编辑。"""
+        return self._save(close_after=False)
+
     def save_and_close(self):
+        """只有本次保存成功后才关闭，失败继续保留草稿。"""
+        return self._save(close_after=True)
+
+    def _save(self, *, close_after):
         if self._destroyed:
             return True
         if self._close_in_progress or self.commits.operation_depth:
@@ -224,10 +232,20 @@ class TextDraftSession:
             with self.commits.operation():
                 if not self.accept(self.values()):
                     return False
-                self.destroy()
+                if close_after:
+                    self.destroy()
                 return True
         finally:
             self._close_in_progress = False
+
+    def cancel(self):
+        """放弃尚未接受的草稿并关闭；不撤销此前成功应用的设置。"""
+        if self._destroyed:
+            return True
+        if self._close_in_progress or self.commits.operation_depth:
+            return False
+        self.destroy()
+        return True
 
     def destroy(self):
         if self._destroyed:
@@ -290,10 +308,13 @@ def create_text_settings_dialog(parent, title, config, commits, definitions, wid
     session = TextDraftSession(dialog, commits, config, widgets)
     row = styled_frame(dialog)
     row.pack(fill="x", padx=16, pady=12)
-    styled_button(row, "取消", session.close, width=10).pack(side="right", padx=(6, 0))
-    styled_button(row, "保存", session.save_and_close, width=10, accent=True).pack(
-        side="right", padx=6,
+    styled_button(row, "取消", session.cancel, width=10).pack(
+        side="right", padx=(8, 0),
     )
+    styled_button(row, "保存", session.save_and_close, width=10, accent=True).pack(
+        side="right", padx=(8, 0),
+    )
+    styled_button(row, "应用", session.apply, width=10).pack(side="right")
     register_popup(dialog, session.close, prepare_close=session.prepare_close)
     parent.wait_window(dialog)
     # 程序整体退出不是设置窗口保存回调继续执行的边界。

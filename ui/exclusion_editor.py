@@ -328,6 +328,10 @@ cache 与 \cache、README* 与 :README*、
 双引号实时删除；保存时整理合法规则的斜杠，不删除排版。
 空白行也占据行号，请按当前实际物理行检查。
 
+应用：校验并保存两份名单，成功后保持窗口打开。
+保存：校验并保存两份名单，成功后关闭。
+取消：放弃尚未应用的修改并关闭，不撤销此前成功应用的设置。
+标题关闭和 Esc 在有未保存变化时仍询问是否保存。
 仅看到文字已整理，不代表保存成功；
 如提示保存失败，请重试，草稿仍保留在窗口。
 
@@ -513,12 +517,13 @@ def create_exclusion_dialog(parent, title, config, commits, page):
     # 先为按钮保留完整空间，提示只消费剩余宽度。
     actions = styled_frame(buttons)
     actions.pack(side="right", anchor="s", padx=(12, 0))
-    styled_button(actions, "取消", session.close, width=10).pack(
+    styled_button(actions, "取消", session.cancel, width=10).pack(
         side="right", padx=(8, 0),
     )
     styled_button(
         actions, "保存", session.save_and_close, width=10, accent=True,
-    ).pack(side="right")
+    ).pack(side="right", padx=(8, 0))
+    styled_button(actions, "应用", session.apply, width=10).pack(side="right")
 
     # width=1 避免长提示提出过大的横向尺寸请求；
     # 实际宽度由剩余空间决定，窗口缩放时同步调整换行宽度。
