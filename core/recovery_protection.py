@@ -58,9 +58,10 @@ class RecoveryEvidence:
     """严格读取后的固定来源；材料时间不是正式原时间权威。"""
 
     task_root: Path
-    manifest: FileObservation
+    manifest: FileObservation | None
     document: RecoveryDocument
     materials: object
+    completion: FileObservation | None = None
 
 
 class ProtectionPublicationError(OSError):
@@ -178,6 +179,20 @@ def read_recovery_evidence(task_root, *, forbidden_roots=()):
     if manifest.kind != "file":
         raise ValueError("缺少正式recovery.json；不读取旧manifest")
     document = decode_document(manifest.source_bytes)
+    completion = observe_file(
+        task / "backup.complete", include_bytes=True, include_digest=True,
+    )
+    if (
+        completion.kind != "file"
+        or completion.link_count != 1
+        or completion.source_bytes
+        != (document.value["task_id"] + "\n").encode("utf-8")
+    ):
+        raise ValueError(
+            "备份缺少有效的全量完成凭据 backup.complete，禁止恢复。\n"
+            "清单存在或结构正确不能证明全部备份屏障成功；"
+            "不完整残留及未提供完成凭据的旧任务均不作为正式恢复依据。"
+        )
     _check_evidence_isolation(task, document, tuple(forbidden_roots))
     materials = {}
     for entry in document.value["objects"]:
@@ -187,10 +202,39 @@ def read_recovery_evidence(task_root, *, forbidden_roots=()):
                 entry["original"], include_bytes=True,
             )
     evidence = RecoveryEvidence(
-        task, manifest, document, MappingProxyType(materials),
+        task, manifest, document, MappingProxyType(materials), completion,
     )
     # 晚材料获取可能跨越早材料变化；新边界复核只比较，
     # 后续工作仍消费第一次获取的完整bytes。
+    recheck_recovery_evidence(evidence)
+    return evidence
+
+
+def read_protection_evidence(session):
+    """回滚使用本任务已确认完整文档和磁盘原材料。
+
+    执行事实清单发布可能是原失败原因，因此不重新读取该清单；
+    不使用未发布候选，不回退旧格式或重新解释原OP。
+    """
+    if not isinstance(session, RecoveryProtectionSession):
+        raise TypeError("回滚依据必须来自正式保护协调")
+    document = session.document
+    if not session.backup_completed or document is None or {
+        unit["id"] for unit in document.value["units"]
+    } != set(session._units):
+        raise ValueError("本次全部原状态保护尚未完成")
+    _check_evidence_isolation(session.task_root, document, ())
+    materials = {
+        entry["id"]: _observe_material(
+            session.task_root / "files" / entry["material"],
+            entry["original"], include_bytes=True,
+        )
+        for entry in document.value["objects"]
+        if entry["material"] is not None
+    }
+    evidence = RecoveryEvidence(
+        session.task_root, None, document, MappingProxyType(materials),
+    )
     recheck_recovery_evidence(evidence)
     return evidence
 
@@ -202,10 +246,16 @@ def recheck_recovery_evidence(evidence, *, forbidden_roots=()):
     _check_evidence_isolation(
         evidence.task_root, evidence.document, tuple(forbidden_roots),
     )
-    recheck_file(evidence.manifest)
+    if evidence.manifest is not None:
+        recheck_file(evidence.manifest)
+    if evidence.completion is not None:
+        recheck_file(evidence.completion)
     for observed in evidence.materials.values():
         _recheck_observation(observed)
-    recheck_file(evidence.manifest)
+    if evidence.manifest is not None:
+        recheck_file(evidence.manifest)
+    if evidence.completion is not None:
+        recheck_file(evidence.completion)
 
 
 class RecoveryProtectionSession:
@@ -249,6 +299,9 @@ class RecoveryProtectionSession:
         self._manifest_expected = _absent_child(
             self._task_expected, "recovery.json",
         )
+        self._completion_expected = _absent_child(
+            self._task_expected, "backup.complete",
+        )
         self._objects = {
             member.object_id: member for member in projection.objects
         }
@@ -284,7 +337,9 @@ class RecoveryProtectionSession:
         self._busy = False
         self._initialized = False
         self._files_created = False
-        self._included = ()
+        self.backup_completed = False
+        self.backup_cleanup_report = ""
+        self.backup_cleanup_error = None
         self.role = "内部任务目录"
         self.current = task_root
         self.phase = "prepared"
@@ -488,95 +543,164 @@ class RecoveryProtectionSession:
             return
         self._artifact = None
 
-    def protect(self, unit_id, *, removed_link_counts=None):
-        """按投影顺序保护，最初材料只准备一次。
+    def discard_before_work(self):
+        """放弃工作开始前的本次备份；失败由所属业务提示人工处理。
 
-        前序正常名称移除的数量只投影本次材料来源链接约束；
-        最初内容状态和清单时间继续直接消费唯一原投影。
-        数量由所属工作协调从真实步骤提供，不从现场重新授权。
+        只删除本任务实际创建且身份未变的唯一目录，
+        不比较工作文件，不删除其他任务或原有父目录。
         """
-        self._enter()
-        completed = False
-        try:
-            try:
-                if type(unit_id) is not str or unit_id not in self._units:
-                    raise ValueError("保护单元不属于固定投影")
-                unit = self._units[unit_id]
-                if unit_id in self._included:
-                    raise ValueError("单元保护已经发布，不重复消费")
-                if self.projection.units[len(self._included)] is not unit:
-                    raise ValueError("逐动作保护必须保持固定投影顺序")
-                self._initialize()
-                from core.file_observation import project_removed_file_links
-                for number in unit.object_ids:
-                    member = self._objects[number]
-                    source = project_removed_file_links(
-                        member.before, removed_link_counts,
-                    )
-                    if member.original_type == "absent":
-                        continue
-                    if number in self._material_results:
-                        continue
-                    expected = self._material_expected[number]
-                    self._ensure_material_parents(expected)
-                    self._stage(
-                        "原名材料", member.target, "固定最初来源材料准备",
-                    )
-                    material = prepare_internal_material(
-                        source, expected,
-                        durable_publication=self.durable_publication,
-                    )
-                    self._active_material = material
-                    self._stage(
-                        "编号材料", material.expected.path, "正式编号材料发布",
-                    )
-                    receipt = publish_internal_material(material)
-                    self._material_results[number] = receipt
-                    original = {
-                        "kind": member.original.kind,
-                        "records": member.original.records,
-                    }
-                    self._stage(
-                        "编号材料", receipt.target, "正式编号材料固定观察",
-                    )
-                    self._material_observations[number] = _observe_material(
-                        receipt.target, original, include_bytes=False,
-                    )
-                    self._active_material = None
-                selected = (*self._included, unit_id)
-                needed = {
-                    number for member in self.projection.units
-                    if member.unit_id in selected for number in member.object_ids
-                }
-                receipts = {
-                    number: receipt
-                    for number, receipt in self._material_results.items()
-                    if number in needed
-                }
-                candidate = build_document(
-                    self.projection, self.task_root, self.task_id,
-                    self.task_kind, receipts, unit_ids=selected,
-                    previous_document=self._document,
-                )
-                self._publish(candidate)
-                self._included = selected
-                self._stage("恢复清单", self.task_root / "recovery.json", "prepared")
-                completed = True
-                return self._document
-            except (OSError, ValueError) as error:
-                self._raise_failure(error)
-        finally:
-            self._busy = False
-            if not completed:
-                self._failed = True
-                self._dispose_manifest_staging()
+        import shutil
+
+        if self._document is not None and any(
+            unit["fact"]["state"] != "prepared"
+            for unit in self._document.value["units"]
+        ):
+            raise ValueError("工作开始后禁止按失败备份目录清理")
+        target, chain = checked_chain(
+            self.task_root, include_observation=True,
+        )
+        if chain[-1][1] == "absent":
+            return
+        owned = next((
+            receipt.created_directory
+            for receipt in self._directory_results
+            if receipt.succeeded
+            and identity(receipt.target) == identity(target)
+        ), None)
+        if chain[-1][1] != "directory" or owned is None:
+            raise ValueError("无法确认本次备份任务目录所有权，未删除")
+        attributes = target.lstat()
+        if (
+            ObjectIdentity(attributes.st_dev, attributes.st_ino)
+            != owned.object_identity
+        ):
+            raise ValueError("本次备份任务目录身份变化，未删除")
+        shutil.rmtree(target)
 
     def protect_all(self):
-        """全量必要保护及复核屏障，不执行工作步骤。"""
-        for unit in self.projection.units[len(self._included):]:
-            self.protect(unit.unit_id)
-        self.recheck_all_before_work()
-        return self._document
+        """三个入口共用：全部材料、一次完整清单、首个工作修改屏障。
+
+        当前原字节来自所属预演已经取得的固定观察。
+        材料保存消费这些字节，不重新生成修改基线。
+        失败清理只执行一次，清理失败直接交给人工处理。
+        """
+        if self._document is not None or self.backup_completed:
+            raise ValueError("本次备份屏障已消费，禁止重复备份")
+        self._enter()
+        try:
+            prepared = False
+            try:
+                try:
+                    self._initialize()
+                    for member in self.projection.objects:
+                        if member.original_type == "absent":
+                            continue
+                        number = member.object_id
+                        expected = self._material_expected[number]
+                        self._ensure_material_parents(expected)
+                        self._stage(
+                            "原名材料", member.target, "固定最初来源材料准备",
+                        )
+                        material = prepare_internal_material(
+                            member.before, expected,
+                            durable_publication=self.durable_publication,
+                        )
+                        self._active_material = material
+                        self._stage(
+                            "编号材料", expected.path, "正式原状态材料发布",
+                        )
+                        receipt = publish_internal_material(material)
+                        self._material_results[number] = receipt
+                        self._stage(
+                            "编号材料", receipt.target, "正式材料固定观察",
+                        )
+                        self._material_observations[number] = _observe_material(
+                            receipt.target,
+                            {
+                                "kind": member.original.kind,
+                                "records": member.original.records,
+                            },
+                            include_bytes=False,
+                        )
+                        self._active_material = None
+                    self._publish(build_document(
+                        self.projection, self.task_root,
+                        self.task_id, self.task_kind, self._material_results,
+                    ))
+                    prepared = True
+                except (OSError, ValueError) as error:
+                    self._raise_failure(error)
+            finally:
+                self._busy = False
+                if not prepared:
+                    self._failed = True
+                    self._dispose_manifest_staging()
+
+            self.recheck_all_before_work()
+            try:
+                self._stage(
+                    "备份完成凭据", self._completion_expected.path,
+                    "全量备份完成凭据准备",
+                )
+                self._artifact = prepare_content_artifact(
+                    self._completion_expected,
+                    (self.task_id + "\n").encode("utf-8"),
+                    options=ContentPublicationOptions(
+                        durable_publication=self.durable_publication,
+                    ),
+                )
+                self._stage(
+                    "备份完成凭据", self._completion_expected.path,
+                    "全量备份完成凭据发布",
+                )
+                try:
+                    receipt = publish_content(self._artifact)
+                except ContentPublicationError as error:
+                    self._publication_results.append(error.result)
+                    raise
+                self._publication_results.append(receipt)
+                self._stage(
+                    "备份完成凭据", self._completion_expected.path,
+                    "已发布完成凭据固定观察",
+                )
+                completion = observe_file(
+                    self._completion_expected.path,
+                    include_bytes=True, include_digest=True,
+                )
+                if (
+                    completion.kind != "file"
+                    or completion.object_identity
+                    != ObjectIdentity(*self._artifact.identity)
+                    or completion.link_count != 1
+                    or completion.digest != self._artifact.digest
+                    or completion.source_bytes != self._artifact.content
+                ):
+                    raise OSError("已发布备份完成凭据与固定成果不符")
+                self._completion_expected = completion
+                self._artifact = None
+            except (OSError, ValueError) as error:
+                self._failed = True
+                self._dispose_manifest_staging()
+                raise ProtectionPublicationError(self, error) from error
+            self.backup_completed = True
+            return self._document
+        except ProtectionPublicationError:
+            try:
+                self.discard_before_work()
+            except (OSError, ValueError) as cleanup_error:
+                self.backup_cleanup_error = cleanup_error
+                self.backup_cleanup_report = (
+                    "全量备份阶段失败，未开始工作目标修改。\n"
+                    "本次备份任务目录清理失败，请人工删除，勿用于恢复：\n"
+                    f"{self.task_root}\n{cleanup_error}"
+                )
+            else:
+                self.backup_cleanup_report = (
+                    "全量备份阶段失败，未开始工作目标修改；"
+                    "本次备份任务目录已清理。\n"
+                    "其他备份任务及原有父目录没有删除。"
+                )
+            raise
 
     def recheck_all_before_work(self):
         """全部保护后核对首个工作改变前的固定事实。
@@ -588,7 +712,9 @@ class RecoveryProtectionSession:
         completed = False
         try:
             try:
-                if len(self._included) != len(self.projection.units):
+                if self._document is None or tuple(
+                    unit["id"] for unit in self._document.value["units"]
+                ) != tuple(unit.unit_id for unit in self.projection.units):
                     raise ValueError("全部必要保护尚未正式发布")
                 if self._document is not None and any(
                     unit["fact"]["state"] != "prepared"
@@ -624,8 +750,13 @@ class RecoveryProtectionSession:
         completed = False
         try:
             try:
-                if self._document is None:
-                    raise ValueError("尚无正常发布的正式保护依据")
+                if not self.backup_completed or self._document is None:
+                    raise ValueError("全量备份屏障尚未完成，禁止发布工作事实")
+                self._stage(
+                    "备份完成凭据", self._completion_expected.path,
+                    "工作事实发布前固定完成凭据复核",
+                )
+                recheck_file(self._completion_expected)
                 candidate = with_execution_fact(
                     self._document, unit_id, state, results,
                 )

@@ -44,7 +44,7 @@ def create_managed_text_box(
     enable_import_text=False, wrap_config_key=None,
     config=None, field=None, page=None, on_content_changed=None,
     preserve_trailing_newlines=False, preserve_import_newlines=False,
-    show_statistics=False,
+    show_statistics=False, title_action_factory=None,
 ):
     title_row = styled_frame(parent)
     title_row.pack(fill="x", pady=(8, 2))
@@ -158,6 +158,11 @@ def create_managed_text_box(
         title_bar_button(title_row, "清空", clear, width=6).pack(
             side="right", padx=(0, 6),
         )
+
+    if title_action_factory is not None:
+        # right按登记顺序从右向左排列：业务动作紧邻清空左侧。
+        # 工厂只取得本次正文控件及标题栏；业务语义不进入通用编辑器。
+        title_action_factory(text, title_row)
 
     if enable_wrap_toggle:
         def toggle_wrap():

@@ -538,8 +538,7 @@ def _build_validated(value):
 
 
 def build_document(
-    projection, task_root, task_id, task_kind, material_results, *,
-    unit_ids=None, previous_document=None,
+    projection, task_root, task_id, task_kind, material_results,
 ):
     """最初状态直接消费唯一投影；引用只消费正常内部材料结果。"""
     if not isinstance(projection, ProtectionProjection):
@@ -547,22 +546,8 @@ def build_document(
     task = _absolute(str(task_root))
     if not isinstance(material_results, Mapping):
         raise TypeError("材料结果必须按对象编号关联")
-    selected = (
-        tuple(unit.unit_id for unit in projection.units)
-        if unit_ids is None else tuple(unit_ids)
-    )
-    if (
-        any(type(number) is not str for number in selected)
-        or len(set(selected)) != len(selected)
-    ):
-        raise ValueError("所选单元编号非法或重复")
-    units = tuple(unit for unit in projection.units if unit.unit_id in selected)
-    if tuple(unit.unit_id for unit in units) != selected:
-        raise ValueError("所选单元必须来自原投影并保持原顺序")
-    needed = {number for unit in units for number in unit.object_ids}
-    objects = tuple(
-        member for member in projection.objects if member.object_id in needed
-    )
+    units = projection.units
+    objects = projection.objects
     required = {
         member.object_id for member in objects if member.original_type != "absent"
     }
@@ -611,38 +596,6 @@ def build_document(
             "fact": {"state": "prepared", "changes": []},
         } for unit in units],
     }
-    if previous_document is not None:
-        if not isinstance(previous_document, RecoveryDocument):
-            raise TypeError("扩展依据必须消费已发布RecoveryDocument")
-        previous = previous_document.value
-        if (
-            previous["task_id"] != task_id
-            or previous["task_kind"] != task_kind
-        ):
-            raise ValueError("不得把其他任务的执行事实并入本次依据")
-        old_objects = {
-            member["id"]: _plain(member) for member in previous["objects"]
-        }
-        new_objects = {member["id"]: member for member in entries}
-        if any(
-            new_objects.get(number) != member
-            for number, member in old_objects.items()
-        ):
-            raise ValueError("扩展依据不得删除或改变已发布最初状态")
-        old_units = tuple(previous["units"])
-        if len(old_units) > len(value["units"]):
-            raise ValueError("扩展依据不得删除已发布执行单元")
-        for old, current in zip(old_units, value["units"]):
-            before = _plain(old)
-            old_fact = before.pop("fact")
-            description = {
-                key: member for key, member in current.items()
-                if key != "fact"
-            }
-            if before != description:
-                raise ValueError("扩展依据不得改变已发布单元及其顺序")
-            current["fact"] = old_fact
-    # 前序事实与新增单元归入同一最终候选后，只校验编码一次。
     return _build_validated(value)
 
 

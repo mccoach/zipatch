@@ -20,6 +20,15 @@ def publication_failure_title(error):
     if isinstance(error, StreamOutputPostError):
         return "业务动作已完成，附属处理失败"
     if isinstance(error, PatchExecutionError):
+        if error.rollback_status == "completed":
+            return "修改失败，已回滚"
+        if error.rollback_status == "failed":
+            return "修改失败，回滚未完成"
+        if error.rollback_status == "backup_failed":
+            return "备份失败，未执行修改"
+
+        if error.rollback_status == "not_required":
+            return "执行停止，工作目标未开始改变"
         if error.role == "正式保护":
             return "修改包正式保护或事实发布未完整结束"
         if error.role == "辅助输出":
@@ -42,6 +51,10 @@ def publication_failure_title(error):
                 return "修改包文件已替换，后续核验或确认失败"
         return "修改包执行流程未完整结束"
     if isinstance(error, BackupRestoreExecutionError):
+        if error.executor.execution.backup_cleanup_report:
+            return "还原前备份失败，未执行恢复"
+        if error.role == "最终核验":
+            return "恢复最终核验失败，不能确认恢复完成"
         if error.role == "正式保护":
             return "正式恢复保护或事实发布未完整结束"
         auxiliary = error.auxiliary_result
@@ -68,6 +81,11 @@ def publication_failure_title(error):
                 return "恢复文件已替换，后续核验或确认失败"
         return "正式恢复流程未完整结束"
     if isinstance(error, RestoreExecutionError):
+        if (
+            error.task.protection is not None
+            and error.task.protection.backup_cleanup_report
+        ):
+            return "拆分备份失败，未执行文件修改"
         result = error.result
         auxiliary = result.log_result
         if auxiliary is not None and not auxiliary.succeeded:

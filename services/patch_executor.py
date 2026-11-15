@@ -45,6 +45,7 @@ from core.rule_lists import validate_file_rules
 from core.text_io import decode_text_bytes
 from core.text_locations import TextSnapshot
 from core.time_utils import now_stamp
+from core.task_observation import project_task_observation, shared_file_states
 from services.patch_backup import resolve_backup_base_dir
 from services.patch_contracts import (
     collect_content_contract_errors, collect_path_contract_errors,
@@ -141,20 +142,30 @@ class PatchExecutionError(OSError):
         self.auxiliary_results = tuple(task.auxiliary_results)
         self.fact_error = task.fact_error
         self.work_completed = task.work_completed
+        self.rollback_status = "not_attempted"
+        self.rollback_report = ""
+        self.rollback_error = None
         super().__init__(task.failure_report(error))
+
+    def __str__(self):
+        original = super().__str__()
+        return (
+            original + "\n\n【失败处理结果】\n" + self.rollback_report
+            if self.rollback_report else original
+        )
 
 
 class PatchExecutor:
     def __init__(
         self, output_rules, root: Path, allow_delete=False,
-        allow_multi_replace_exact=False, backup_enabled=True,
+        allow_multi_replace_exact=False,
         backup_dir="99_归档/AI文件修改备份",
         patch_text="", preview_text="", normalize_text_newlines=True,
     ):
         for name, value in (
             ("允许删除", allow_delete),
             ("允许多处精确替换", allow_multi_replace_exact),
-            ("自动备份", backup_enabled),
+
             ("文本换行标准化", normalize_text_newlines),
         ):
             if type(value) is not bool:
@@ -164,7 +175,7 @@ class PatchExecutor:
         self.root = checked_root(root)
         self.allow_delete = allow_delete
         self.allow_multi_replace_exact = allow_multi_replace_exact
-        self.backup_enabled = backup_enabled
+
         self.backup_dir = backup_dir
         self.normalize_text_newlines = normalize_text_newlines
         self.output_rules = output_rules if normalize_text_newlines else None
@@ -195,6 +206,7 @@ class PatchExecutor:
         self.stage = "尚未执行"
         self.role = "任务准备"
         self.work_completed = False
+
         self.previewed = False
         self.consumed = False
 
@@ -221,6 +233,10 @@ class PatchExecutor:
             if result.work_completed or result.status == "skipped"
             for index in result.unit.indices
         }
+
+    @property
+    def backup_completed(self):
+        return self.protection is not None and self.protection.backup_completed
 
     @property
     def created_directories(self):
@@ -471,7 +487,8 @@ class PatchExecutor:
                         (unit.fixed for unit in self.execution_units if unit.execute),
                         forbidden_roots=(self.root,),
                     )
-                    if self.backup_enabled and self.projection.units:
+                    self._validate_shared_outcomes()
+                    if self.projection.units:
                         task_id = uuid.uuid4().hex
                         self.backup_root = (
                             resolve_backup_base_dir(self.root, self.backup_dir)
@@ -499,7 +516,7 @@ class PatchExecutor:
                 self._clear_plan()
             report = format_patch_preview(
                 self.root, patch, checks, success, failed, bool(errors),
-                self.backup_enabled, self.backup_root,
+                self.backup_root,
             )
             report += (
                 "\n\n文本换行：标准化已开启；完整成果按固定名单使用LF或CRLF。"
@@ -516,7 +533,11 @@ class PatchExecutor:
                 "清单分别记录绝对目标和材料相对位置。"
                 "\n名称机制准备时固定；原生报错停止，不切换复制删除。"
                 "\n正文确认、工作完成、保护和辅助输出分别表达。"
-                "\n这些检查不是文件锁；失败停止，不自动重试或回滚。"
+                "\n全部必要原备份成功后才开始工作修改。"
+                "\n备份失败清理本次任务目录，清理失败提示人工处理。"
+                "\n工作失败自动恢复原备份，不生成二次备份或自动续执行。"
+                "\n人类执行强制备份；自动回滚不另备份，失败保留原备份并提示。"
+                "\n这些检查不是文件锁，期间请勿外部修改。"
             )
             if self.plan is not None:
                 report += f"\n固定执行单元：{len(self.execution_units)} 个。\n【文件级共同成员】"
@@ -541,26 +562,79 @@ class PatchExecutor:
                 self._clear_plan()
                 self.preview_text = ""
 
+    def _validate_shared_outcomes(self):
+        """提前拒绝共享对象互相矛盾的内容和名称承诺，不搜索其他名称。"""
+        writes = {}
+        for unit in self.execution_units:
+            if not unit.execute:
+                continue
+            content_unit = (
+                unit.text_file is not None
+                or unit.members[0].payload["op"] == "copy_file"
+            )
+            if not content_unit:
+                continue
+            for effect in unit.fixed.effects:
+                before = effect.before
+                if (
+                    isinstance(before, FileObservation)
+                    and before.kind == "file" and before.link_count > 1
+                    and effect.after.kind == "file"
+                ):
+                    digest = effect.after.records[0][2]
+                    previous = writes.setdefault(before.object_identity, digest)
+                    if previous != digest:
+                        raise ValueError(
+                            "关联硬链接名称要求不同最终内容，无法同时满足；"
+                            f"请通过同一名称合并修改：{before.path}"
+                        )
+        for unit in self.execution_units:
+            if not unit.execute:
+                continue
+            content_unit = (
+                unit.text_file is not None
+                or unit.members[0].payload["op"] == "copy_file"
+            )
+            if not content_unit:
+                for effect in unit.fixed.effects:
+                    if any(
+                        file.object_identity in writes
+                        for _, file in _files(effect.before)
+                    ):
+                        raise ValueError(
+                            "同一硬链接对象的内容修改与名称或目录操作不能混用；"
+                            "请分包执行。"
+                        )
+            for source in unit.fixed.reads:
+                if any(file.object_identity in writes for _, file in _files(source)):
+                    raise ValueError(
+                        "复制来源与本包内容修改目标共享硬链接对象；请分包执行。"
+                    )
+
     def _removed_links(self):
-        """只消费正常名称移除；来源名称迁移不减少来源对象链接。"""
+        """每个原名称只扣减一次；重建同名成果不再次移除原对象。"""
         counts = {}
+        removed_names = set()
         for receipt in self.results:
-            removed = None
-            if (
+            removes_name = (
                 isinstance(receipt, FilesystemChangeResult)
                 and receipt.succeeded and receipt.kind == "remove_file"
-            ):
-                removed = self._original_files.get(identity(receipt.target))
-            elif (
-                isinstance(receipt, ContentPublicationResult)
+                or isinstance(receipt, ContentPublicationResult)
                 and receipt.succeeded and receipt.mechanism == "atomic_replace"
-            ):
-                removed = self._original_files.get(identity(receipt.target))
-            elif isinstance(receipt, NativeNameMoveResult) and receipt.succeeded:
-                removed = self._original_files.get(identity(receipt.target))
-            if removed is not None:
-                identifier = removed.object_identity
-                counts[identifier] = counts.get(identifier, 0) + 1
+                or isinstance(receipt, NativeNameMoveResult)
+                and receipt.succeeded
+            )
+            if not removes_name:
+                continue
+            key = identity(receipt.target)
+            if key in removed_names:
+                continue
+            original = self._original_files.get(key)
+            if original is None:
+                continue
+            removed_names.add(key)
+            identifier = original.object_identity
+            counts[identifier] = counts.get(identifier, 0) + 1
         return counts
 
     def _parents(self, observed):
@@ -603,19 +677,17 @@ class PatchExecutor:
                     seen.add(key)
                     self._parents(observed)
                     finished = self._finished.get(key)
+                    shared = shared_file_states(self._finished)
                     if finished is None:
                         expected = (
                             observed if isinstance(observed, SkippedPatchPath) else
-                            project_removed_file_links(observed, counts)
+                            project_task_observation(observed, counts, shared)
                         )
                     else:
                         actual, baseline = finished
-                        delta = {
-                            identifier: number - baseline.get(identifier, 0)
-                            for identifier, number in counts.items()
-                            if number > baseline.get(identifier, 0)
-                        }
-                        expected = project_removed_file_links(actual, delta)
+                        expected = project_task_observation(
+                            actual, counts, shared, baseline=baseline,
+                        )
                     _recheck(expected)
 
     def _append(self, receipt):
@@ -752,8 +824,9 @@ class PatchExecutor:
         action = unit.members[0]
         kind = action.payload["op"]
         counts = self._removed_links()
+        shared = shared_file_states(self._finished)
         fixed = tuple(
-            project_removed_file_links(observed, counts)
+            project_task_observation(observed, counts, shared)
             for observed in action.expectations
         )
         source = fixed[0]
@@ -909,9 +982,8 @@ class PatchExecutor:
             "保护材料、清单、工作目标及辅助输出分别判断。",
             "正文确认不等于整体工作正常完成；没有替换不代表没有原地改变。",
             "unknown不认证正文；前序真实步骤不自动撤销。",
-            "旧任务永久失效，不自动重试、回滚或删除正式材料。",
-            "可通过严格version 4正式恢复入口预检和恢复；"
-            "当前开发候选仍须完成必要验证，不直接用于真实项目业务。",
+            "旧任务永久失效；备份清理和自动回滚结论单独记录，不自动续执行。",
+            "完整原备份可以通过严格version 4主动恢复入口再次检查和恢复。",
             str(error),
         ))
         return "\n".join(lines)
@@ -966,8 +1038,78 @@ class PatchExecutor:
         self.consumed = True
         try:
             return self._execute_plan()
+        except PatchExecutionError as failure:
+            self._handle_failure(failure)
+            raise
         finally:
             self.release_prepared_contents()
+
+
+    def _handle_failure(self, failure):
+        if self.work_completed:
+            return
+        attempted = any(
+            receipt.mutation_attempted
+            if isinstance(receipt, ContentPublicationResult)
+            else receipt.attempted
+            for receipt in failure.results
+        )
+        if self.protection is not None and not self.backup_completed:
+            if attempted:
+                raise RuntimeError("全部备份屏障之前出现工作改变")
+            failure.rollback_status = (
+                "backup_failed"
+                if self.protection.backup_cleanup_report else "not_required"
+            )
+            failure.rollback_error = self.protection.backup_cleanup_error
+            failure.rollback_report = (
+                self.protection.backup_cleanup_report
+                or "执行开始前检查失败，尚未启动备份或工作修改，不需要回滚。"
+            )
+            return
+        if not attempted:
+            failure.rollback_status = "not_required"
+            failure.rollback_report = (
+                "未发起工作目标改变，不需要回滚；完整原备份保留。"
+            )
+            return
+        if self.protection is None:
+            raise RuntimeError("工作改变缺少强制备份协调，不能启动回滚")
+        from core.recovery_execution import RecoveryExecution
+        from core.recovery_protection import read_protection_evidence
+        from services.recovery import plan_restore
+
+        try:
+            # 自动恢复建立新观察，消费同一个恢复计划及核心；
+            # 不进入人类主动恢复的强制二次备份服务。
+            evidence = read_protection_evidence(self.protection)
+            recovery = RecoveryExecution(
+                evidence, plan_restore(evidence).actions,
+            )
+            result = recovery.execute()
+        except (OSError, ValueError) as rollback_error:
+            failure.rollback_status = "failed"
+            failure.rollback_error = rollback_error
+            failure.rollback_report = (
+                "修改失败，回滚未完整完成，不能认定项目已经恢复。\n"
+                "原备份保留；请人工处理故障后主动恢复，不自动重试。\n"
+                f"原备份：{self.backup_root}\n\n{rollback_error}"
+            )
+        else:
+            failure.rollback_status = "completed"
+            failure.rollback_report = (
+                "修改失败，已回滚，全部原状态已通过最终内容检查。\n"
+                "没有生成二次备份，没有自动再次执行修改包。\n"
+                f"实际恢复对象：{len(result.completed_units)}；"
+                f"跳过未变对象：{len(result.skipped_paths)}。\n"
+                f"原备份保留：{self.backup_root}"
+            )
+            if result.rebuilt_files:
+                failure.rollback_report += (
+                    "\n以下名称已独立重建，不重建原硬链接关系：\n"
+                    + "\n".join(map(str, result.rebuilt_files))
+                )
+        self.log(failure.rollback_report)
 
     def _execute_plan(self):
         active_unit = projected = None
@@ -979,6 +1121,10 @@ class PatchExecutor:
             self.log(f"协议版本：{PATCH_PROTOCOL_DESCRIPTION}")
             self.log(f"项目根目录：{self.root}")
             self.log(f"备份目录：{self.backup_root or '未启用或无需保护'}")
+            if self.protection is not None:
+                self._stage("正式保护", self.backup_root, "全部原状态备份屏障")
+                self.protection.protect_all()
+                self.recheck()
             projections = iter(self.projection.units)
             for active_unit in self.execution_units:
                 unit_start = len(self._results)
@@ -1000,10 +1146,7 @@ class PatchExecutor:
                 if projected.fixed is not active_unit.fixed:
                     raise RuntimeError("执行单元与唯一保护投影关联不一致")
                 if self.protection is not None:
-                    self._stage("正式保护", self.backup_root, "修改前保护及清单发布")
-                    self.protection.protect(
-                        projected.unit_id, removed_link_counts=self._removed_links(),
-                    )
+                    # 全部原材料已保存，此处只检查工作并发布开始事实。
                     self._stage("工作目标", active_unit.members[0].expectations[0].path, "保护后全部固定事实复核")
                     self.recheck()
                     self._stage("正式保护", self.backup_root, "工作改变前started屏障")

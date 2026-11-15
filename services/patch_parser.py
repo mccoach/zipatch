@@ -232,6 +232,8 @@ def parse_patch_v3(text: str):
     state = "WAIT_START"
     boundary = None
     operations = []
+    op_ranges = []
+    current_op_start = None
     seen_op_ids = set()
     current_op = None
     current_block_key = None
@@ -291,6 +293,7 @@ def parse_patch_v3(text: str):
                     )
 
                 current_op = parse_op_line(stripped, idx)
+                current_op_start = line_start
                 continue
 
             if stripped in PATCH_TEXT_BLOCK_STARTERS:
@@ -333,6 +336,10 @@ def parse_patch_v3(text: str):
 
                 seen_op_ids.add(op_id)
                 operations.append(current_op)
+                # 范围消费同一结构状态机，不匹配原文块中的伪OP。
+                # next_start包含END_OP行的实际分行符，不包含Tk哨兵。
+                op_ranges.append((op_id, current_op_start, next_start))
+                current_op_start = None
                 current_op = None
                 continue
 
@@ -398,4 +405,5 @@ def parse_patch_v3(text: str):
         "version": "3.0",
         "boundary": boundary,
         "operations": operations,
+        "op_ranges": tuple(op_ranges),
     }

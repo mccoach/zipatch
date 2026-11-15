@@ -22,6 +22,7 @@ from ui.text_editor import (
     replace_text_preserve_view, set_text_value,
 )
 from ui.operation_lock import locked_page
+from ui.patch_op_selection import PatchOpSelection
 from core.time_utils import current_timestamp_text
 from panels.base_panel import BasePanel, publication_failure_title
 from services.patch_backup import resolve_backup_base_dir
@@ -56,7 +57,10 @@ class PatchPanel(BasePanel):
 
     def build(self):
         body = self.make_body()
-        for field in ("project_root", "backup_dir", "restore_source_dir"):
+        for field in (
+            "project_root", "backup_dir", "restore_source_dir",
+            "restore_project_root",
+        ):
             setattr(self, field, tk.StringVar(value=self.cfg[field]))
         self.patch_mode = tk.StringVar(value=self.cfg["patch_mode"])
         self.last_backup_root = ""
@@ -73,11 +77,12 @@ class PatchPanel(BasePanel):
             commits=self.commits, config=self.cfg, field="backup_dir", page="patch",
             history_key="patch.backup_dir", value_normalizer=normalize_windows_display_path,
             browse_command=lambda: self.browse_project_relative_folder(self.backup_dir, "选择备份保存目录"),
-            open_fields={"backup_dir"}, open_command=self.open_configured_backup_dir,
+            open_fields={"backup_dir", "restore_project_root"},
+            open_command=self.open_configured_backup_dir,
             tooltip_text=(
-                "执行修改：允许相对于项目根目录的备份位置。"
-                "备份还原：开启还原前保护时必须填写绝对备份目录，"
-                "不使用执行修改的项目根目录。此目录不是恢复目的地。"
+                "执行修改：相对备份位置基于执行修改的项目根目录。"
+                "备份还原：相对备份位置基于当前显示的独立保护项目根目录。"
+                "绝对备份位置保持不变；此目录不是恢复目的地。"
             ),
         )
         self.restore_source_entry = create_entry_row(
@@ -94,6 +99,25 @@ class PatchPanel(BasePanel):
                 "填写完整绝对任务目录；仅支持严格version 4 recovery.json。"
                 "恢复目标使用清单记录的绝对位置，不使用项目根目录。"
                 "旧格式不转换或兼容读取，不删除备份材料。"
+            ),
+        )
+
+        self.restore_project_root_entry = create_entry_row(
+            body, "保护根目录", self.restore_project_root,
+            commits=self.commits, config=self.cfg,
+            field="restore_project_root", page="patch",
+            history_key="patch.restore_project_root",
+            value_normalizer=normalize_windows_display_path,
+            browse_command=lambda: browse_folder(
+                self.restore_project_root, "选择还原前保护项目根目录",
+                parent=self.root,
+            ),
+            open_command=lambda: open_path_with_default_app(
+                self.restore_project_root.get(), self.root,
+            ),
+            tooltip_text=(
+                "仅用于还原前保护：相对备份目录以此为基准。"
+                "与执行修改的项目根目录独立，不改变原清单恢复目标。"
             ),
         )
 
@@ -122,8 +146,7 @@ class PatchPanel(BasePanel):
             ("allow_delete", "允许删除文件/文件夹（危险）", "allow_delete_check", "允许修改包中的删除操作；仍保留路径校验和执行确认。"),
             ("allow_multi_replace_exact", "允许多处精确替换", "allow_multi_replace_check", "允许按修改包声明替换多处完全相同文本。"),
             ("normalize_text_newlines", "标准化文本换行", "normalize_text_newlines_check", "默认打开：按本次固定名单转换为 LF 或 CRLF，不裁剪空白、不补末尾换行。关闭：保留最终正文中的 CRLF、LF 和单独 CR，不校验换行名单。仅影响修改包文本写入，不影响复制、移动或备份恢复。"),
-            ("backup_enabled", "自动备份", "backup_enabled_check", "勾选：每个实际执行单元改变文件前，先将必要的操作前原状态和严格version 4恢复依据保存到本次备份任务目录。材料保留原文件名和项目相对目录，可直接手工取用。覆盖保存旧文件原字节及修改时间，删除保存必要原对象，新增记录原先不存在；对应保护失败时不开始该单元的文件修改。不勾选：不保存这份旧状态，覆盖或删除的内容可能无法找回。两种选择都保留执行确认、路径及必要前提检查；失败不自动回滚，可用已生成的完整任务目录手动备份还原。本选项不控制恢复模式的“还原前保护”或拆分自动备份，也不取消硬链接写入必须准备的新成果应急文件。"),
-            ("restore_backup_enabled", "还原前保护", "restore_backup_enabled_check", "只保护本次恢复最终实际改变的当前状态；全部必要保护成功后才开始恢复。"),
+
             ("keep_restore_source_path", "保留备份来源路径", "keep_restore_source_path_check", "不勾选时，仅在还原成功后清空来源，不删除备份文件。"),
             ("open_backup_after_done", "完成后打开本次备份", "open_backup_after_done_check", "修改时打开本次修改备份；恢复时打开本次还原前保护任务。没有生成则不自动打开来源或历史目录。"),
         ):
@@ -132,6 +155,7 @@ class PatchPanel(BasePanel):
             widget = make_checkbutton(
                 option_row, label, variable, commits=self.commits,
                 config=self.cfg, field=field, tooltip_text=tip,
+
             )
             setattr(self, attribute, widget)
             widget.pack(side="left", padx=(0, 24))
@@ -152,6 +176,9 @@ class PatchPanel(BasePanel):
             field="patch_text", page="patch", favorite_key="patch_text",
             wrap="none", enable_import_text=True, wrap_config_key="patch.patch_text",
             preserve_trailing_newlines=True, preserve_import_newlines=True,
+            title_action_factory=lambda text, title_row: PatchOpSelection(
+                text, title_row, self.commits,
+            ),
         )
         self.result_text = create_managed_text_box(
             right, "预演 / 执行结果", self.cfg["last_result_text"],
@@ -192,12 +219,16 @@ class PatchPanel(BasePanel):
         active_entry._row_frame.pack(
             fill="x", pady=4, before=self.backup_dir_entry._row_frame,
         )
+        self.restore_project_root_entry._row_frame.pack_forget()
+        if restore:
+            self.restore_project_root_entry._row_frame.pack(
+                fill="x", pady=4, before=self.backup_dir_entry._row_frame,
+            )
         option_widgets = (
             (self.allow_delete_check, not restore),
             (self.allow_multi_replace_check, not restore),
             (self.normalize_text_newlines_check, not restore),
-            (self.backup_enabled_check, not restore),
-            (self.restore_backup_enabled_check, restore),
+
             (self.keep_restore_source_path_check, restore),
             (self.open_backup_after_done_check, True),
         )
@@ -275,14 +306,14 @@ class PatchPanel(BasePanel):
             ) else None
         )
         fields = {
-            "project_root", "patch_mode", "backup_enabled", "backup_dir",
+            "project_root", "patch_mode", "backup_dir",
             "open_backup_after_done",
         }
         if self.cfg["patch_mode"] == "restore":
-            fields -= {"project_root", "backup_enabled"}
+            fields.discard("project_root")
             fields |= {
                 "restore_source_dir", "keep_restore_source_path",
-                "restore_backup_enabled",
+                "restore_project_root",
             }
         else:
             fields |= {
@@ -362,7 +393,7 @@ class PatchPanel(BasePanel):
             project_root=project, patch_text=patch,
             allow_delete=cfg["allow_delete"],
             allow_multi_replace_exact=cfg["allow_multi_replace_exact"],
-            backup_enabled=cfg["backup_enabled"], backup_dir=cfg["backup_dir"],
+            backup_dir=cfg["backup_dir"],
         )
 
     def preview_failure(self, error, cfg):
@@ -552,7 +583,7 @@ class PatchPanel(BasePanel):
         return {
             "groups": groups, "paths": paths, "counts": counts,
             "replacements": replacements, "existing": existing,
-            "high_risk": not cfg["backup_enabled"] and any(paths[key] for key in existing),
+
             "total_op_count": len(actions),
             "file_path_count": len(object_paths["file"]),
             "directory_path_count": len(object_paths["directory"]),
@@ -591,22 +622,12 @@ class PatchPanel(BasePanel):
 
     def confirm_apply_execution(self, cfg, patch):
         summary = self.build_apply_operation_summary(cfg, patch)
-        if summary["high_risk"]:
-            message = (
-                "高风险：当前未开启自动备份。\n\n"
-                "本次将修改或删除已有文件，工具无法自动还原到执行前状态。\n\n"
-                + self.format_grouped_file_list(summary, only_existing=True)
-                + "\n\n确认继续执行？"
-            )
-            return safe_ask_risk_confirm(
-                "高风险确认：未启用自动备份", message, self.root, danger=True,
-            )
         backup = (
-            "自动备份已开启：首次改变前逐步备份并发布 recovery.json。"
-            if cfg["backup_enabled"] else "当前未开启自动备份。"
+            "本次强制备份：全部必要原状态及完整清单保存成功后才开始修改。"
+            "\n备份失败清理本次任务目录，清理失败提示人工处理。"
+            "\n工作失败自动恢复完整原备份，不生成二次备份，不自动续执行。"
+            "\n执行消费固定成果；操作期间请勿外部修改涉及文件。"
         )
-        backup += "\n执行消费本次固定计划；状态偏离时停止。"
-        backup += "\n规划、备份和执行期间避免外部并发修改；不提供自动整批回滚。"
         return safe_ask_risk_confirm(
             "执行确认",
             "即将执行文件修改。\n\n" + backup + "\n\n【本次操作清单】\n\n"
@@ -669,12 +690,19 @@ class PatchPanel(BasePanel):
                     outcome="执行流程已停止；以下保存失败仅针对本次结果记录",
                 )
                 self.set_status(title)
+                protection = preview.execution.protection
+                if (
+                    protection is not None
+                    and preview.execution.backup_completed
+                    and protection.directory_results
+                ):
+                    self.last_backup_root = str(protection.task_root)
                 safe_show_error(
                     title,
-                    "执行已停止，旧任务已失效；没有自动回滚，"
-                    "项目可能处于部分修改状态。\n\n"
-                    + str(error)
-                    + "\n\n请查看完整报告和正式备份依据，不要重试旧任务。",
+                    str(error)
+                    + "\n\n请以上述失败处理结果判断当前状态。"
+                    "\n最后清理或回滚失败时，请人工处理。"
+                    "\n旧任务已失效，不会自动再次执行修改包。",
                     self.root,
                 )
                 return

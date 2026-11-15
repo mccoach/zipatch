@@ -263,13 +263,14 @@ DEFAULT_CONFIG = {
         "source_text": "",
         "last_result_text": "",
         "target_folder": "",
-        "backup_enabled": True,
+
         "backup_dir": "",
         "target_mode": "directory",
         "execution_mode": "split",
+        "restore_project_root": "",
         "restore_source_dir": "",
         "keep_restore_source_path": False,
-        "restore_backup_enabled": True,
+
         "open_backup_after_done": False,
         "code_header_line": CODE_HEADER_LINE,
         "code_footer_line": CODE_FOOTER_LINE,
@@ -281,15 +282,16 @@ DEFAULT_CONFIG = {
     },
     "patch": {
         "project_root": "",
+        "restore_project_root": "",
         "patch_mode": "apply",
         "allow_delete": False,
         "allow_multi_replace_exact": False,
         "normalize_text_newlines": True,
-        "backup_enabled": True,
+
         "backup_dir": "99_归档/AI文件修改备份",
         "restore_source_dir": "",
         "keep_restore_source_path": False,
-        "restore_backup_enabled": True,
+
         "patch_text": "",
         "last_result_text": "",
         "open_backup_after_done": False,

@@ -45,3 +45,4 @@ class BackupRestoreApplyResult:
     log_text: str
     backup_root: str
     complete_original_state: bool
+    rebuilt_files: tuple = ()

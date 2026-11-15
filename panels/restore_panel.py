@@ -18,6 +18,7 @@ from services.restore_service import RestoreTask, prepare_restore
 from ui.dialogs import create_managed_text_box
 from ui.backup_restore import (
     open_last_backup_folder, open_restore_source, run_backup_restore,
+    resolve_restore_backup_dir,
 )
 from ui.message_dialogs import (
     safe_ask_risk_confirm, safe_show_error, safe_show_info,
@@ -64,29 +65,20 @@ def format_split_preview(plan):
         )
     else:
         lines.append("原位模式使用实际绝对位置，可能跨目录或盘符。")
-    if plan.backup_enabled:
-        lines.extend((
-            "",
-            "自动备份已开启：每个动作必要原状态及started依据"
-            "保存成功之后，才开始该动作工作。",
-            f"绝对备份目录：{plan.backup_dir}",
-            "恢复依据使用严格version 4；材料保留原名及目录结构。",
-            "指定目录模式以指定目录为基准；原位模式按盘符分组，"
-            "各组去掉共同父目录，不压平不同位置的同名文件。",
-            "必要保护对象：",
-        ))
-        lines.extend(
-            f"- {member.target}；原类型={member.original_type}"
-            for member in plan.projection.objects
-        )
-        if not plan.projection.objects:
-            lines.append("无待写动作，不生成任务材料。")
-    else:
-        lines.extend((
-            "",
-            "自动备份已关闭，不保存覆盖前状态。",
-            "覆盖已有文件可能永久丢失当前内容，请核对完整范围。",
-        ))
+    lines.extend((
+        "",
+        "强制备份：全部必要原状态及完整清单保存成功后，才开始首个文件修改。",
+        "全量备份失败清理本次任务目录；清理失败提示人工处理。",
+        f"绝对备份目录：{plan.backup_dir}",
+        "恢复依据使用严格清单；材料保留原名及目录结构。",
+        "必要保护对象：",
+    ))
+    lines.extend(
+        f"- {member.target}；原类型={member.original_type}"
+        for member in plan.projection.objects
+    )
+    if not plan.projection.objects:
+        lines.append("无待写动作，不生成空备份任务。")
     for title, paths in (
         ("新增文件", created),
         ("覆盖已有文件", overwritten),
@@ -131,15 +123,25 @@ class RestorePanel(BasePanel):
                 browse_command=lambda current=variable: browse_folder(
                     current, parent=self.root,
                 ),
-                open_command=lambda current=variable: open_path_with_default_app(
-                    current.get(), self.root,
+                open_fields=(
+                    {"backup_dir", "restore_project_root"}
+                    if field == "backup_dir" else None
+                ),
+                open_command=(
+                    self.open_configured_backup_dir
+                    if field == "backup_dir" else
+                    lambda current=variable: open_path_with_default_app(
+                        current.get(), self.root,
+                    )
                 ),
                 tooltip_text=(
                     "指定目录模式：写入范围及相对路径基准，可以不存在。"
                     "原位模式：只为相对路径提供绝对基准；"
                     "全为绝对目标时可留空。"
                     if field == "target_folder" else
-                    "启用备份时必须填写有效绝对位置；关闭时不使用该设置。"
+                    "执行拆分强制备份，填写有效绝对位置。"
+                    "备份还原强制保护：相对位置以独立保护项目根目录为基准，"
+                    "也可以填写绝对位置。"
                 ),
             )
 
@@ -202,7 +204,7 @@ class RestorePanel(BasePanel):
                 ).pack(side="left", padx=(0, 6))
 
         for field, label in (
-            ("backup_enabled", "自动备份"),
+
             ("normalize_text_newlines", "标准化文本换行"),
         ):
             variable = tk.BooleanVar(value=self.cfg[field])
@@ -261,20 +263,38 @@ class RestorePanel(BasePanel):
             ),
         )
 
+        self.restore_project_root = tk.StringVar(
+            value=self.cfg["restore_project_root"],
+        )
+        self.restore_project_root_entry = create_entry_row(
+            body, "保护根目录", self.restore_project_root,
+            commits=self.commits, config=self.cfg,
+            field="restore_project_root", page=self.config_key,
+            history_key="restore.restore_project_root",
+            value_normalizer=normalize_windows_display_path,
+            browse_command=lambda: browse_folder(
+                self.restore_project_root, "选择还原前保护项目根目录",
+                parent=self.root,
+            ),
+            open_command=lambda: open_path_with_default_app(
+                self.restore_project_root.get(), self.root,
+            ),
+            tooltip_text=(
+                "只定位还原前保护的二次备份，相对备份目录以此为基准。"
+                "不沿用执行拆分的指定目录，也不改变原清单恢复目标。"
+            ),
+        )
+
         self.recovery_options = styled_frame(
             self.mode_row, bg=THEME["bg_panel"],
         )
         self.recovery_options.pack(side="left")
         for field, label, tip in (
-            (
-                "restore_backup_enabled", "还原前保护",
-                "只保护本次恢复最终实际改变的当前状态；"
-                "使用上方绝对备份目录，不受拆分自动备份开关控制。",
-            ),
+
             (
                 "keep_restore_source_path", "保留备份来源路径",
                 "未勾选时，仅完整原状态恢复成功后清空来源字段；"
-                "部分保留、取消或失败不清空，不删除备份文件。",
+                "取消或失败不清空，不删除备份文件；恢复只提供整包确认。",
             ),
             (
                 "open_backup_after_done", "恢复完成后打开本次保护备份",
@@ -288,6 +308,7 @@ class RestorePanel(BasePanel):
                 self.recovery_options, label, variable,
                 commits=self.commits, config=self.cfg, field=field,
                 tooltip_text=tip,
+
             ).pack(side="left", padx=(0, 24))
 
         self.buttons = styled_frame(body, bg=THEME["bg_panel"])
@@ -348,7 +369,12 @@ class RestorePanel(BasePanel):
             else:
                 row.pack_forget()
 
-        # 备份目录两模式都使用；始终处于路径区，不隐藏保护位置。
+        self.restore_project_root_entry._row_frame.pack_forget()
+        if restore:
+            self.restore_project_root_entry._row_frame.pack(
+                fill="x", pady=4, before=self.mode_row,
+            )
+        # 备份目录两模式都使用；保护根与拆分指定目录互不借用。
         self.backup_dir_entry._row_frame.pack(
             fill="x", pady=4, before=self.mode_row,
         )
@@ -400,11 +426,12 @@ class RestorePanel(BasePanel):
         if self.commits.operation_depth:
             return
         with self.commits.operation():
-            cfg = self.prepare({
+            fields = {
                 "restore_source_dir", "keep_restore_source_path",
-                "restore_backup_enabled", "backup_dir",
+                "restore_project_root", "backup_dir",
                 "open_backup_after_done",
-            })
+            }
+            cfg = self.prepare(fields)
             if cfg is not None:
                 return run_backup_restore(self, cfg, execute=execute)
 
@@ -484,6 +511,18 @@ class RestorePanel(BasePanel):
             updates, outcome=outcome,
         )
 
+    def open_configured_backup_dir(self):
+        try:
+            path = (
+                resolve_restore_backup_dir(self.cfg)
+                if self.execution_mode.get() == "restore" else
+                self.cfg["backup_dir"]
+            )
+        except (OSError, ValueError) as error:
+            safe_show_error("打开备份目录失败", str(error), self.root)
+            return
+        open_path_with_default_app(path, self.root)
+
     def open_newline_settings(self):
         if edit_newline_settings(self.root, self.commits):
             self.log("换行设置已保存")
@@ -493,7 +532,7 @@ class RestorePanel(BasePanel):
             "source_text", "target_folder", "target_mode", "code_header_line",
             "code_footer_line", "existing_file_policy", "open_after_done",
             "normalize_text_newlines", "ignore_text", "failure_text",
-            "backup_enabled", "backup_dir",
+            "backup_dir",
         })
 
     def prepare_task(self, cfg):
@@ -511,7 +550,7 @@ class RestorePanel(BasePanel):
             target_mode=cfg["target_mode"],
             normalize_text_newlines=cfg["normalize_text_newlines"],
             ignore_text=cfg["ignore_text"], failure_text=cfg["failure_text"],
-            backup_enabled=cfg["backup_enabled"], backup_dir=cfg["backup_dir"],
+            backup_dir=cfg["backup_dir"],
             source_text=cfg["source_text"],
         )
         return RestoreTask(plan)
@@ -524,7 +563,7 @@ class RestorePanel(BasePanel):
         overwritten = tuple(
             str(member.target) for member in plan.files if member.kind == "file"
         )
-        high_risk = not plan.backup_enabled and bool(overwritten)
+
         lines = [
             "即将执行本次固定拆分任务。",
             "",
@@ -537,19 +576,11 @@ class RestorePanel(BasePanel):
                 "指定目录" if plan.mode == "directory" else "原位还原"
             ),
             f"指定目录／相对路径基准：{plan.base or '未使用'}",
-            (
-                f"自动备份已开启，计划任务目录：{plan.backup_root}"
-                if plan.backup_enabled else "自动备份已关闭。"
-            ),
+            f"强制备份任务目录：{plan.backup_root}",
             "完整正文已准备；确认后直接执行同一本次固定任务。",
             "必要前提变化或任一失败时停止，不自动回滚或重试。",
         ]
-        if high_risk:
-            lines.extend((
-                "",
-                "高风险：未启用自动备份，将覆盖已有文件。",
-                "当前内容可能永久丢失，工具无法自动恢复到执行前状态。",
-            ))
+
         for title, paths in (
             ("新增文件", created), ("覆盖已有文件", overwritten),
         ):
@@ -567,8 +598,7 @@ class RestorePanel(BasePanel):
             "确认和执行期间请避免外部修改。确认执行？",
         ))
         return safe_ask_risk_confirm(
-            "高风险确认：未启用自动备份" if high_risk else "执行确认",
-            "\n".join(lines), self.root, danger=high_risk,
+            "执行确认", "\n".join(lines), self.root,
         )
 
     def preview(self):
@@ -691,10 +721,8 @@ class RestorePanel(BasePanel):
                 "\n严格version 4材料，保留原名及目录结构；请保留完整任务目录。"
                 "\n可在本页“备份还原”或修改包页面预检和恢复。"
             )
-        elif result.backup_enabled:
-            message += "\n本次没有生成备份材料。"
         else:
-            message += "\n自动备份已关闭，本次没有保存覆盖前状态。"
+            message += "\n本次没有工作改变，不生成空备份任务。"
         if result.source_failure_count:
             message += "\n来源被动失败项未提供真实正文，请排查后重新合并。"
         if result.log_path:

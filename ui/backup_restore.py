@@ -8,7 +8,8 @@ import tkinter as tk
 from pathlib import Path
 
 from core.path_validation import strip_outer_quotes
-from core.recovery_paths import checked_chain
+from core.recovery_paths import checked_chain, checked_root
+from services.patch_backup import resolve_backup_base_dir
 from panels.base_panel import publication_failure_title
 
 from services.patch_service import (
@@ -39,15 +40,20 @@ def resolve_restore_source(config):
     return target
 
 
-def resolve_restore_backup_dir(config):
-    """还原前保护的保存位置；准备与打开共用，不决定恢复目标。"""
-    selected = strip_outer_quotes(config["backup_dir"])
+def resolve_restore_project_root(config):
+    """独立的还原前保护基准，不借用另一模式的定位输入。"""
+    selected = strip_outer_quotes(config["restore_project_root"])
     if not selected or not Path(selected).is_absolute():
-        raise ValueError(
-            "还原前保护的备份目录必须是明确的绝对路径；"
-            "请填写完整路径或通过浏览选择，不使用项目根目录"
-        )
-    target, chain = checked_chain(selected, include_observation=True)
+        raise ValueError("请填写明确的绝对保护项目根目录")
+    return checked_root(selected)
+
+
+def resolve_restore_backup_dir(config):
+    """相对二次备份基于明确保护根，恢复目标仍由原清单决定。"""
+    target = resolve_backup_base_dir(
+        resolve_restore_project_root(config), config["backup_dir"],
+    )
+    target, chain = checked_chain(target, include_observation=True)
     if chain[-1][1] not in ("absent", "directory"):
         raise ValueError(f"还原前保护位置不是普通目录或可创建的缺失目录：{target}")
     return target
@@ -111,22 +117,21 @@ def show_restore_preview(panel, preview):
 
 def _prepare_preview(config):
     source = resolve_restore_source(config)
-    backup_dir = (
-        str(resolve_restore_backup_dir(config))
-        if config["restore_backup_enabled"] else config["backup_dir"]
-    )
-    # 两页恢复均不依赖执行模式的项目根或拆分指定目录。
-    # 正式服务继续检查清单绝对目标、文件系统根限制及来源隔离。
+    # 位置解析及检查由正式恢复服务完成一次；
+    # UI只传递已接受设置，不另行推导一次相同位置。
     return preview_backup_restore(
-        project_root=None, restore_source_dir=str(source),
-        backup_enabled=config["restore_backup_enabled"],
-        backup_dir=backup_dir,
+        restore_source_dir=str(source),
+        backup_dir=config["backup_dir"],
+        backup_project_root=strip_outer_quotes(config["restore_project_root"]),
     )
 
 
 def _remember_created_backup(panel, executor):
     protection = executor.protection
-    if protection is not None and protection.directory_results:
+    if (
+        protection is not None and protection.directory_results
+        and executor.execution.backup_completed
+    ):
         panel.last_backup_root = str(protection.task_root)
 
 
@@ -156,6 +161,7 @@ def run_backup_restore(panel, config, *, execute):
                 accepted = select_backup_restore(
                     panel.root, preview,
                     keep_source_path=config["keep_restore_source_path"],
+                    commits=panel.commits,
                 )
                 if not accepted:
                     invalidate_preview(preview)
@@ -191,11 +197,7 @@ def run_backup_restore(panel, config, *, execute):
                 and not config["keep_restore_source_path"]
             ):
                 updates["restore_source_dir"] = ""
-            outcome = (
-                "全部对象原状态恢复完成"
-                if result.complete_original_state else
-                "按恢复方案完成，含用户保留，来源仍保留"
-            )
+            outcome = "全部对象原状态恢复完成"
             saved = panel.record_backup_restore_result(
                 preview.preview_text + "\n\n" + result.log_text,
                 updates, outcome,
@@ -204,8 +206,14 @@ def run_backup_restore(panel, config, *, execute):
             panel.log(outcome)
             if saved.persisted:
                 safe_show_info(
-                    "恢复完成" if result.complete_original_state else "按方案完成",
-                    outcome + "\n备份材料没有删除。请查看运行日志或结果报告。",
+                    "恢复完成",
+                    outcome + "\n备份材料没有删除。"
+                    + (
+                        "\n\n以下名称已独立重建；内容恢复，"
+                        "不重建原硬链接关系：\n"
+                        + "\n".join(str(path) for path in result.rebuilt_files)
+                        if result.rebuilt_files else ""
+                    ),
                     panel.root,
                 )
             if config["open_backup_after_done"] and result.backup_root:

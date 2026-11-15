@@ -129,13 +129,7 @@ def validate_restore_settings(settings):
             raise OutputSettingsError(
                 f"restore.{field} 必须是字符串；原文件未修改。"
             )
-    if (
-        "backup_enabled" in settings
-        and type(settings["backup_enabled"]) is not bool
-    ):
-        raise OutputSettingsError(
-            "restore.backup_enabled 必须是布尔值；原文件未修改。"
-        )
+
     if "backup_dir" in settings and type(settings["backup_dir"]) is not str:
         raise OutputSettingsError(
             "restore.backup_dir 必须是字符串；原文件未修改。"
@@ -228,9 +222,10 @@ def validate_rule_config_source(source):
                 f"配置 {section_name} 必须是对象；原文件未修改。"
             )
         for field, expected_type in (
+            ("restore_project_root", str),
             ("restore_source_dir", str),
             ("keep_restore_source_path", bool),
-            ("restore_backup_enabled", bool),
+
             ("open_backup_after_done", bool),
         ):
             if field in section and type(section[field]) is not expected_type:

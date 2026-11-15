@@ -12,7 +12,7 @@ def format_patch_preview(
     success_count,
     failed_count,
     has_global_errors,
-    backup_enabled,
+
     backup_root,
 ):
     """
@@ -47,9 +47,7 @@ def format_patch_preview(
         f"最终可执行 OP：{success_count}",
     ]
 
-    if not backup_enabled:
-        lines.append("备份状态：未启用自动备份")
-    elif backup_root is not None:
+    if backup_root is not None:
         lines.extend((
             f"计划备份目录：{backup_root}",
             "备份状态：尚未启动；执行时按需保护原状态。",
@@ -141,7 +139,8 @@ def format_patch_preview(
             "预演通过，可以核对操作范围并确认执行。",
             "固定跳过的操作仍按计划跳过，不会写入未使用的内容。",
             "本次预演没有修改工作目标；执行时仍须通过安全及原字节复核。",
-            "预演通过不保证后续备份或文件发布必然成功，不提供自动整包回滚。",
+            "预演通过不保证后续发布成功；强制备份后工作失败自动回滚，"
+            "回滚失败明确提示，不保证断电或强制结束后的自动恢复。",
         ))
 
     return "\n".join(lines)

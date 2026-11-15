@@ -45,6 +45,9 @@ from core.rule_lists import validate_file_rules
 
 from core.text_newlines import normalize_newlines
 from core.time_utils import now_stamp
+from core.task_observation import (
+    project_task_observation, shared_file_states, validate_shared_file_contents,
+)
 
 
 class RestoreScopeError(ValueError):
@@ -91,7 +94,6 @@ class RestorePlan:
     source_failure_count: int
     log_expected: FileObservation | None
     log_content: bytes | None
-    backup_enabled: bool
     backup_dir: str
     backup_root: Path | None
     projection: object
@@ -121,7 +123,7 @@ class RestoreResult:
     source_failure_count: int = 0
     cancelled: bool = False
     created_directories: tuple = ()
-    backup_enabled: bool = False
+
     backup_root: str = ""
     results: tuple = ()
     completed_files: tuple = ()
@@ -205,6 +207,8 @@ class RestoreExecutionError(OSError):
             "不自动重试、回滚、删除正式材料或重新拆分。",
             str(result.error),
         ))
+        if task.protection is not None and task.protection.backup_cleanup_report:
+            lines.append(task.protection.backup_cleanup_report)
         if result.fact_error is not None:
             lines.append(f"不确定事实补充也未保存：{result.fact_error}")
         super().__init__("\n".join(lines))
@@ -306,7 +310,7 @@ def prepare_restore(
     code_header_line, code_footer_line, existing_file_policy, *,
     source_text, target_mode="directory", normalize_text_newlines=False,
     ignore_text=MESSAGE_FILE_EXCLUDED, failure_text=MESSAGE_FILE_FAILED,
-    backup_enabled=True, backup_dir="",
+    backup_dir="",
 ):
     """一次解释输入框快照并固定全部文件成果；不读取导入文件。
 
@@ -328,28 +332,20 @@ def prepare_restore(
         raise TypeError("正文标准化开关必须是布尔值")
     if normalize_text_newlines:
         validate_file_rules(output_rules)
-    if type(backup_enabled) is not bool:
-        raise TypeError("拆分自动备份开关必须是布尔值")
     if type(backup_dir) is not str:
         raise TypeError("拆分备份目录必须是字符串")
-
-    selected_backup = backup_dir
-    if backup_enabled:
-        selected = strip_outer_quotes(backup_dir)
-        if not selected:
-            raise ValueError("已开启拆分自动备份，请填写有效的绝对备份目录")
-        backup_path = _native_path(selected)
-        if not backup_path.is_absolute():
-            raise ValueError(
-                "拆分备份目录必须是明确绝对路径；"
-                "不会猜测指定目录、程序目录或当前工作目录基准"
-            )
-        backup_path, backup_chain = checked_chain(
-            backup_path, include_observation=True,
-        )
-        if backup_chain[-1][1] not in ("absent", "directory"):
-            raise ValueError("拆分备份位置必须是普通目录或可创建的缺失目录")
-        selected_backup = str(backup_path)
+    selected = strip_outer_quotes(backup_dir)
+    if not selected:
+        raise ValueError("拆分强制备份，请填写有效的绝对备份目录")
+    backup_path = _native_path(selected)
+    if not backup_path.is_absolute():
+        raise ValueError("拆分备份目录必须是明确绝对路径，不猜测目录基准")
+    backup_path, backup_chain = checked_chain(
+        backup_path, include_observation=True,
+    )
+    if backup_chain[-1][1] not in ("absent", "directory"):
+        raise ValueError("拆分备份位置必须是普通目录或可创建的缺失目录")
+    selected_backup = str(backup_path)
 
     base = None
     if target_mode == "directory" or target_root_folder:
@@ -425,7 +421,7 @@ def prepare_restore(
     files = tuple(files)
     source_description = "本次输入框正文快照（粘贴或导入）"
     backup_root = None
-    if backup_enabled and files:
+    if files:
         task_id = uuid.uuid4().hex
         backup_root = (
             Path(selected_backup)
@@ -468,12 +464,13 @@ def prepare_restore(
         )
         for index, member in enumerate(files, 1)
     )
+    validate_shared_file_contents(units)
     projection = build_protection_projection(units, forbidden_roots=())
     return RestorePlan(
         source_description, target_mode, base,
         files, tuple(skipped), tuple(skip_targets),
         ignored_count, source_failure_count, log_expected, log_content,
-        backup_enabled, selected_backup, backup_root, projection,
+        selected_backup, backup_root, projection,
     )
 
 
@@ -496,15 +493,15 @@ class RestoreTask:
         self.log_result = None
         self.protection = None
         if plan.backup_root is not None:
-            if not plan.backup_enabled or not plan.files:
-                raise ValueError("无工作或关闭备份的拆分计划不得具有备份任务目录")
+            if not plan.files:
+                raise ValueError("无工作拆分计划不得具有备份任务目录")
             task_id = plan.backup_root.name.rsplit("_", 1)[-1]
             self.protection = RecoveryProtectionSession(
                 plan.projection, plan.backup_root, task_id, "split",
                 material_base=plan.base if plan.mode == "directory" else None,
             )
-        elif plan.backup_enabled and plan.files:
-            raise ValueError("开启备份的待写拆分计划缺少固定任务目录")
+        elif plan.files:
+            raise ValueError("待写拆分计划缺少强制备份任务目录")
         self.check_backup_isolation()
 
     @property
@@ -633,6 +630,17 @@ class RestoreTask:
             if ObjectIdentity(attributes.st_dev, attributes.st_ino) != expected.object_identity:
                 raise ValueError(f"本次已创建目录身份变化：{target}")
 
+    def _expected_member(self, member):
+        finished = {
+            key: (actual, {}) for key, actual in self._finished.items()
+        }
+        observed = self._finished.get(
+            identity(member.target), member.expected,
+        )
+        return project_task_observation(
+            observed, {}, shared_file_states(finished),
+        )
+
     def recheck(self, member=None):
         """开始时全量一次；动作边界只核对当前目标，不重读其他文件。
 
@@ -651,8 +659,7 @@ class RestoreTask:
             self._recheck_chain(
                 current.expected.chain[:-1], allow_created=True,
             )
-            finished = self._finished.get(identity(current.target))
-            recheck_file(current.expected if finished is None else finished)
+            recheck_file(self._expected_member(current))
 
     def _append(self, receipt):
         self.results = (*self.results, receipt)
@@ -707,7 +714,8 @@ class RestoreTask:
         if not isinstance(member.content, bytes):
             raise RuntimeError("活动拆分任务缺少完整不可变成果bytes")
         self._stage(member.target, "完整拆分文件成果准备")
-        artifact = prepare_content_artifact(member.expected, member.content)
+        expected = self._expected_member(member)
+        artifact = prepare_content_artifact(expected, member.content)
         self._artifact = artifact
         completed = False
         try:
@@ -730,12 +738,12 @@ class RestoreTask:
             self._stage(member.target, "拆分正式成果身份内容最终核验")
             actual = observe_file(member.target, include_digest=True)
             expected_identity = (
-                member.expected.object_identity
+                expected.object_identity
                 if artifact.mechanism == "in_place"
                 else ObjectIdentity(*artifact.identity)
             )
             links = (
-                member.expected.link_count
+                expected.link_count
                 if artifact.mechanism == "in_place" else 1
             )
             if (
@@ -786,8 +794,7 @@ class RestoreTask:
 
     def result(self, *, cancelled=False, log_path=None, completed=False, error=None):
         started = (
-            self.protection is not None
-            and bool(self.protection.directory_results)
+            self.protection is not None and self.protection.backup_completed
         )
         return RestoreResult(
             str(self.plan.base) if self.plan.base is not None else "",
@@ -795,7 +802,7 @@ class RestoreTask:
             log_path, int(error is not None),
             self.plan.ignored_count, self.plan.source_failure_count,
             cancelled, tuple(str(member.path) for member in self._created.values()),
-            self.plan.backup_enabled,
+
             str(self.backup_root) if started else "",
             self.results, self.completed_files, completed,
             self.current, self.phase, self.fact_error, error,
@@ -812,6 +819,10 @@ class RestoreTask:
             try:
                 self._stage(self.plan.base, "执行开始前一次全量固定目标复核")
                 self.recheck()
+                if self.protection is not None:
+                    self._stage(self.backup_root, "全部原状态备份屏障")
+                    self.protection.protect_all()
+                    self.recheck()
                 for member, active_unit in zip(
                     self.plan.files, self.plan.projection.units,
                 ):
@@ -825,12 +836,7 @@ class RestoreTask:
                     self._stage(member.target, "当前文件动作前复核")
                     self.recheck(member)
                     if self.protection is not None:
-                        self._stage(
-                            self.backup_root, "拆分修改前保护及正式清单发布",
-                        )
-                        self.protection.protect(active_unit.unit_id)
-                        self._stage(member.target, "保护后当前文件复核")
-                        self.recheck(member)
+                        # 全部原状态已保存，这里仅发布本单元开始事实。
                         self._stage(
                             self.backup_root, "工作改变前started屏障",
                         )
@@ -890,7 +896,7 @@ def split_and_restore(
     code_header_line, code_footer_line, existing_file_policy, log_func=None, *,
     source_text, target_mode="directory", normalize_text_newlines=False,
     ignore_text=MESSAGE_FILE_EXCLUDED, failure_text=MESSAGE_FILE_FAILED,
-    backup_enabled=True, backup_dir="",
+    backup_dir="",
 ):
     """正式组合入口：固定输入正文、完整准备、一次确认、逐文件执行。"""
     if not callable(confirm_func):
@@ -901,7 +907,7 @@ def split_and_restore(
         source_text=source_text, target_mode=target_mode,
         normalize_text_newlines=normalize_text_newlines,
         ignore_text=ignore_text, failure_text=failure_text,
-        backup_enabled=backup_enabled, backup_dir=backup_dir,
+        backup_dir=backup_dir,
     )
     task = RestoreTask(plan)
     try:
