@@ -10,14 +10,14 @@
 import hashlib
 import os
 import stat
-import sys
+
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from core.atomic_file import sync_directory
 from core.content_publication import (
     ContentPublicationError, ContentPublicationOptions,
-    ContentPublicationResult, dispose_content_artifact,
+    ContentPublicationResult, cleanup_content_artifact,
     prepare_copy_content_artifact, publish_content,
 )
 from core.file_observation import (
@@ -730,6 +730,12 @@ class PreparedTreeCopy:
     _current: Path | None
     _phase: str
     _artifact: object
+    _final_observation: TreeObservation | None
+
+    @property
+    def final_observation(self):
+        """正常结束核验取得的完整目标观察；不提供重新执行资格。"""
+        return self._final_observation
 
     def __init__(self, *arguments, **keywords):
         raise TypeError("独立树复制必须通过正式准备过程创建")
@@ -826,6 +832,7 @@ def prepare_tree_copy(
         ("durable_publication", durable_publication),
         ("_lifecycle", "prepared"), ("_results", ()),
         ("_current", None), ("_phase", "prepared"), ("_artifact", None),
+        ("_final_observation", None),
     ):
         object.__setattr__(copy, name, value)
     return copy
@@ -944,23 +951,6 @@ def _recheck_tree_copy_target(copy):
 def _append_tree_copy_result(copy, change, object_identity=None):
     receipt = TreeCopyStepResult(change, object_identity)
     object.__setattr__(copy, "_results", (*copy.results, receipt))
-
-
-def _dispose_tree_copy_artifact(copy):
-    artifact = copy._artifact
-    if artifact is None:
-        return
-    if artifact._lifecycle not in ("completed", "disposed"):
-        try:
-            dispose_content_artifact(artifact)
-        except (OSError, ValueError) as cleanup_error:
-            # 所有权拒绝或清理故障不替换主失败，不删除工作树。
-            print(
-                f"[树复制文件暂存清理失败] {artifact.path}：{cleanup_error}",
-                file=sys.stderr,
-            )
-            return
-    object.__setattr__(copy, "_artifact", None)
 
 
 def execute_tree_copy(copy, *, recheck_context=None):
@@ -1107,8 +1097,10 @@ def execute_tree_copy(copy, *, recheck_context=None):
     finally:
         # 不删除已经创建的目录或已发布文件。
         # 清理失败保留成果引用，不能把未知对象当成本次暂存删除。
-        _dispose_tree_copy_artifact(copy)
+        if cleanup_content_artifact(copy._artifact):
+            object.__setattr__(copy, "_artifact", None)
 
+    object.__setattr__(copy, "_final_observation", actual)
     object.__setattr__(copy, "_lifecycle", "completed")
     object.__setattr__(copy, "_phase", "completed")
     object.__setattr__(copy, "_current", None)
@@ -1116,3 +1108,12 @@ def execute_tree_copy(copy, *, recheck_context=None):
         copy.source.path, copy.expected.path, copy.results,
         True, "completed", None,
     )
+
+
+def tree_execution_results(prepared):
+    """正式树子核心到所属账本的步骤视图；保留每个步骤的原引用。"""
+    if isinstance(prepared, PreparedTreeCopy):
+        return tuple(receipt.change for receipt in prepared.results)
+    if isinstance(prepared, PreparedTreeRemoval):
+        return prepared.results
+    raise TypeError("树步骤视图必须消费正式树复制或移除核心")

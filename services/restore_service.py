@@ -8,26 +8,16 @@
 """
 
 import os
-import sys
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from core.content_publication import (
-    ContentPublicationError, ContentPublicationResult,
-    dispose_content_artifact, prepare_content_artifact, publish_content,
-)
+from core.content_publication import ContentPublicationResult
+from core.fixed_content_execution import FixedContentExecution
 from core.constants import (
     MESSAGE_FILE_EXCLUDED, MESSAGE_FILE_FAILED, SKIPPED_LOG_FILENAME,
 )
-from core.file_observation import (
-    DirectoryObservation, FileObservation, ObjectIdentity,
-    observe_file, recheck_file,
-)
-from core.filesystem_changes import (
-    FilesystemChangeError, FilesystemChangeResult,
-    execute_filesystem_change, prepare_directory_creation,
-)
+from core.file_observation import FileObservation, observe_file, recheck_file
 from core.merged_format import (
     classify_placeholder, parse_file_blocks, validate_markers,
     validate_placeholders,
@@ -46,8 +36,9 @@ from core.rule_lists import validate_file_rules
 from core.text_newlines import normalize_newlines
 from core.time_utils import now_stamp
 from core.task_observation import (
-    project_task_observation, shared_file_states, validate_shared_file_contents,
+    TaskObservationState, validate_shared_file_contents,
 )
+from core.fixed_task_execution import FixedTaskExecution, FixedTaskWork
 
 
 class RestoreScopeError(ValueError):
@@ -444,18 +435,6 @@ def prepare_restore(
     log_path = None if log_expected is None else log_expected.path
     _check_conflicts(files, log_path)
 
-    if log_expected is not None and log_expected.kind == "file":
-        for member in files:
-            if (
-                member.expected.kind == "file"
-                and log_expected.object_identity
-                == member.expected.object_identity
-            ):
-                raise ValueError(
-                    f"跳过日志与待写目标实际为同一对象："
-                    f"{log_expected.path} / {member.target}；"
-                    "整份任务未开始写入"
-                )
 
     units = tuple(
         FixedUnit(
@@ -481,12 +460,10 @@ class RestoreTask:
         if not isinstance(plan, RestorePlan):
             raise TypeError("拆分任务必须消费RestorePlan")
         self.plan = plan
-        self.consumed = False
-        self.results = ()
-        self.completed_files = ()
-        self._finished = {}
-        self._created = {}
-        self._artifact = None
+        self.task_execution = FixedTaskExecution()
+        self.observation_state = TaskObservationState(
+            member.expected for member in plan.files
+        )
         self.current = None
         self.phase = "prepared"
         self.fact_error = None
@@ -498,11 +475,29 @@ class RestoreTask:
             task_id = plan.backup_root.name.rsplit("_", 1)[-1]
             self.protection = RecoveryProtectionSession(
                 plan.projection, plan.backup_root, task_id, "split",
-                material_base=plan.base if plan.mode == "directory" else None,
+                material_base=plan.base,
             )
         elif plan.files:
             raise ValueError("待写拆分计划缺少强制备份任务目录")
         self.check_backup_isolation()
+
+    @property
+    def consumed(self):
+        return self.task_execution.consumed
+
+    @property
+    def results(self):
+        return self.task_execution.state.results
+
+    @property
+    def completed_files(self):
+        return tuple(
+            member.target
+            for index, member in enumerate(self.plan.files, 1)
+            if self.task_execution.entry_result(
+                f"split{index:06d}",
+            ).work_completed
+        )
 
     @property
     def backup_root(self):
@@ -523,7 +518,7 @@ class RestoreTask:
     def release_contents(self):
         # 终止时释放本任务持有的正文和观察引用；正式结果仍独立保留。
         # 调用方、traceback或保护投影持有的副本不承诺擦除。
-        self._finished.clear()
+        self.observation_state.release_observations()
         self.plan = replace(
             self.plan,
 
@@ -539,9 +534,8 @@ class RestoreTask:
         )
 
     def invalidate(self):
-        if self.consumed:
+        if not self.task_execution.invalidate():
             return False
-        self.consumed = True
         self.release_contents()
         self._stage(None, "cancelled")
         return True
@@ -566,7 +560,7 @@ class RestoreTask:
                     f"{resource}"
                 )
 
-    def _recheck_chain(self, observation, *, allow_created=False):
+    def _recheck_chain(self, observation):
         if not observation:
             return
         _, current = checked_chain(
@@ -579,11 +573,7 @@ class RestoreTask:
                 raise ValueError(f"规划后路径链变化：{path}")
             if actual == expected:
                 continue
-            if (
-                allow_created and expected == "absent" and actual == "directory"
-                and identity(path) in self._created
-            ):
-                continue
+
             raise ValueError(
                 f"规划后对象或必要父目录变化：{path}；"
                 f"expected={expected}, actual={actual}；必须重新预演及确认"
@@ -612,34 +602,8 @@ class RestoreTask:
         if self.plan.log_expected is not None and self.log_result is None:
             recheck_file(self.plan.log_expected)
 
-    def _recheck_created(self, member=None):
-        """只检查本次实际使用的自有父目录；全量仅用于开始关口。"""
-        positions = (
-            None if member is None else
-            {identity(path) for path, _ in member.expected.chain[:-1]}
-        )
-        for key, expected in self._created.items():
-            if positions is not None and key not in positions:
-                continue
-            target, chain = checked_chain(
-                expected.path, include_observation=True,
-            )
-            if chain[-1][1] != "directory":
-                raise ValueError(f"本次已创建目录存在性或类型变化：{target}")
-            attributes = target.lstat()
-            if ObjectIdentity(attributes.st_dev, attributes.st_ino) != expected.object_identity:
-                raise ValueError(f"本次已创建目录身份变化：{target}")
-
     def _expected_member(self, member):
-        finished = {
-            key: (actual, {}) for key, actual in self._finished.items()
-        }
-        observed = self._finished.get(
-            identity(member.target), member.expected,
-        )
-        return project_task_observation(
-            observed, {}, shared_file_states(finished),
-        )
+        return self.observation_state.expected(member.expected, self.results)
 
     def recheck(self, member=None):
         """开始时全量一次；动作边界只核对当前目标，不重读其他文件。
@@ -647,7 +611,9 @@ class RestoreTask:
         本检查不解析源码、不重新构建成果。当前目标内容、身份及
         必要父目录是写入安全前提，不是输入框正文的第二权威。
         """
-        self._recheck_created(member)
+        self.task_execution.state.recheck_created_directories(
+            None if member is None else member.expected,
+        )
         if member is None:
             self.check_backup_isolation()
             self.recheck_skips()
@@ -656,141 +622,39 @@ class RestoreTask:
         else:
             members = (member,)
         for current in members:
-            self._recheck_chain(
-                current.expected.chain[:-1], allow_created=True,
-            )
+            self.task_execution.state.recheck_parents(current.expected)
             recheck_file(self._expected_member(current))
 
-    def _append(self, receipt):
-        self.results = (*self.results, receipt)
-
-    def _create_parents(self, unit, member):
-        for directory in unit.parent_directories:
-            self._stage(directory, "固定必要目录创建或正常结果复用")
-            # 单目录核心在mkdir前核对自己的不存在及父链前提；
-            # 不为父目录创建重新读取全部文件正文。
-            self._recheck_created(member)
-            self._recheck_chain(
-                member.expected.chain[:-1], allow_created=True,
-            )
-            if identity(directory) in self._created:
-                continue
-            index = next(
-                number for number, (path, _) in enumerate(member.expected.chain)
-                if path == directory
-            )
-            absent = FileObservation(
-                directory, member.expected.chain[:index + 1], "absent",
-                None, None, None, None, None, None,
-            )
-            step = prepare_directory_creation(absent)
-            self._stage(directory, "固定必要目录步骤执行")
-            try:
-                receipt = execute_filesystem_change(step)
-            except FilesystemChangeError as error:
-                self._append(error.result)
-                self._stage(error.result.target, error.result.phase)
-                raise
-            self._append(receipt)
-            created = receipt.created_directory
-            if not isinstance(created, DirectoryObservation):
-                raise RuntimeError("正常目录创建结果缺少正式DirectoryObservation")
-            self._created[identity(directory)] = created
-
-    def _dispose(self, artifact):
-        if artifact._lifecycle in ("completed", "disposed"):
-            return
-        if artifact.mechanism == "in_place" and artifact._lifecycle == "attempted":
-            return
-        try:
-            dispose_content_artifact(artifact)
-        except (OSError, ValueError) as cleanup_error:
-            print(
-                f"[拆分自有成果清理未完成] {artifact.path}：{cleanup_error}",
-                file=sys.stderr,
-            )
-
     def _publish_member(self, member, effect):
-        if not isinstance(member.content, bytes):
-            raise RuntimeError("活动拆分任务缺少完整不可变成果bytes")
-        self._stage(member.target, "完整拆分文件成果准备")
-        expected = self._expected_member(member)
-        artifact = prepare_content_artifact(expected, member.content)
-        self._artifact = artifact
-        completed = False
-        try:
-            if (
-                artifact.digest != effect.after.records[0][2]
-                or artifact.content is not member.content
-            ):
-                raise ValueError("拆分成果不对应固定具体预期")
-            self._stage(member.target, "完整成果准备后当前目标复核")
-            self.recheck(member)
-            self._stage(member.target, "固定拆分文件成果发布")
-            try:
-                receipt = publish_content(artifact)
-            except ContentPublicationError as error:
-                self._append(error.result)
-                self._stage(error.result.target, error.result.phase)
-                raise
-            self._append(receipt)
-
-            self._stage(member.target, "拆分正式成果身份内容最终核验")
-            actual = observe_file(member.target, include_digest=True)
-            expected_identity = (
-                expected.object_identity
-                if artifact.mechanism == "in_place"
-                else ObjectIdentity(*artifact.identity)
-            )
-            links = (
-                expected.link_count
-                if artifact.mechanism == "in_place" else 1
-            )
-            if (
-                actual.kind != "file"
-                or actual.object_identity != expected_identity
-                or actual.link_count != links
-                or actual.digest != effect.after.records[0][2]
-            ):
-                raise OSError("拆分正式成果身份、链接或内容不符")
-            self._stage(member.target, "当前文件必要父目录最终核验")
-            self._recheck_created(member)
-            self._recheck_chain(
-                member.expected.chain[:-1], allow_created=True,
-            )
-            self._finished[identity(member.target)] = actual
-            self.completed_files = (*self.completed_files, member.target)
-            completed = True
-        finally:
-            self._dispose(artifact)
-            if completed or artifact._lifecycle == "disposed":
-                self._artifact = None
+        execution = FixedContentExecution(
+            self._expected_member(member), member.content,
+            desired_digest=effect.after.records[0][2],
+        )
+        state = self.task_execution.state
+        actual = state.execute_active(
+            execution,
+            lambda prepared: prepared.execute(
+                recheck_context=lambda: self.recheck(member),
+                record_step=state.record_step, stage=self._stage,
+            ),
+            stage=self._stage,
+        )
+        self._stage(member.target, "当前文件必要父目录最终核验")
+        state.recheck_parents(member.expected)
+        return actual
 
     def _publish_log(self):
         if self.plan.log_expected is None:
             return None
-        self._stage(self.plan.log_path, "辅助跳过日志固定前提复核")
-        self.recheck_log()
-        self._stage(self.plan.log_path, "完整辅助跳过日志成果准备")
-        artifact = prepare_content_artifact(
+        execution = FixedContentExecution(
             self.plan.log_expected, self.plan.log_content,
         )
-        self._artifact = artifact
-        try:
-            self._stage(self.plan.log_path, "辅助成果准备后日志前提复核")
-            self.recheck_log()
-            self._stage(self.plan.log_path, "辅助跳过日志成果发布")
-            try:
-                self.log_result = publish_content(artifact)
-            except ContentPublicationError as error:
-                self.log_result = error.result
-                self._stage(error.result.target, error.result.phase)
-                raise
-            return str(self.plan.log_path)
-        finally:
-            self._dispose(artifact)
-            if artifact._lifecycle in ("completed", "disposed"):
-                self._artifact = None
+        execution.execute(
+            recheck_context=self.recheck_log,
+            record_step=lambda receipt: setattr(self, "log_result", receipt),
+            stage=self._stage,
+        )
+        return str(self.plan.log_path)
 
     def result(self, *, cancelled=False, log_path=None, completed=False, error=None):
         started = (
@@ -801,7 +665,10 @@ class RestoreTask:
             len(self.confirmed_content_results), len(self.plan.skipped),
             log_path, int(error is not None),
             self.plan.ignored_count, self.plan.source_failure_count,
-            cancelled, tuple(str(member.path) for member in self._created.values()),
+            cancelled, tuple(
+                str(member.path)
+                for member in self.task_execution.state.created_directories.values()
+            ),
 
             str(self.backup_root) if started else "",
             self.results, self.completed_files, completed,
@@ -812,78 +679,54 @@ class RestoreTask:
     def execute(self, log_func=None):
         if self.consumed:
             raise ValueError("本次拆分任务已执行、失败或取消；必须重新预演及确认")
-        self.consumed = True
-        active_unit = None
-        unit_start = 0
+
+        def prepare_entry(entry):
+            member, unit = entry
+            self._stage(member.target, "还原进度记录")
+            if log_func:
+                log_func(
+                    f"正在还原第 {len(self.completed_files) + 1} 个文件："
+                    f"{member.source_path}"
+                )
+
+            def accept_completed(actuals):
+                self.observation_state.accept(actuals, self.results)
+
+
+            return FixedTaskWork(
+                unit,
+                lambda: (self._publish_member(member, unit.effects[0]),),
+                accept_completed, lambda: self.recheck(member),
+            )
+
+        def auxiliary():
+            log_path = self._publish_log()
+            self._stage(self.plan.base, "最终运行记录")
+            if log_func:
+                if log_path:
+                    log_func(f"跳过日志：{log_path}")
+                if self.protection is not None and self.protection.directory_results:
+                    log_func(f"拆分备份目录：{self.backup_root}")
+                log_func(
+                    f"代码拆分还原完成：成功 {len(self.completed_files)} 个，"
+                    f"跳过 {len(self.plan.skipped)} 个"
+                )
+            return log_path
+
         try:
             try:
-                self._stage(self.plan.base, "执行开始前一次全量固定目标复核")
-                self.recheck()
-                if self.protection is not None:
-                    self._stage(self.backup_root, "全部原状态备份屏障")
-                    self.protection.protect_all()
-                    self.recheck()
-                for member, active_unit in zip(
-                    self.plan.files, self.plan.projection.units,
-                ):
-                    unit_start = len(self.results)
-                    self._stage(member.target, "还原进度记录")
-                    if log_func:
-                        log_func(
-                            f"正在还原第 {len(self.completed_files) + 1} 个文件："
-                            f"{member.source_path}"
-                        )
-                    self._stage(member.target, "当前文件动作前复核")
-                    self.recheck(member)
-                    if self.protection is not None:
-                        # 全部原状态已保存，这里仅发布本单元开始事实。
-                        self._stage(
-                            self.backup_root, "工作改变前started屏障",
-                        )
-                        self.protection.begin(active_unit.unit_id)
-                    self._create_parents(active_unit, member)
-                    self._publish_member(member, active_unit.effects[0])
-                    if self.protection is not None:
-                        self._stage(
-                            self.backup_root, "拆分工作完成事实发布",
-                        )
-                        self.protection.complete(
-                            active_unit.unit_id, self.results[unit_start:],
-                        )
-                    active_unit = None
-
-                # 各文件在自己的发布边界已核验并登记完成；
-                # 不为循环结束再次读取全部已完成成果。
-                log_path = self._publish_log()
-                self._stage(self.plan.base, "最终运行记录")
-                if log_func:
-                    if log_path:
-                        log_func(f"跳过日志：{log_path}")
-                    if self.protection is not None and self.protection.directory_results:
-                        log_func(f"拆分备份目录：{self.backup_root}")
-                    log_func(
-                        f"代码拆分还原完成：成功 {len(self.completed_files)} 个，"
-                        f"跳过 {len(self.plan.skipped)} 个"
-                    )
-                self._stage(None, "completed")
+                log_path = self.task_execution.execute(
+                    tuple(zip(self.plan.files, self.plan.projection.units)),
+                    protection=self.protection,
+                    initial_recheck=self.recheck, prepare_entry=prepare_entry,
+                    entry_key=lambda entry:
+                    entry[1].members[0],
+                    stage=lambda role, target, phase: self._stage(target, phase),
+                    auxiliary=auxiliary, task_target=self.plan.base,
+                )
                 return self.result(log_path=log_path, completed=True)
             except (OSError, ValueError) as error:
-                if (
-                    active_unit is not None and self.protection is not None
-                    and not self.protection.failed
-                    and self.protection.document is not None
-                    and any(
-                        unit["id"] == active_unit.unit_id
-                        and unit["fact"]["state"] == "started"
-                        for unit in self.protection.document.value["units"]
-                    )
-                ):
-                    try:
-                        self.protection.uncertain(
-                            active_unit.unit_id, self.results[unit_start:],
-                        )
-                    except (OSError, ValueError) as fact_error:
-                        self.fact_error = fact_error
+                self.fact_error = self.task_execution.fact_error
                 raise RestoreExecutionError(
                     self.result(error=error), self,
                 ) from error

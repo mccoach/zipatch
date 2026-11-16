@@ -2,13 +2,10 @@
 
 """整包恢复服务：固定预检、一次确认和共享恢复核心。"""
 
-import sys
 import uuid
 
-from core.content_publication import (
-    ContentPublicationError, ContentPublicationResult,
-    dispose_content_artifact, prepare_content_artifact, publish_content,
-)
+from core.content_publication import ContentPublicationResult
+from core.fixed_content_execution import FixedContentExecution
 from core.filesystem_changes import FilesystemChangeResult
 from core.file_observation import observe_file, TreeObservation
 from core.recovery_execution import RecoveryExecution, RecoveryExecutionError
@@ -74,9 +71,9 @@ class BackupRestoreExecutor:
         self.source = evidence.task_root
         self.plan = plan_restore(evidence)
         self.confirmed = False
-        self.consumed = False
         self.execution_result = None
         self.auxiliary_result = None
+        self.auxiliary_execution = None
         self.backup_root = None
         self.role = "恢复准备"
         self.current = self.source
@@ -91,6 +88,7 @@ class BackupRestoreExecutor:
             evidence, self.plan.actions,
             protection_root=self.backup_root,
             protection_task_id=task_id,
+            material_base=self.backup_project_root,
         )
         self.risk_summary = {
             "restore_count": sum(action.execute for action in self.plan.actions),
@@ -99,6 +97,10 @@ class BackupRestoreExecutor:
             "backup_root": str(self.backup_root) if self.backup_root else "",
         }
         self.preview_text = self.format_preview()
+
+    @property
+    def consumed(self):
+        return self.execution.consumed
 
     @property
     def protection(self):
@@ -110,19 +112,17 @@ class BackupRestoreExecutor:
         self.confirmed = True
 
     def invalidate(self):
-        if self.consumed:
-            return False
-        self.consumed = True
-        self.execution.invalidate()
-        return True
+        return self.execution.invalidate()
 
     def format_preview(self):
         summary = self.risk_summary
         lines = [
             "【整包备份恢复】",
             f"来源：{self.source}",
-            f"保护项目根目录：{self.backup_project_root or '未启用还原前保护'}",
-            "保护项目根目录只定位二次备份，不改变清单中的恢复目标。",
+            f"保护根目录：{self.backup_project_root}",
+            "保护根用于定位备份保存目录，并作为共用材料布局的明确基准。",
+            "同卷对象按共同基准保留相对位置；跨卷对象由共用布局按卷分组。",
+            "该基准不限制、解释或改变原清单中的恢复目标。",
             "恢复清单记录的完整原状态，不重放原修改包。",
             "按内容、存在性和目录结构比较；仅时间不同不触发恢复。",
             f"预检需恢复：{summary['restore_count']} 个对象；"
@@ -196,26 +196,20 @@ class BackupRestoreExecutor:
         expected = observe_file(target, include_digest=True)
         if expected.kind != "absent":
             raise ValueError("恢复日志目标不再不存在")
-        artifact = None
-        try:
-            artifact = prepare_content_artifact(
-                expected, (self.preview_text + "\n\n" + report + "\n").encode("utf-8"),
-            )
-            self.execution.recheck()
-            try:
-                self.auxiliary_result = publish_content(artifact)
-            except ContentPublicationError as error:
-                self.auxiliary_result = error.result
-                raise
-        finally:
-            if artifact is not None and artifact._lifecycle not in ("completed", "disposed"):
-                try:
-                    dispose_content_artifact(artifact)
-                except (OSError, ValueError) as cleanup_error:
-                    print(
-                        f"[恢复日志暂存清理失败] {artifact.path}：{cleanup_error}",
-                        file=sys.stderr,
-                    )
+        execution = FixedContentExecution(
+            expected, (self.preview_text + "\n\n" + report + "\n").encode("utf-8"),
+        )
+        self.auxiliary_execution = execution
+
+        def stage(position, phase):
+            self.current, self.phase = position, phase
+
+        execution.execute(
+            recheck_context=self.execution.recheck,
+            record_step=lambda receipt: setattr(self, "auxiliary_result", receipt),
+            stage=stage,
+        )
+        self.auxiliary_execution = None
 
     def failure_message(self, error):
         lines = [
@@ -246,7 +240,6 @@ class BackupRestoreExecutor:
     def apply(self):
         if self.consumed or not self.confirmed:
             raise ValueError("恢复任务已消费，或尚未取得本次确认")
-        self.consumed = True
         self.role, self.current, self.phase = "工作恢复", self.source, "整包原状态恢复"
         try:
             try:

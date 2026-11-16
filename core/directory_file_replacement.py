@@ -6,20 +6,21 @@
 本组合不重新授权失败现场，不重写移除或发布算法。
 """
 
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from core.content_publication import (
     ContentPublicationError, PreparedContentArtifact,
     ContentPublicationOptions, ContentPublicationResult,
-    _recheck_copy_source, _verify_artifact, _verify_published_atomic,
-    dispose_content_artifact, prepare_copy_content_artifact, publish_content,
+    _prepare_staged, _recheck_copy_source, _validate_inputs,
+    _verify_artifact, _verify_published_atomic,
+    cleanup_content_artifact, dispose_content_artifact, publish_content,
 )
-from core.file_observation import FileObservation, TreeObservation
+from core.file_observation import FileObservation, TreeObservation, recheck_tree
+from core.execution_ledger import ExecutionLedger
 from core.filesystem_changes import (
     PreparedTreeRemoval, cancel_tree_removal,
-    execute_tree_removal, prepare_tree_removal,
+    execute_tree_removal, prepare_tree_removal, tree_execution_results,
 )
 from core.protection_projection import FixedEffect, validate_content_state
 from core.recovery_paths import overlaps
@@ -32,19 +33,24 @@ class PreparedDirectoryFileReplacement:
     artifact: PreparedContentArtifact
     removal: PreparedTreeRemoval
     _lifecycle: str
-    _results: tuple
+    _execution: ExecutionLedger
     _current: Path | None
     _phase: str
-    _active: object
     _removal_completed: bool
     _publication: ContentPublicationResult | None
+    _final_observation: FileObservation | None
+
+    @property
+    def final_observation(self):
+        """组合最终边界已核验的观察；失败不交付完成资格。"""
+        return self._final_observation
 
     def __init__(self, *arguments, **keywords):
         raise TypeError("目录转文件必须通过正式准备过程创建")
 
     @property
     def results(self):
-        return self._results
+        return self._execution.results
 
     @property
     def current(self):
@@ -56,7 +62,7 @@ class PreparedDirectoryFileReplacement:
 
     @property
     def active_change(self):
-        return self._active
+        return self._execution.active_change
 
 
 @dataclass(frozen=True)
@@ -141,16 +147,48 @@ def prepare_directory_file_replacement(
         raise ValueError("目录转文件来源不能位于待移除范围")
 
     removal = prepare_tree_removal(effect.before)
+    expected = FileObservation(
+        effect.before.path,
+        (*effect.before.chain[:-1], (effect.before.path, "absent")),
+        "absent", None, None, None, None, None, None,
+    )
+    # 目标目录仍存在，不能把预测absent拿去进行普通文件准备入场检查。
+    # 组合拥有目录前提和移除资格；暂存生成仍使用唯一内容算法。
+    import stat
+    from core.recovery_paths import checked_chain
+
+    _validate_inputs(
+        source, ContentPublicationOptions(check_target_mtime=True),
+    )
+    if (
+        source.attributes is None
+        or type(source.mtime_ns) is not int
+        or source.mtime_ns != source.attributes.st_mtime_ns
+    ):
+        raise ValueError("目录转文件来源缺少一致的固定属性及正式时间")
+    options = ContentPublicationOptions(
+        durable_publication=durable_publication,
+        mtime_ns=mtime_ns,
+        file_mode=stat.S_IMODE(source.attributes.st_mode),
+        atime_ns=source.attributes.st_atime_ns,
+    )
+    _validate_inputs(expected, options)
     artifact = None
     completed = False
     try:
-        artifact = prepare_copy_content_artifact(
-            source, effect.before, preserve_target_mode=False,
-            options=ContentPublicationOptions(
-                durable_publication=durable_publication,
-                mtime_ns=mtime_ns,
-            ),
+        _recheck_copy_source(source)
+        recheck_tree(effect.before)
+        _, parents = checked_chain(
+            expected.path.parent, include_observation=True,
         )
+        if any(kind != "directory" for _, kind in parents):
+            raise ValueError("目录转文件成果要求必要父目录已经存在")
+        artifact = _prepare_staged(
+            expected, (source.source_bytes,), options,
+            retained_content=source.source_bytes,
+        )
+        _recheck_copy_source(source)
+        recheck_tree(effect.before)
         if (
             artifact.mechanism != "atomic_replace"
             or artifact.expected.kind != "absent"
@@ -165,22 +203,18 @@ def prepare_directory_file_replacement(
         for name, value in (
             ("effect", effect), ("source", source),
             ("artifact", artifact), ("removal", removal),
-            ("_lifecycle", "prepared"), ("_results", ()),
-            ("_current", None), ("_phase", "prepared"), ("_active", None),
+            ("_lifecycle", "prepared"),
+            ("_execution", ExecutionLedger(tree_execution_results)),
+            ("_current", None), ("_phase", "prepared"),
             ("_removal_completed", False), ("_publication", None),
+            ("_final_observation", None),
         ):
             object.__setattr__(replacement, name, value)
         completed = True
         return replacement
     finally:
-        if not completed and artifact is not None:
-            try:
-                dispose_content_artifact(artifact)
-            except (OSError, ValueError) as cleanup_error:
-                print(
-                    f"[目录转文件准备放弃清理失败] {artifact.path}：{cleanup_error}",
-                    file=sys.stderr,
-                )
+        if not completed:
+            cleanup_content_artifact(artifact)
 
 
 def cancel_directory_file_replacement(replacement):
@@ -196,19 +230,6 @@ def cancel_directory_file_replacement(replacement):
     dispose_content_artifact(replacement.artifact)
     object.__setattr__(replacement, "_lifecycle", "cancelled")
     _stage(replacement, None, "cancelled")
-
-
-def _dispose_failed_artifact(replacement):
-    artifact = replacement.artifact
-    if artifact._lifecycle in ("completed", "disposed"):
-        return
-    try:
-        dispose_content_artifact(artifact)
-    except (OSError, ValueError) as cleanup_error:
-        print(
-            f"[目录转文件暂存清理失败] {artifact.path}：{cleanup_error}",
-            file=sys.stderr,
-        )
 
 
 def execute_directory_file_replacement(replacement, *, recheck_context=None):
@@ -238,24 +259,11 @@ def execute_directory_file_replacement(replacement, *, recheck_context=None):
         check_sources()
 
         _stage(replacement, target, "固定完整目录移除")
-        object.__setattr__(replacement, "_active", replacement.removal)
-        removed = False
-        try:
-            execute_tree_removal(
-                replacement.removal, before_step=check_sources,
-            )
-            removed = True
-        finally:
-            object.__setattr__(
-                replacement, "_results", replacement.removal.results,
-            )
-            if removed:
-                object.__setattr__(replacement, "_active", None)
-            else:
-                _stage(
-                    replacement, replacement.removal.current,
-                    replacement.removal.phase,
-                )
+        replacement._execution.execute_active(
+            replacement.removal, execute_tree_removal,
+            stage=lambda current, phase: _stage(replacement, current, phase),
+            before_step=check_sources,
+        )
         object.__setattr__(replacement, "_removal_completed", True)
 
         # 不重新观察并授权目标：成果始终消费准备时固定的absent投影；
@@ -267,28 +275,25 @@ def execute_directory_file_replacement(replacement, *, recheck_context=None):
             publication = publish_content(replacement.artifact)
         except ContentPublicationError as error:
             object.__setattr__(replacement, "_publication", error.result)
-            object.__setattr__(
-                replacement, "_results", (*replacement.results, error.result),
-            )
+            replacement._execution.append_results((error.result,))
             _stage(replacement, error.result.target, error.result.phase)
             raise
         object.__setattr__(replacement, "_publication", publication)
-        object.__setattr__(
-            replacement, "_results", (*replacement.results, publication),
-        )
+        replacement._execution.append_results((publication,))
 
         _stage(replacement, replacement.source.path, "发布后固定来源及所属范围复核")
         check_sources()
         _stage(replacement, target, "组合最终文件内容身份及正式时间核验")
-        _verify_published_atomic(replacement.artifact)
+        actual = _verify_published_atomic(replacement.artifact)
     except (OSError, ValueError) as error:
         raise DirectoryFileReplacementError(
             _result(replacement, error=error), replacement,
         ) from error
     finally:
         # 只放弃本次自有独立暂存，不删除目录残余或已发布工作文件。
-        _dispose_failed_artifact(replacement)
+        cleanup_content_artifact(replacement.artifact)
 
+    object.__setattr__(replacement, "_final_observation", actual)
     object.__setattr__(replacement, "_lifecycle", "completed")
     _stage(replacement, None, "completed")
     return _result(replacement, completed=True)

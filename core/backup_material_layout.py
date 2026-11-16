@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""固定保护对象到直观材料位置的纯投影，不查询或改变文件系统。"""
+"""固定保护对象及明确根基准到材料位置的唯一纯投影。"""
 
 import os
 from pathlib import Path
@@ -9,73 +9,61 @@ from types import MappingProxyType
 from core.protection_projection import (
     ProtectionProjection, validate_absolute_path, validate_relative_position,
 )
-from core.recovery_paths import contains, identity
+from core.recovery_paths import identity
+
+
+def _volume_prefix(path):
+    drive = path.drive
+    if len(drive) == 2 and drive[1] == ":":
+        return drive[0].upper()
+    if drive.startswith("\\\\"):
+        parts = drive.lstrip("\\").split("\\")
+        if len(parts) != 2 or not all(parts):
+            raise ValueError("备份UNC分组缺少服务器及共享名")
+        return "UNC/" + "/".join(parts)
+    return "ROOT"
 
 
 def build_backup_material_paths(projection, *, base=None):
-    """任务开始前一次固定布局；不存在对象也参与基准计算。
+    """一次固定布局，不查询文件系统，不按业务类别选择算法。
 
-    明确业务根优先。保护对象包含业务根自身或其祖先时，
-    基准上移至所有对象和业务根的共同父目录，保留对象原名。
-    无业务根时按盘符或UNC共享根分组，分别取对象父目录的共同路径。
-    返回值按对象编号关联；编号不成为材料文件名。
+    不存在对象同样参与位置计算，但材料持久化由保护协调决定。
+    单卷且具有同卷根基准时，以根和所有对象父目录的共同路径
+    为基准，不添加卷层；根自身、祖先及同卷根外对象自然上移。
+    无适用根或跨卷时，各卷分别取共同父目录并添加卷层。
     """
     if not isinstance(projection, ProtectionProjection):
         raise TypeError("备份布局必须消费正式ProtectionProjection")
     if base is not None:
         if not isinstance(base, Path) or not base.is_absolute():
-            raise ValueError("备份业务基准必须是明确绝对Path")
+            raise ValueError("备份根基准必须是明确绝对Path")
         validate_absolute_path(base)
 
     objects = projection.objects
     if not objects:
         return MappingProxyType({})
 
-    groups = {}
-    if base is not None:
-        if any(
-            not contains(base, member.target)
-            and not contains(member.target, base)
-            for member in objects
-        ):
-            raise ValueError("明确业务基准不能覆盖全部保护对象")
-        candidates = [str(base)]
-        candidates.extend(
-            str(member.target.parent)
-            for member in objects
-            if contains(member.target, base)
-        )
-        root = Path(os.path.commonpath(candidates))
-        groups[""] = (root, objects)
-    else:
-        by_volume = {}
-        for member in objects:
-            anchor = member.target.anchor
-            if not anchor:
-                raise ValueError("保护对象缺少明确文件系统根")
-            by_volume.setdefault(identity(Path(anchor)), []).append(member)
+    by_volume = {}
+    for member in objects:
+        anchor = member.target.anchor
+        if not anchor:
+            raise ValueError("保护对象缺少明确文件系统根")
+        by_volume.setdefault(identity(Path(anchor)), []).append(member)
 
-        for members in by_volume.values():
-            first = members[0].target
-            root = Path(os.path.commonpath([
-                str(member.target.parent) for member in members
-            ]))
-            drive = first.drive
-            if len(drive) == 2 and drive[1] == ":":
-                prefix = drive[0].upper()
-            elif drive.startswith("\\\\"):
-                # UNC名称已经过正式路径检查；共享根保持可辨认的层级。
-                parts = drive.lstrip("\\").split("\\")
-                if len(parts) != 2 or not all(parts):
-                    raise ValueError("备份UNC分组缺少服务器及共享名")
-                prefix = "UNC/" + "/".join(parts)
-            else:
-                prefix = "ROOT"
-            groups[prefix] = (root, tuple(members))
+    base_volume = None if base is None else identity(Path(base.anchor))
+    groups = []
+    for volume, members in by_volume.items():
+        use_base = len(by_volume) == 1 and volume == base_volume
+        candidates = [str(member.target.parent) for member in members]
+        if use_base:
+            candidates.append(str(base))
+        root = Path(os.path.commonpath(candidates))
+        prefix = "" if use_base else _volume_prefix(members[0].target)
+        groups.append((prefix, root, tuple(members)))
 
     result = {}
     positions = []
-    for prefix, (root, members) in groups.items():
+    for prefix, root, members in groups:
         for member in members:
             relative = member.target.relative_to(root).as_posix()
             if relative in ("", "."):

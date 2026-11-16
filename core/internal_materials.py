@@ -13,6 +13,7 @@ from pathlib import Path
 from tempfile import mkdtemp
 
 from core.atomic_file import sync_directory
+from core.execution_ledger import ExecutionLedger
 from core.content_publication import (
     ContentPublicationOptions, PreparedContentArtifact,
     _recheck_copy_source, _verify_artifact, _verify_published_atomic,
@@ -24,7 +25,8 @@ from core.file_observation import (
 )
 from core.filesystem_changes import (
     FilesystemChangeError, FilesystemChangeResult,
-    _recheck_tree_copy_source, _recheck_tree_copy_target,
+
+    _recheck_tree_copy_source, tree_execution_results,
     execute_filesystem_change, execute_tree_copy, execute_tree_removal,
     prepare_directory_creation, prepare_empty_directory_removal,
     prepare_tree_copy, prepare_tree_removal,
@@ -46,9 +48,8 @@ class PreparedInternalMaterial:
     _container_identity: ObjectIdentity | None
     _copy: object
     _staged_tree: TreeObservation | None
-    _active: object
+    _execution: ExecutionLedger
     _lifecycle: str
-    _results: tuple
     _current: Path | None
     _phase: str
     _publication: str
@@ -70,7 +71,7 @@ class PreparedInternalMaterial:
 
     @property
     def results(self):
-        return self._results
+        return self._execution.results
 
     @property
     def current(self):
@@ -83,7 +84,7 @@ class PreparedInternalMaterial:
     @property
     def active_change(self):
         """失败子核心只读保留，不恢复其执行资格。"""
-        return self._active
+        return self._execution.active_change
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ class InternalMaterialResult:
     cleanup_state: str
     results: tuple
     error: OSError | ValueError | None = None
+    observation: FileObservation | TreeObservation | None = None
 
     @property
     def succeeded(self):
@@ -143,9 +145,7 @@ def _stage(material, current, phase):
 
 
 def _append_results(material, results):
-    object.__setattr__(
-        material, "_results", (*material.results, *tuple(results)),
-    )
+    material._execution.append_results(tuple(results))
 
 
 def _removed_container(material):
@@ -181,7 +181,7 @@ def _cleanup_state(material):
     return "not_acquired"
 
 
-def _result(material, error=None):
+def _result(material, error=None, *, observation=None):
     return InternalMaterialResult(
         material.source.path, material.expected.path,
         "directory" if isinstance(material.source, TreeObservation) else "file",
@@ -190,7 +190,7 @@ def _result(material, error=None):
         material._publication != "not_attempted",
         material._publication, material._publication_completed,
         material._confirmation_completed, _cleanup_state(material),
-        material.results, error,
+        material.results, error, observation,
     )
 
 
@@ -301,26 +301,6 @@ def _relocate_tree(expected, target):
     )
 
 
-def _execute_tree_core(material, prepared, executor, *, copy=False):
-    """所有退出路径保留真实结果和准确子核心现场。"""
-    object.__setattr__(material, "_active", prepared)
-    completed = False
-    try:
-        result = executor(prepared)
-        completed = True
-        return result
-    finally:
-        _append_results(
-            material,
-            (receipt.change for receipt in prepared.results)
-            if copy else prepared.results,
-        )
-        if completed:
-            object.__setattr__(material, "_active", None)
-        else:
-            _stage(material, prepared.current, prepared.phase)
-
-
 def _remove_empty_container(material):
     _stage(material, material.container_path, "自有空容器身份及范围核验")
     _check_container(material, empty=True)
@@ -331,7 +311,7 @@ def _remove_empty_container(material):
     ):
         raise ValueError("空容器不再归本次拥有")
     step = prepare_empty_directory_removal(expected)
-    object.__setattr__(material, "_active", step)
+    material._execution.scene = step
     _stage(material, material.container_path, "自有空容器移除")
     try:
         result = execute_filesystem_change(step)
@@ -340,7 +320,7 @@ def _remove_empty_container(material):
         _stage(material, error.result.target, error.result.phase)
         raise
     _append_results(material, (result,))
-    object.__setattr__(material, "_active", None)
+    material._execution.scene = None
 
 
 def prepare_internal_material(source, expected, *, durable_publication=True):
@@ -352,8 +332,9 @@ def prepare_internal_material(source, expected, *, durable_publication=True):
         ("durable_publication", durable_publication),
         ("_artifact", None), ("_container", None),
         ("_container_identity", None), ("_copy", None),
-        ("_staged_tree", None), ("_active", None),
-        ("_lifecycle", "preparing"), ("_results", ()),
+        ("_staged_tree", None),
+        ("_execution", ExecutionLedger(tree_execution_results)),
+        ("_lifecycle", "preparing"),
         ("_current", expected.path),
         ("_phase", "固定编号不存在及必要父目录复核"),
         ("_publication", "not_attempted"),
@@ -397,11 +378,14 @@ def prepare_internal_material(source, expected, *, durable_publication=True):
                 )
                 object.__setattr__(material, "_copy", copy)
                 _stage(material, container / "material", "固定独立材料树复制")
-                _execute_tree_core(
-                    material, copy, execute_tree_copy, copy=True,
+                material._execution.execute_active(
+                    copy, execute_tree_copy,
+                    stage=lambda current, phase: _stage(material, current, phase),
                 )
                 _stage(material, container / "material", "完整独立材料树核验")
-                staged = _recheck_tree_copy_target(copy)
+                staged = copy.final_observation
+                if not isinstance(staged, TreeObservation):
+                    raise RuntimeError("正常内部材料复制缺少最终树观察")
                 object.__setattr__(material, "_staged_tree", staged)
                 _check_container(material)
 
@@ -460,9 +444,9 @@ def publish_internal_material(material):
 
         _stage(material, material.expected.path, "正式独立材料结果核验")
         if material._artifact is not None:
-            _verify_published_atomic(material._artifact)
+            actual = _verify_published_atomic(material._artifact)
         else:
-            _check_material_tree(_relocate_tree(
+            actual = _check_material_tree(_relocate_tree(
                 material._staged_tree, material.expected.path,
             ))
         _, chain = checked_chain(
@@ -491,7 +475,7 @@ def publish_internal_material(material):
         object.__setattr__(material._artifact, "_lifecycle", "completed")
     object.__setattr__(material, "_lifecycle", "completed")
     _stage(material, None, "completed")
-    return _result(material)
+    return _result(material, observation=actual)
 
 
 def _make_staged_files_writable(material):
@@ -555,7 +539,10 @@ def dispose_internal_material(material):
             _make_staged_files_writable(material)
             removal = prepare_tree_removal(material._staged_tree)
             _stage(material, material.staging_path, "自有完整材料树取消移除")
-            _execute_tree_core(material, removal, execute_tree_removal)
+            material._execution.execute_active(
+                removal, execute_tree_removal,
+                stage=lambda current, phase: _stage(material, current, phase),
+            )
             _remove_empty_container(material)
         return _confirm_disposal(material)
     except (OSError, ValueError) as error:

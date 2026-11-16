@@ -56,6 +56,11 @@ class EntryHistoryInteractionTests(unittest.TestCase):
             self.binding, self.commits, "test.path",
         )
         self.root.update()
+        # 下拉属于当前输入区域。先完成窗口激活和焦点事件，
+        # 再测试打开、过滤及Enter；不让待处理的根FocusIn充当用户离开。
+        self.entry.focus_force()
+        self.root.update()
+        self.assertIs(self.root.focus_displayof(), self.entry)
 
     def tearDown(self):
         self.root.destroy()

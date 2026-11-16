@@ -180,7 +180,7 @@ class BackupLayoutV4Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_document(duplicate)
 
-    def test_incremental_publication_keeps_first_material_position(self):
+    def test_full_barrier_preserves_all_fixed_material_positions(self):
         first = self.project / "src" / "a.txt"
         second = self.project / "docs" / "b.txt"
         first.parent.mkdir()
@@ -188,33 +188,26 @@ class BackupLayoutV4Tests(unittest.TestCase):
         first.write_bytes(b"a")
         second.write_bytes(b"b")
         projection = self.projection((first, second))
-        task = self.backups / "incremental"
+        task = self.backups / "complete"
         session = RecoveryProtectionSession(
-            projection, task, "incremental", "patch",
+            projection, task, "complete", "patch",
             durable_publication=False, material_base=self.project,
         )
-        session.protect(projection.units[0].unit_id)
+        fixed = dict(session.material_paths)
+        self.assertIsNone(session.document)
+        session.protect_all()
         entries = session.document.value["objects"]
-        self.assertEqual(len(entries), 1)
-        before = plain(entries[0])
-        identifier = before["id"]
-        self.assertEqual(before["target"], str(first))
-        self.assertEqual(before["material"], "src/a.txt")
-
-        session.protect(projection.units[1].unit_id)
-        after_by_id = {
-            entry["id"]: plain(entry)
-            for entry in session.document.value["objects"]
-        }
-        self.assertEqual(len(after_by_id), 2)
-        # 数组顺序不是对象身份；同一ID的全部原事实必须保持。
-        self.assertEqual(after_by_id[identifier], before)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(dict(session.material_paths), fixed)
         self.assertEqual(
-            {entry["material"] for entry in after_by_id.values()},
+            {entry["material"] for entry in entries},
             {"src/a.txt", "docs/b.txt"},
         )
         self.assertEqual((task / "files/src/a.txt").read_bytes(), b"a")
         self.assertEqual((task / "files/docs/b.txt").read_bytes(), b"b")
+        self.assertTrue((task / "backup.complete").is_file())
+        with self.assertRaises(ValueError):
+            session.protect_all()
 
     def test_directory_material_is_read_as_original_tree(self):
         folder = self.project / "src"
@@ -238,11 +231,9 @@ class BackupLayoutV4Tests(unittest.TestCase):
         )
 
     def test_restore_reads_material_relative_path(self):
-        from core.recovery_execution import prepare_recovery_execution
-        from services.recovery import plan_restore
-        from services.recovery_selection import (
-            change_restore_decisions, initial_restore_decisions,
-            selected_restore_plan,
+        from services.patch_service import (
+            apply_backup_restore, confirm_backup_restore,
+            preview_backup_restore,
         )
         target = self.project / "nested" / "original.txt"
         target.parent.mkdir()
@@ -256,19 +247,21 @@ class BackupLayoutV4Tests(unittest.TestCase):
         session.protect_all()
         target.write_bytes(b"changed")
         evidence = read_recovery_evidence(task)
-        plan = plan_restore(self.backups, evidence)
-        decisions = change_restore_decisions(
-            plan, initial_restore_decisions(plan), (), "restore", scope="all",
+        self.assertEqual(
+            evidence.document.value["objects"][0]["material"],
+            "nested/original.txt",
         )
-        selected = selected_restore_plan(plan, decisions)
-        execution = prepare_recovery_execution(
-            evidence, selected.units, kept=selected.kept,
-            unchanged=selected.unchanged,
-            forbidden_roots=(self.backups,), durable_publication=False,
+        preview = preview_backup_restore(
+            str(task), backup_dir=str(self.backups),
+            backup_project_root=str(self.project),
         )
-        result = execution.execute()
-        self.assertTrue(result.succeeded)
+        confirm_backup_restore(preview)
+        result = apply_backup_restore(preview)
+        self.assertTrue(result.complete_original_state)
         self.assertEqual(target.read_bytes(), b"original")
+        self.assertTrue(
+            (Path(result.backup_root) / "backup.complete").is_file(),
+        )
 
 
 class RecoveryVersionTests(unittest.TestCase):

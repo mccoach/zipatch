@@ -7,8 +7,6 @@
 """
 
 import re
-import stat
-import sys
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
@@ -16,25 +14,20 @@ from pathlib import Path
 from types import MappingProxyType
 
 from core.constants import PATCH_PROTOCOL_DESCRIPTION, SUPPORTED_PATCH_OPS
-from core.content_publication import (
-    ContentPublicationError, ContentPublicationResult,
-    dispose_content_artifact, prepare_content_artifact,
-    prepare_copy_content_artifact, publish_content,
-)
+from core.content_publication import ContentPublicationResult
+from core.fixed_content_execution import FixedContentExecution
 from core.file_observation import (
-    FileObservation, ObjectIdentity, TreeObservation,
+    FileObservation, TreeObservation,
     observe_file, observe_tree, project_removed_file_links,
     recheck_file, recheck_tree,
 )
 from core.filesystem_changes import (
-    FilesystemChangeError, FilesystemChangeResult,
-    PreparedTreeCopy, PreparedTreeRemoval, _recheck_tree_copy_target,
-    execute_filesystem_change, execute_tree_copy, execute_tree_removal,
+    FilesystemChangeResult, execute_tree_copy, execute_tree_removal,
     prepare_directory_creation, prepare_file_removal,
     prepare_tree_copy, prepare_tree_removal,
 )
 from core.name_moves import (
-    NativeNameMoveResult, PreparedNameMove,
+    NativeNameMoveResult,
     execute_observed_name_move, prepare_observed_name_move,
 )
 from core.path_validation import normalize_rel_path, safe_join
@@ -45,7 +38,8 @@ from core.rule_lists import validate_file_rules
 from core.text_io import decode_text_bytes
 from core.text_locations import TextSnapshot
 from core.time_utils import now_stamp
-from core.task_observation import project_task_observation, shared_file_states
+from core.task_observation import TaskObservationState
+from core.fixed_task_execution import FixedTaskExecution, FixedTaskWork
 from services.patch_backup import resolve_backup_base_dir
 from services.patch_contracts import (
     collect_content_contract_errors, collect_path_contract_errors,
@@ -95,15 +89,6 @@ def _absent(observed):
         "absent", None, None, None, None, None, None,
     )
 
-
-def _active_results(active):
-    if active is None:
-        return ()
-    if isinstance(active, PreparedTreeCopy):
-        return tuple(receipt.change for receipt in active.results)
-    if isinstance(active, (PreparedTreeRemoval, PreparedNameMove)):
-        return active.results
-    raise TypeError("活动修改包组合必须是正式共享核心")
 
 
 def _release_observation(observed):
@@ -186,37 +171,45 @@ class PatchExecutor:
         self.protection = None
         self.backup_root = None
         self.execution_units = ()
-        self.unit_results = {}
         self.source_snapshots = {}
         self.located_operations = []
         self._observations = {}
         self._actions = []
-        self._original_files = {}
-        self._finished = {}
-        self._created = {}
-        self._results = ()
-        self._active = None
+        self.observation_state = TaskObservationState(())
         self._active_unit = None
-        self._artifact = None
-        self._scene = None
         self.logs = []
         self.auxiliary_results = []
         self.fact_error = None
         self.current = None
         self.stage = "尚未执行"
         self.role = "任务准备"
-        self.work_completed = False
-
+        self.task_execution = FixedTaskExecution()
         self.previewed = False
-        self.consumed = False
+
+    @property
+    def consumed(self):
+        return self.task_execution.consumed
+
+    @property
+    def work_completed(self):
+        return self.task_execution.work_completed
 
     @property
     def results(self):
-        return (*self._results, *_active_results(self._active))
+        return self.task_execution.state.results
 
     @property
     def active_change(self):
-        return self._active or self._artifact or self._scene
+        return self.task_execution.state.active_change
+
+    @property
+    def unit_results(self):
+        return {
+            unit.index: PatchUnitResult(
+                unit, self.task_execution.entry_result(unit.index),
+            )
+            for unit in self.execution_units
+        }
 
     @property
     def confirmed_content_results(self):
@@ -240,7 +233,7 @@ class PatchExecutor:
 
     @property
     def created_directories(self):
-        return MappingProxyType(self._created)
+        return self.task_execution.state.created_directories
 
     def _stage(self, role, target, stage):
         self.role, self.current, self.stage = role, target, stage
@@ -427,8 +420,8 @@ class PatchExecutor:
         self.protection = None
         self.backup_root = None
         self.execution_units = ()
-        self.unit_results.clear()
-        self._original_files.clear()
+
+        self.observation_state.release_observations()
 
     def preview(self, patch):
         if self.previewed or self.consumed:
@@ -478,10 +471,7 @@ class PatchExecutor:
                         self.plan, self.source_snapshots,
                         self.located_operations, text_newlines=newlines,
                     )
-                    self.unit_results = {
-                        unit.index: PatchUnitResult(unit)
-                        for unit in self.execution_units
-                    }
+
                     phase = "保护规划或材料隔离"
                     self.projection = build_protection_projection(
                         (unit.fixed for unit in self.execution_units if unit.execute),
@@ -498,13 +488,11 @@ class PatchExecutor:
                             self.projection, self.backup_root, task_id, "patch",
                             material_base=self.root,
                         )
-                    for action in self.plan.actions:
-                        for observed in action.expectations:
-                            for _, member in _files(observed):
-                                key = identity(member.path)
-                                previous = self._original_files.setdefault(key, member)
-                                if previous != member:
-                                    raise ValueError("同一文件最初观察矛盾")
+                    self.observation_state = TaskObservationState(
+                        observed
+                        for action in self.plan.actions
+                        for observed in action.expectations
+                    )
                 except (OSError, ValueError) as error:
                     message = f"{phase}失败：{error}"
                     errors.append(message)
@@ -611,60 +599,12 @@ class PatchExecutor:
                         "复制来源与本包内容修改目标共享硬链接对象；请分包执行。"
                     )
 
-    def _removed_links(self):
-        """每个原名称只扣减一次；重建同名成果不再次移除原对象。"""
-        counts = {}
-        removed_names = set()
-        for receipt in self.results:
-            removes_name = (
-                isinstance(receipt, FilesystemChangeResult)
-                and receipt.succeeded and receipt.kind == "remove_file"
-                or isinstance(receipt, ContentPublicationResult)
-                and receipt.succeeded and receipt.mechanism == "atomic_replace"
-                or isinstance(receipt, NativeNameMoveResult)
-                and receipt.succeeded
-            )
-            if not removes_name:
-                continue
-            key = identity(receipt.target)
-            if key in removed_names:
-                continue
-            original = self._original_files.get(key)
-            if original is None:
-                continue
-            removed_names.add(key)
-            identifier = original.object_identity
-            counts[identifier] = counts.get(identifier, 0) + 1
-        return counts
-
-    def _parents(self, observed):
-        _, current = checked_chain(
-            observed.path.parent, include_observation=True,
-        )
-        initial = dict(observed.chain[:-1])
-        for path, kind in current:
-            if kind == initial[path]:
-                continue
-            if (
-                initial[path] == "absent" and kind == "directory"
-                and identity(path) in self._created
-            ):
-                continue
-            raise ValueError(f"必要父目录偏离固定计划：{path}")
-
     def recheck(self):
-        """所属新边界比较；活动单元自身由正式子核心维护。"""
+        """联合业务范围比较；共同状态负责创建目录身份和父链。"""
         checked_root(self.root)
-        for directory in self._created.values():
-            target, chain = checked_chain(
-                directory.path, include_observation=True,
-            )
-            if chain[-1][1] != "directory":
-                raise ValueError(f"已创建目录存在性或类型变化：{target}")
-            attributes = target.lstat()
-            if ObjectIdentity(attributes.st_dev, attributes.st_ino) != directory.object_identity:
-                raise ValueError(f"已创建目录身份变化：{target}")
-        counts = self._removed_links()
+        self.task_execution.state.recheck_created_directories()
+        results = self.results
+        self.observation_state.consume_results(results)
         seen = set()
         for unit in self.execution_units:
             if unit is self._active_unit:
@@ -675,158 +615,45 @@ class PatchExecutor:
                     if key in seen:
                         continue
                     seen.add(key)
-                    self._parents(observed)
-                    finished = self._finished.get(key)
-                    shared = shared_file_states(self._finished)
-                    if finished is None:
-                        expected = (
-                            observed if isinstance(observed, SkippedPatchPath) else
-                            project_task_observation(observed, counts, shared)
-                        )
-                    else:
-                        actual, baseline = finished
-                        expected = project_task_observation(
-                            actual, counts, shared, baseline=baseline,
-                        )
+                    self.task_execution.state.recheck_parents(observed)
+                    expected = (
+                        observed if isinstance(observed, SkippedPatchPath) else
+                        self.observation_state.expected(observed, results)
+                    )
                     _recheck(expected)
-
-    def _append(self, receipt):
-        self._results = (*self._results, receipt)
-
-    def _step(self, step):
-        self._scene = step
-        self._stage("工作目标", step.expected.path, "固定名称步骤执行")
-        try:
-            receipt = execute_filesystem_change(step)
-        except FilesystemChangeError as error:
-            self._append(error.result)
-            self._stage("工作目标", error.result.target, error.result.phase)
-            raise
-        self._append(receipt)
-        self._scene = None
-        return receipt
-
-    def _composite(self, prepared, executor, **keywords):
-        self._active = prepared
-        returned = False
-        try:
-            result = executor(prepared, **keywords)
-            returned = True
-            return result
-        finally:
-            self._results = (*self._results, *_active_results(prepared))
-            self._active = None
-            if not returned:
-                self._scene = prepared
-                self._stage("工作目标", prepared.current, prepared.phase)
-
-    def _dispose(self, artifact):
-        if artifact._lifecycle in ("completed", "disposed"):
-            return
-        if artifact.mechanism == "in_place" and artifact._lifecycle == "attempted":
-            return
-        try:
-            dispose_content_artifact(artifact)
-        except (OSError, ValueError) as error:
-            print(
-                f"[修改包自有成果清理失败] {artifact.path}：{error}",
-                file=sys.stderr,
-            )
 
     def _publish(
         self, expected, content=None, *, source=None,
         auxiliary=False, desired_digest=None,
     ):
-        artifact = None
-        self._stage(self.role, expected.path, "完整固定成果准备")
-        try:
-            artifact = (
-                prepare_content_artifact(expected, content)
-                if source is None else
-                prepare_copy_content_artifact(source, expected)
+        """输入和辅助归属归业务；工作现场及步骤由共同状态拥有。"""
+        execution = FixedContentExecution(
+            expected, content, source=source, desired_digest=desired_digest,
+        )
+        stage = lambda target, phase: self._stage(self.role, target, phase)
+        if auxiliary:
+            return execution.execute(
+                recheck_context=self.recheck,
+                record_step=self.auxiliary_results.append, stage=stage,
             )
-            self._artifact = artifact
-            if desired_digest is not None and artifact.digest != desired_digest:
-                raise ValueError("完整成果不对应固定具体预期")
-            self.recheck()
-            recheck_file(expected)
-            if source is not None:
-                recheck_file(source, check_mtime=True)
-            self._stage(self.role, expected.path, "固定完整成果发布")
-            try:
-                receipt = publish_content(artifact)
-            except ContentPublicationError as error:
-                if auxiliary:
-                    self.auxiliary_results.append(error.result)
-                else:
-                    self._append(error.result)
-                self._stage(self.role, error.result.target, error.result.phase)
-                raise
-            if auxiliary:
-                self.auxiliary_results.append(receipt)
-            else:
-                self._append(receipt)
-            self._stage(self.role, expected.path, "正式成果身份内容及属性核验")
-            actual = observe_file(
-                expected.path, include_digest=True, include_mtime=True,
-            )
-            identifier = (
-                expected.object_identity if artifact.mechanism == "in_place"
-                else ObjectIdentity(*artifact.identity)
-            )
-            links = expected.link_count if artifact.mechanism == "in_place" else 1
-            mode = artifact.options.file_mode
-            if mode is None and expected.kind == "file":
-                mode = stat.S_IMODE(expected.attributes.st_mode)
-            if (
-                actual.kind != "file"
-                or actual.object_identity != identifier
-                or actual.link_count != links
-                or actual.digest != artifact.digest
-                or artifact.options.mtime_ns is not None
-                and actual.mtime_ns != artifact.options.mtime_ns
-                or mode is not None
-                and stat.S_IMODE(actual.attributes.st_mode) != mode
-            ):
-                raise OSError("正式成果身份、链接、内容或适用属性不符")
-            if source is not None:
-                recheck_file(source, check_mtime=True)
-            return actual
-        finally:
-            if artifact is not None:
-                self._dispose(artifact)
-                if artifact._lifecycle in ("completed", "disposed"):
-                    self._artifact = None
-
-    def _create_parents(self, projected, unit):
-        for target in projected.parent_directories:
-            self._stage("工作目标", target, "固定必要父目录创建或正常结果复用")
-            self.recheck()
-            if identity(target) in self._created:
-                continue
-            before = next(
-                effect.before for effect in unit.fixed.effects
-                if dict(effect.before.chain).get(target) == "absent"
-            )
-            index = next(
-                number for number, (path, _) in enumerate(before.chain)
-                if path == target
-            )
-            expected = FileObservation(
-                target, before.chain[:index + 1], "absent",
-                None, None, None, None, None, None,
-            )
-            receipt = self._step(prepare_directory_creation(expected))
-            self._created[identity(target)] = receipt.created_directory
+        state = self.task_execution.state
+        return state.execute_active(
+            execution,
+            lambda prepared: prepared.execute(
+                recheck_context=self.recheck,
+                record_step=state.record_step, stage=stage,
+            ),
+            stage=stage,
+        )
 
     def perform_action(self, unit, prepared_bytes):
         """返回正式算法核验的最终约束，不接受后来对象作为新授权。"""
         action = unit.members[0]
         kind = action.payload["op"]
-        counts = self._removed_links()
-        shared = shared_file_states(self._finished)
+        results = self.results
+        counts = self.observation_state.removed_counts(results)
         fixed = tuple(
-            project_task_observation(observed, counts, shared)
+            self.observation_state.project(observed, results)
             for observed in action.expectations
         )
         source = fixed[0]
@@ -849,44 +676,66 @@ class PatchExecutor:
             if kind == "copy_dir":
                 target = fixed[1]
                 if isinstance(target, TreeObservation):
-                    self._composite(
+                    self.task_execution.state.execute_active(
                         prepare_tree_removal(target), execute_tree_removal,
+                        stage=lambda target, phase:
+                        self._stage("工作目标", target, phase),
                         before_step=self.recheck,
                     )
                 source = project_removed_file_links(
-                    action.expectations[0], self._removed_links(),
+                    action.expectations[0],
+                    self.observation_state.removed_counts(self.results),
                 )
                 self._stage("工作目标", target.path, "固定独立目标树重建")
                 copy = prepare_tree_copy(source, _absent(target))
-                self._composite(
-                    copy, execute_tree_copy, recheck_context=self.recheck,
+                self.task_execution.state.execute_active(
+                    copy, execute_tree_copy,
+                    stage=lambda target, phase:
+                    self._stage("工作目标", target, phase),
+                    recheck_context=self.recheck,
                 )
-                return (_recheck_tree_copy_target(copy),)
+                actual = copy.final_observation
+                if not isinstance(actual, TreeObservation):
+                    raise RuntimeError("正常树复制缺少最终成果观察")
+                return (actual,)
             if kind in ("move_file", "rename_file", "move_dir", "rename_dir"):
                 move = action.name_move
                 self._stage("工作目标", fixed[1].path, "固定名称机制执行")
-                self._composite(
+                self.task_execution.state.execute_active(
                     move, execute_observed_name_move,
+                    stage=lambda target, phase:
+                    self._stage("工作目标", target, phase),
                     removed_link_counts=counts,
                 )
                 if len(move.final_observations) != 2:
                     raise RuntimeError("正常名称核心缺少完整最终两端约束")
                 return move.final_observations
             if kind == "delete_file":
-                self._step(prepare_file_removal(source))
+                self.task_execution.state.execute_step(
+                    prepare_file_removal(source),
+                    stage=lambda target, phase:
+                    self._stage("工作目标", target, phase),
+                )
                 result = _absent(source)
                 recheck_file(result)
                 return (result,)
             if kind == "delete_dir":
-                self._composite(
+                self.task_execution.state.execute_active(
                     prepare_tree_removal(source), execute_tree_removal,
+                    stage=lambda target, phase:
+                    self._stage("工作目标", target, phase),
                     before_step=self.recheck,
                 )
                 result = _absent(source)
                 recheck_file(result)
                 return (result,)
             if kind == "create_dir":
-                receipt = self._step(prepare_directory_creation(source))
+                receipt = self.task_execution.state.execute_step(
+                    prepare_directory_creation(source),
+                    stage=lambda target, phase:
+                    self._stage("工作目标", target, phase),
+                )
+                self.task_execution.state.accept_created_directory(receipt)
                 actual = observe_tree(source.path)
                 if (
                     actual.content_records != (("", "directory", ""),)
@@ -899,26 +748,13 @@ class PatchExecutor:
         finally:
             self._active_unit = None
 
-    def _verify_unit(self, unit, actuals):
-        if not isinstance(actuals, tuple) or len(actuals) != len(unit.fixed.effects):
-            raise RuntimeError("正式动作没有返回完整最终对象约束")
-        counts = self._removed_links()
-        finished = {}
-        for effect, actual in zip(unit.fixed.effects, actuals):
-            self._stage("工作目标", effect.before.path, "具体effect最终内容结构核验")
-            if actual.path != effect.before.path:
-                raise RuntimeError("动作最终位置与固定effect不符")
-            kind = patch_observation_kind(actual)
-            records = (
-                actual.content_records if isinstance(actual, TreeObservation) else
-                (("", "file", actual.digest),) if actual.kind == "file" else ()
-            )
-            if kind != effect.after.kind or records != effect.after.records:
-                raise OSError(f"最终内容或结构不对应固定预期：{actual.path}")
-            _recheck(actual)
-            finished[identity(actual.path)] = (actual, dict(counts))
-        self._finished.update(finished)
-        self._stage("工作目标", unit.members[0].expectations[0].path, "动作完成后全部固定范围复核")
+    def _accept_unit_results(self, unit, actuals):
+        """只登记共用内核已核验的成果及正常共享状态。"""
+        self.observation_state.accept(actuals, self.results)
+        self._stage(
+            "工作目标", unit.members[0].expectations[0].path,
+            "动作完成后全部固定范围复核",
+        )
         self.recheck()
 
     def write_execution_log_file(self):
@@ -1015,18 +851,13 @@ class PatchExecutor:
                 fixed=None,
             ) for unit in self.execution_units
         )
-        for unit in self.execution_units:
-            self.unit_results[unit.index] = replace(
-                self.unit_results[unit.index], unit=unit,
-            )
-        self._original_files.clear()
-        self._finished.clear()
+
+        self.observation_state.release_observations()
         self.projection = None
 
     def invalidate(self):
-        if self.consumed:
+        if not self.task_execution.invalidate():
             return False
-        self.consumed = True
         self.release_prepared_contents()
         return True
 
@@ -1035,7 +866,6 @@ class PatchExecutor:
             raise ValueError("本次计划已经执行或失败，或已取消作废，必须重新预演")
         if self.plan is None:
             raise ValueError("没有通过正式预演的执行计划")
-        self.consumed = True
         try:
             return self._execute_plan()
         except PatchExecutionError as failure:
@@ -1083,8 +913,14 @@ class PatchExecutor:
             # 自动恢复建立新观察，消费同一个恢复计划及核心；
             # 不进入人类主动恢复的强制二次备份服务。
             evidence = read_protection_evidence(self.protection)
+            restore_plan = plan_restore(evidence)
+            from core.automatic_rollback_scope import validate_automatic_rollback_scope
+            validate_automatic_rollback_scope(
+                self.protection.projection, restore_plan.actions,
+                results=failure.results,
+            )
             recovery = RecoveryExecution(
-                evidence, plan_restore(evidence).actions,
+                evidence, restore_plan.actions,
             )
             result = recovery.execute()
         except (OSError, ValueError) as rollback_error:
@@ -1112,95 +948,55 @@ class PatchExecutor:
         self.log(failure.rollback_report)
 
     def _execute_plan(self):
-        active_unit = projected = None
-        unit_start = 0
-        try:
-            self._stage("执行前全量关口", self.root, "执行开始前全量固定事实复核")
+        projected_units = {
+            id(unit.fixed): unit for unit in self.projection.units
+        }
+
+        def prepare_entry(unit):
+            target = unit.members[0].expectations[0].path
+            self._stage("工作目标", target, "动作开始前全部固定事实复核")
             self.recheck()
+            if not unit.execute:
+                return None
+            projected = projected_units.get(id(unit.fixed))
+            if projected is None or projected.fixed is not unit.fixed:
+                raise RuntimeError("执行单元与唯一保护投影关联不一致")
+            content = unit.text_file.content if unit.text_file is not None else None
+
+            def accept_completed(actuals):
+                self._accept_unit_results(unit, actuals)
+
+
+            return FixedTaskWork(
+                projected,
+                lambda: self.perform_action(unit, content),
+                accept_completed, self.recheck,
+            )
+
+        def entry_completed(unit, executed):
+            self._stage(
+                "运行记录", unit.members[0].expectations[0].path,
+                "完成日志" if executed else "固定跳过日志",
+            )
+            self.log(
+                f"[{'完成' if executed else '跳过'}] {'; '.join(unit.labels)}"
+            )
+
+
+        try:
             self.log("【开始执行修改包】")
             self.log(f"协议版本：{PATCH_PROTOCOL_DESCRIPTION}")
             self.log(f"项目根目录：{self.root}")
             self.log(f"备份目录：{self.backup_root or '未启用或无需保护'}")
-            if self.protection is not None:
-                self._stage("正式保护", self.backup_root, "全部原状态备份屏障")
-                self.protection.protect_all()
-                self.recheck()
-            projections = iter(self.projection.units)
-            for active_unit in self.execution_units:
-                unit_start = len(self._results)
-                self._stage("工作目标", active_unit.members[0].expectations[0].path, "动作开始前全部固定事实复核")
-                self.unit_results[active_unit.index] = replace(
-                    self.unit_results[active_unit.index],
-                    status="running", stage=self.stage,
-                )
-                self.recheck()
-                if not active_unit.execute:
-                    self.unit_results[active_unit.index] = replace(
-                        self.unit_results[active_unit.index],
-                        status="skipped", stage="固定跳过",
-                    )
-                    self.log(f"[跳过] {'; '.join(active_unit.labels)}")
-                    active_unit = None
-                    continue
-                projected = next(projections)
-                if projected.fixed is not active_unit.fixed:
-                    raise RuntimeError("执行单元与唯一保护投影关联不一致")
-                if self.protection is not None:
-                    # 全部原材料已保存，此处只检查工作并发布开始事实。
-                    self._stage("工作目标", active_unit.members[0].expectations[0].path, "保护后全部固定事实复核")
-                    self.recheck()
-                    self._stage("正式保护", self.backup_root, "工作改变前started屏障")
-                    self.protection.begin(projected.unit_id)
-                self._create_parents(projected, active_unit)
-                self.recheck()
-                content = (
-                    active_unit.text_file.content
-                    if active_unit.text_file is not None else None
-                )
-                actuals = self.perform_action(active_unit, content)
-                self._verify_unit(active_unit, actuals)
-                self.unit_results[active_unit.index] = replace(
-                    self.unit_results[active_unit.index],
-                    status="completed", results=self._results[unit_start:],
-                    stage="工作及最终核验完成", work_completed=True,
-                )
-                if self.protection is not None:
-                    self._stage("正式保护", self.backup_root, "工作完成事实发布")
-                    self.protection.complete(
-                        projected.unit_id, self._results[unit_start:],
-                    )
-                self._stage("运行记录", active_unit.members[0].expectations[0].path, "完成日志")
-                self.log(f"[完成] {'; '.join(active_unit.labels)}")
-                active_unit = projected = None
-            self._stage("整任务", self.root, "全部工作最终联合复核")
-            self.recheck()
-            self.work_completed = True
-            self.write_execution_log_file()
-            self._stage("整任务", self.root, "辅助输出后最终联合复核")
-            self.recheck()
-            self._stage("整任务", None, "completed")
+            self.task_execution.execute(
+                self.execution_units, protection=self.protection,
+                initial_recheck=self.recheck, prepare_entry=prepare_entry,
+                stage=self._stage, entry_key=lambda unit: unit.index,
+                entry_completed=entry_completed,
+                final_check=self.recheck, auxiliary=self.write_execution_log_file,
+                after_auxiliary_check=self.recheck, task_target=self.root,
+            )
             return "\n".join(self.logs)
         except (OSError, ValueError) as error:
-            if active_unit is not None:
-                current = self.unit_results[active_unit.index]
-                self.unit_results[active_unit.index] = replace(
-                    current, status="failed", stage=self.stage, error=error,
-                    results=self._results[unit_start:],
-                )
-            if (
-                projected is not None and self.protection is not None
-                and not self.protection.failed
-                and self.protection.document is not None
-                and any(
-                    unit["id"] == projected.unit_id
-                    and unit["fact"]["state"] == "started"
-                    for unit in self.protection.document.value["units"]
-                )
-            ):
-                try:
-                    self.protection.uncertain(
-                        projected.unit_id, self._results[unit_start:],
-                    )
-                except (OSError, ValueError) as fact_error:
-                    self.fact_error = fact_error
+            self.fact_error = self.task_execution.fact_error
             raise PatchExecutionError(self, error) from error

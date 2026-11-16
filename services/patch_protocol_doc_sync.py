@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.content_publication import (
-    dispose_content_artifact, prepare_content_artifact, publish_content,
+    cleanup_content_artifact, prepare_content_artifact, publish_content,
     ContentPublicationOptions,
 )
 from core.file_observation import FileObservation, observe_file, recheck_file
@@ -192,18 +192,4 @@ def apply_protocol_doc_update(preview):
         object.__setattr__(preview, "_lifecycle", "completed")
         return result
     finally:
-        if artifact is not None and artifact._lifecycle not in (
-            "completed", "disposed",
-        ):
-            if not (
-                artifact.mechanism == "in_place"
-                and artifact._lifecycle == "attempted"
-            ):
-                try:
-                    dispose_content_artifact(artifact)
-                except (OSError, ValueError) as cleanup_error:
-                    print(
-                        f"[协议模块自有暂存清理失败] {artifact.path}："
-                        f"{cleanup_error}",
-                        file=sys.stderr,
-                    )
+        cleanup_content_artifact(artifact)

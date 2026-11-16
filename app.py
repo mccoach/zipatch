@@ -29,10 +29,7 @@ class ZipatchApp:
         self.root = root
         self.root._zipatch_closed = False
         self.feature_registry = get_feature_registry()
-        configuration_notices = []
-        self.config_data, needs_write = load_user_config(
-            config_path, notices=configuration_notices,
-        )
+        self.config_data, needs_write = load_user_config(config_path)
         needs_write |= normalize_feature_order(self.config_data, self.feature_registry)
         self.config_manager = ConfigSaveManager(
             self.config_data, path=config_path, needs_write=needs_write,
@@ -48,20 +45,12 @@ class ZipatchApp:
         apply_global_theme(root)
         self.build_ui()
         self.show_panel(self.mode.get())
-        saved = self.commits.finish() if needs_write else None
-        for notice in configuration_notices:
-            message = notice + (
-                "\n配置已确认保存，重启后仍会保留。"
-                if saved is not None and saved.persisted else
-                "\n配置保存尚未确认；请先解决保存问题，"
-                "否则重启后仍可能需要重新转换。"
-            )
-            self.log(message)
-            safe_show_info("拆分设置已调整，请核对", message, self.root)
+        if needs_write:
+            self.commits.finish()
 
     def build_ui(self):
         root = self.root
-        root.title("智派-文本代码修改合并助手 Zipatch v3.8.0-20261116")
+        root.title("智派-文本代码修改合并助手 Zipatch v3.9.0-20261116")
         root.protocol("WM_DELETE_WINDOW", self.close_application)
         root.resizable(True, True)
         center_window(root, 1080, 800)

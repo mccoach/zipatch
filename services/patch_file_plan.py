@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.content_publication import ContentPublicationResult
-from core.filesystem_changes import FilesystemChangeResult
-from core.name_moves import NativeNameMoveResult
 from core.text_newlines import normalize_newlines
 from services.patch_ops import CONTENT_OPS
 from core.file_observation import FileObservation, TreeObservation
@@ -164,74 +162,37 @@ class PatchMemberResult:
 
 @dataclass(frozen=True)
 class PatchUnitResult:
-    """任务状态归单元；工作事实直接引用正式有序步骤。
-
-    completed由所属协调在工作及必要最终核验结束后登记。
-    后续完成事实或日志失败可以status=failed且work_completed=True；
-    正文确认查询直接消费内容结果，不使用名称替换作为判据。
-    """
+    """业务成员到共同任务结果的只读投影，不登记第二份执行事实。"""
 
     unit: PatchExecutionUnit
-    status: str = "pending"
-    results: tuple[
-        FilesystemChangeResult | ContentPublicationResult | NativeNameMoveResult,
-        ...
-    ] = ()
-    stage: str = "尚未执行"
-    error: OSError | ValueError | None = None
-    work_completed: bool = False
+    execution: object
 
     def __post_init__(self):
+        from core.fixed_task_execution import TaskEntryResult
         if not isinstance(self.unit, PatchExecutionUnit):
-            raise TypeError("单元结果必须消费PatchExecutionUnit")
-        if self.status not in (
-            "pending", "running", "skipped", "completed", "failed",
-        ):
-            raise ValueError("修改包单元任务状态非法")
-        if type(self.results) is not tuple:
-            raise TypeError("实际步骤必须是不可变元组")
-        if any(
-            not isinstance(result, (
-                FilesystemChangeResult,
-                ContentPublicationResult,
-                NativeNameMoveResult,
-            ))
-            for result in self.results
-        ):
-            raise TypeError("单元只接受正式工作步骤，不接受日志、计划或材料")
-        if type(self.work_completed) is not bool:
-            raise TypeError("工作完成事实必须是布尔值")
-        if type(self.stage) is not str or not self.stage:
-            raise ValueError("单元阶段必须是明确非空字符串")
-        if self.error is not None and not isinstance(
-            self.error, (OSError, ValueError),
-        ):
-            raise TypeError("单元明确失败必须保留具体I/O或状态错误")
+            raise TypeError("单元报告必须消费PatchExecutionUnit")
+        if not isinstance(self.execution, TaskEntryResult):
+            raise TypeError("单元报告必须消费共同TaskEntryResult")
 
-        if self.status in ("pending", "skipped") and (
-            self.results or self.work_completed or self.error is not None
-        ):
-            raise ValueError("尚未执行或固定跳过不得携带工作步骤或完成事实")
-        if self.work_completed and (
-            not self.results or any(not result.succeeded for result in self.results)
-        ):
-            raise ValueError("工作完成必须具有非空正常实际步骤")
-        if self.status == "completed" and (
-            not self.work_completed or self.error is not None
-        ):
-            raise ValueError("正常完成状态必须具有工作完成且没有错误")
-        if self.status == "running" and (
-            self.work_completed or self.error is not None
-        ):
-            raise ValueError("运行中不得登记结束事实或明确失败")
+    @property
+    def status(self):
+        return self.execution.status
 
-        # 正式失败步骤之后没有继续工作资格；正常前缀后的
-        # 所属范围核验失败可以保留全正常步骤及单元error。
-        failed = False
-        for result in self.results:
-            if failed:
-                raise ValueError("未正常完成步骤之后不得登记后续工作")
-            failed = not result.succeeded
+    @property
+    def results(self):
+        return self.execution.results
+
+    @property
+    def stage(self):
+        return self.execution.stage
+
+    @property
+    def work_completed(self):
+        return self.execution.work_completed
+
+    @property
+    def error(self):
+        return self.execution.error
 
     @property
     def content_results(self):

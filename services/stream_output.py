@@ -6,18 +6,17 @@
 目录和发布的明确失败保留正式结果；不自动重试或回滚。
 """
 
-import sys
+
 from dataclasses import dataclass
 
 
 from core.content_publication import (
     ContentPublicationError, ContentPublicationResult,
-    dispose_content_artifact, prepare_stream_content_artifact, publish_content,
+    cleanup_content_artifact, prepare_stream_content_artifact, publish_content,
 )
 from core.file_observation import FileObservation
-from core.filesystem_changes import (
-    FilesystemChangeError, execute_filesystem_change,
-    prepare_directory_creation,
+from core.directory_creation import (
+    DirectoryCreationState, fixed_directory_observations,
 )
 
 
@@ -110,28 +109,23 @@ def publish_stream_output(expected, chunks):
         raise ValueError("成果输出目标必须是不存在或普通文件")
 
     directories = []
-    for index, (directory, kind) in enumerate(expected.chain[:-1]):
-        if kind != "absent":
-            continue
-        absent = FileObservation(
-            directory, expected.chain[:index + 1], "absent",
-            None, None, None, None, None, None,
+    directory_state = DirectoryCreationState()
+    try:
+        directory_state.ensure_all(
+            fixed_directory_observations(expected),
+            record_step=directories.append,
+            stage=lambda target, phase: None,
         )
-        try:
-            result = execute_filesystem_change(
-                prepare_directory_creation(absent),
-            )
-        except FilesystemChangeError as error:
-            directories.append(error.result)
-            raise StreamOutputError(StreamOutputResult(
-                expected, tuple(directories), None,
-                "固定必要输出目录创建", error,
-            )) from error
-        directories.append(result)
+    except (OSError, ValueError) as error:
+        raise StreamOutputError(StreamOutputResult(
+            expected, tuple(directories), None,
+            "固定必要输出目录创建", error,
+        )) from error
 
     artifact = None
     try:
         artifact = prepare_stream_content_artifact(expected, chunks)
+        directory_state.recheck_parents(expected)
         try:
             publication = publish_content(artifact)
         except ContentPublicationError as error:
@@ -143,17 +137,4 @@ def publish_stream_output(expected, chunks):
             expected, tuple(directories), publication, "completed",
         )
     finally:
-        if artifact is not None and artifact._lifecycle not in (
-            "completed", "disposed",
-        ):
-            if not (
-                artifact.mechanism == "in_place"
-                and artifact._lifecycle == "attempted"
-            ):
-                try:
-                    dispose_content_artifact(artifact)
-                except (OSError, ValueError) as cleanup_error:
-                    print(
-                        f"[成果自有暂存清理失败] {artifact.path}：{cleanup_error}",
-                        file=sys.stderr,
-                    )
+        cleanup_content_artifact(artifact)

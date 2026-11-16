@@ -6,7 +6,7 @@ from tkinter import TclError
 
 from core.constants import THEME
 from ui.theme import styled_frame, styled_entry, styled_button
-from ui.text_layout import bind_allocated_text_wrap
+
 
 
 def get_text_value(text_widget):

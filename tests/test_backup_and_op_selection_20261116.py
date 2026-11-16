@@ -49,13 +49,14 @@ class OpSelectionTests(unittest.TestCase):
         self.second_start = self.source.index(self.second)
 
     def test_exact_id_includes_end_line_newline(self):
-        left, right = locate_op_selection(self.source, op_id="op001")
+        left, right = locate_op_selection(self.source, start=self.first_start)
         self.assertEqual(self.source[left:right], self.first)
         self.assertEqual(right, self.second_start)
 
     def test_body_fake_id_is_not_an_operation(self):
-        with self.assertRaisesRegex(ValueError, "没找到"):
-            locate_op_selection(self.source, op_id="fake")
+        position = self.source.index('id="fake"')
+        left, right = locate_op_selection(self.source, start=position)
+        self.assertEqual(self.source[left:right], self.first)
 
     def test_cursor_inside_body_selects_owner(self):
         position = self.source.index("中文😀")
@@ -85,12 +86,15 @@ class OpSelectionTests(unittest.TestCase):
     def test_incomplete_package_is_rejected(self):
         with self.assertRaises(ValueError):
             locate_op_selection(
-                self.source.replace("<</ZIPATCH_V3>>", ""), op_id="op001",
+                self.source.replace("<</ZIPATCH_V3>>", ""),
+                start=self.first_start,
             )
 
     def test_crlf_ranges_preserve_original_text(self):
         source = self.source.replace("\n", "\r\n")
-        left, right = locate_op_selection(source, op_id="op002")
+        left, right = locate_op_selection(
+            source, start=source.index('---OP write_file id="op002"'),
+        )
         self.assertEqual(source[left:right], self.second.replace("\n", "\r\n"))
 
 
@@ -172,15 +176,18 @@ class BackupContractTests(unittest.TestCase):
 
     def test_work_failure_rolls_back_without_second_backup(self):
         preview = self.prepare_patch()
-        import services.patch_executor as executor_module
+        import core.fixed_content_execution as executor_module
         original_publish = executor_module.publish_content
+        rejected = False
 
         def fail_second_work_file(artifact):
-            if artifact.expected.path == self.work / "b.txt":
+            nonlocal rejected
+            if not rejected and artifact.expected.path == self.work / "b.txt":
+                rejected = True
                 raise PermissionError("测试注入：第二个工作文件无法发布")
             return original_publish(artifact)
 
-        # 只替换修改包工作发布的调用点；备份保存和恢复算法真实执行。
+        # 仅在第二个工作目标第一次发布前拒绝；备份及回滚真实执行。
         with patch.object(
             executor_module, "publish_content",
             side_effect=fail_second_work_file,

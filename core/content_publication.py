@@ -66,6 +66,7 @@ class ContentPublicationResult:
     emergency_path: Path | None
     emergency_state: str
     error: OSError | ValueError | None = None
+    observation: FileObservation | None = None
 
     @property
     def succeeded(self):
@@ -453,20 +454,6 @@ def prepare_copy_content_artifact(
         raise TypeError("替换指定目标名称开关必须是布尔值")
     if replace_target_name and preserve_target_mode:
         raise ValueError("名称复制必须使用固定来源基础权限")
-    # 目录转文件只准备移除之后的独立文件成果。
-    # 完整目录的移除资格及正常结果由所属组合核心负责。
-    from core.file_observation import TreeObservation, recheck_tree
-    replacement_tree = expected if isinstance(expected, TreeObservation) else None
-    if replacement_tree is not None:
-        if preserve_target_mode or replace_target_name:
-            raise ValueError("目录转文件必须使用来源权限及内容恢复政策")
-        from core.filesystem_changes import prepare_tree_removal
-        prepare_tree_removal(replacement_tree)
-        expected = FileObservation(
-            replacement_tree.path,
-            (*replacement_tree.chain[:-1], (replacement_tree.path, "absent")),
-            "absent", None, None, None, None, None, None,
-        )
     _validate_inputs(expected, options)
     if options.file_mode is not None or options.atime_ns is not None:
         raise ValueError("复制权限及访问时间必须由固定观察和复制政策决定")
@@ -493,18 +480,7 @@ def prepare_copy_content_artifact(
     artifact = None
     completed = False
     try:
-        if replacement_tree is not None:
-            recheck_tree(replacement_tree)
-            _, parents = checked_chain(
-                expected.path.parent, include_observation=True,
-            )
-            if any(kind != "directory" for _, kind in parents):
-                raise ValueError("目录转文件成果要求必要父目录已经存在")
-            artifact = _prepare_staged(
-                expected, (source.source_bytes,), copied_options,
-                retained_content=source.source_bytes,
-            )
-        elif replace_target_name:
+        if replace_target_name:
             # 名称覆盖只替换指定名称，不写入旧目标共享对象。
             # 与内容复制共用完整暂存、所有权及唯一发布算法。
             _check_preparation_target(expected)
@@ -517,21 +493,11 @@ def prepare_copy_content_artifact(
                 expected, source.source_bytes, options=copied_options,
             )
         _recheck_copy_source(source)
-        if replacement_tree is not None:
-            recheck_tree(replacement_tree)
         completed = True
         return artifact
     finally:
-        if not completed and artifact is not None:
-            try:
-                dispose_content_artifact(artifact)
-            except (OSError, ValueError) as cleanup_error:
-                # 清理没有完成不能覆盖来源复核的主失败；
-                # 通用所有权能力不会删除外部替换对象。
-                print(
-                    f"[复制成果放弃清理失败] {artifact.path}：{cleanup_error}",
-                    file=sys.stderr,
-                )
+        if not completed:
+            cleanup_content_artifact(artifact)
 
 
 def dispose_content_artifact(artifact):
@@ -564,8 +530,7 @@ def _hardlink_expectation(expected):
 
 def _verify_published_atomic(artifact):
     actual = observe_file(
-        artifact.expected.path, include_digest=True,
-        include_mtime=artifact.options.mtime_ns is not None,
+        artifact.expected.path, include_digest=True, include_mtime=True,
     )
     if (
         not _matches_artifact(actual, artifact)
@@ -579,6 +544,7 @@ def _verify_published_atomic(artifact):
         mode = stat.S_IMODE(artifact.expected.attributes.st_mode)
     if mode is not None and stat.S_IMODE(actual.attributes.st_mode) != mode:
         raise OSError("正式替换后成果基础权限不符")
+    return actual
 
 
 def publish_content(artifact):
@@ -600,6 +566,7 @@ def publish_content(artifact):
     content_completed = False
     confirmation_completed = False
     emergency_path = artifact.path if artifact.mechanism == "in_place" else None
+    observation = None
     try:
         _verify_artifact(artifact, include_digest=True)
         _recheck_target(artifact)
@@ -615,8 +582,31 @@ def publish_content(artifact):
                 before_mutation=lambda: _recheck_target(artifact),
                 durable_publication=options.durable_publication,
             )
+            mutation_attempted = True
             content_completed = True
             confirmation_completed = True
+            # 原对象句柄已经关闭、应急已经正常清理。
+            # 在此正式结束边界取得可向上交付的路径观察，
+            # 不让每个业务自行实现同一成果身份和内容检查。
+            phase = "正式成果完整性核验"
+            observation = observe_file(
+                expected.path, include_digest=True, include_mtime=True,
+            )
+            mode = (
+                options.file_mode if options.file_mode is not None
+                else stat.S_IMODE(expected.attributes.st_mode)
+            )
+            if (
+                observation.kind != "file"
+                or observation.object_identity != expected.object_identity
+                or observation.link_count != expected.link_count
+                or observation.digest != artifact.digest
+                or observation.attributes.st_size != artifact.length
+                or options.mtime_ns is not None
+                and observation.mtime_ns != options.mtime_ns
+                or stat.S_IMODE(observation.attributes.st_mode) != mode
+            ):
+                raise OSError("原对象正式结束观察的身份、内容或属性不符")
         else:
             phase = "原子名称替换"
             mutation_attempted = True
@@ -624,7 +614,7 @@ def publish_content(artifact):
             os.replace(artifact.path, expected.path)
             replacement = "replaced"
             phase = "正式成果完整性核验"
-            _verify_published_atomic(artifact)
+            observation = _verify_published_atomic(artifact)
             content_completed = True
             if options.durable_publication:
                 phase = "正式成果目录持久化确认"
@@ -655,5 +645,31 @@ def publish_content(artifact):
         expected.path, artifact.mechanism, "completed",
         True, replacement, content_completed, confirmation_completed,
         emergency_path, "removed" if emergency_path is not None
-        else "not_required",
+        else "not_required", observation=observation,
     )
+
+
+def cleanup_content_artifact(artifact):
+    """执行所属流程退出时的统一暂存政策，不清理正式工作目标。
+
+    返回True表示无需继续持有待清理成果；False表示应急必须保留，
+    或清理未完成。显式取消、内部编号材料的取消资格不由本函数授予。
+    清理故障不覆盖所属主异常，完整硬链接应急不因finally丢失。
+    """
+    if artifact is None:
+        return True
+    if not isinstance(artifact, PreparedContentArtifact):
+        raise TypeError("退出清理必须消费PreparedContentArtifact")
+    if artifact._lifecycle in ("completed", "disposed"):
+        return True
+    if artifact.mechanism == "in_place" and artifact._lifecycle == "attempted":
+        return False
+    try:
+        dispose_content_artifact(artifact)
+    except (OSError, ValueError) as error:
+        print(
+            f"[自有内容成果清理未完成] {artifact.path}：{error}",
+            file=sys.stderr,
+        )
+        return False
+    return True

@@ -3,9 +3,14 @@
 """任务正常成果到固定观察的纯投影，不读取磁盘或取得新授权。"""
 
 from dataclasses import replace
+from types import MappingProxyType
 
+from core.content_publication import ContentPublicationResult
 from core.file_observation import FileObservation, TreeObservation
+from core.filesystem_changes import FilesystemChangeResult
+from core.name_moves import NativeNameMoveResult
 from core.recovery_content import content_integrity
+from core.recovery_paths import identity
 
 
 def observed_files(observed):
@@ -16,13 +21,110 @@ def observed_files(observed):
     return ()
 
 
-def shared_file_states(finished):
-    """按正常成果登记顺序保留同一对象的最近内容和计数基线。"""
-    states = {}
-    for actual, baseline in finished.values():
-        for _, file in observed_files(actual):
-            states[file.object_identity] = (file, baseline)
-    return states
+class TaskObservationState:
+    """任务正常变化的唯一拥有者；实际步骤仍由正式步骤账本提供。
+
+    名称计数只增量消费新步骤，不反复扫描历史。
+    正常成果接受时一次登记其共享对象和计数基线；
+    复核只消费派生状态，不从现场取得新的成功事实或授权。
+    """
+
+    def __init__(self, observations):
+        self._original_files = {}
+        for observed in observations:
+            for _, member in observed_files(observed):
+                key = identity(member.path)
+                previous = self._original_files.setdefault(key, member)
+                if previous != member:
+                    raise ValueError("任务同一文件具有矛盾的最初观察")
+        self._consumed_results = ()
+        self._removed_names = set()
+        self._removed_counts = {}
+        self._finished = {}
+        self._shared = {}
+
+    @property
+    def finished(self):
+        return MappingProxyType(self._finished)
+
+    def consume_results(self, results):
+        """只接受同一本任务账本的追加前缀，不能重排或替换已消费事实。"""
+        if type(results) is not tuple:
+            raise TypeError("任务步骤必须是正式结果元组")
+        previous = self._consumed_results
+        if len(results) < len(previous) or any(
+            current is not accepted
+            for current, accepted in zip(results, previous)
+        ):
+            raise ValueError("任务实际步骤不是原账本的追加前缀")
+        for receipt in results[len(previous):]:
+            if not isinstance(receipt, (
+                FilesystemChangeResult, ContentPublicationResult,
+                NativeNameMoveResult,
+            )):
+                raise TypeError("任务正常变化只消费正式工作步骤")
+            removes_name = receipt.succeeded and (
+                isinstance(receipt, FilesystemChangeResult)
+                and receipt.kind == "remove_file"
+                or isinstance(receipt, ContentPublicationResult)
+                and receipt.mechanism == "atomic_replace"
+                or isinstance(receipt, NativeNameMoveResult)
+            )
+            if not removes_name:
+                continue
+            # 原生移动的来源名称没有减少原对象链接数量；
+            # 被覆盖的原目标名称才需要扣减。
+            key = identity(receipt.target)
+            original = self._original_files.get(key)
+            if original is None or key in self._removed_names:
+                continue
+            self._removed_names.add(key)
+            identifier = original.object_identity
+            self._removed_counts[identifier] = (
+                self._removed_counts.get(identifier, 0) + 1
+            )
+        self._consumed_results = results
+
+    def removed_counts(self, results):
+        self.consume_results(results)
+        return MappingProxyType(self._removed_counts)
+
+    def project(self, observed, results, *, baseline=None):
+        self.consume_results(results)
+        return project_task_observation(
+            observed, self._removed_counts, self._shared, baseline=baseline,
+        )
+
+    def expected(self, observed, results):
+        """正式位置已有正常成果时消费它，否则消费原固定观察。"""
+        finished = self._finished.get(identity(observed.path))
+        if finished is None:
+            return self.project(observed, results)
+        actual, baseline = finished
+        return self.project(actual, results, baseline=baseline)
+
+    def accept(self, actuals, results):
+        """调用方已完成具体成果核验；一次登记全部位置和共享对象。"""
+        self.consume_results(results)
+        if type(actuals) is not tuple or any(
+            not isinstance(actual, (FileObservation, TreeObservation))
+            for actual in actuals
+        ):
+            raise TypeError("正常成果必须是正式观察元组")
+        baseline = dict(self._removed_counts)
+        for actual in actuals:
+            self._finished[identity(actual.path)] = (actual, baseline)
+            for _, member in observed_files(actual):
+                self._shared[member.object_identity] = (member, baseline)
+
+    def release_observations(self):
+        """任务结束后释放输入和正常成果引用，不影响外部正式步骤结果。"""
+        self._original_files.clear()
+        self._finished.clear()
+        self._shared.clear()
+        self._consumed_results = ()
+        self._removed_names.clear()
+        self._removed_counts.clear()
 
 
 def project_task_observation(

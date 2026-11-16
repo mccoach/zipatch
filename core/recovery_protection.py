@@ -7,7 +7,6 @@
 正式材料保留原名和目录关系；只读取version 4，不兼容旧布局。
 """
 
-import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -16,7 +15,7 @@ from core.backup_material_layout import build_backup_material_paths
 from core.content_publication import (
     ContentPublicationError,
     ContentPublicationOptions,
-    dispose_content_artifact,
+    cleanup_content_artifact,
     prepare_content_artifact,
     publish_content,
 )
@@ -29,10 +28,9 @@ from core.file_observation import (
     recheck_file,
     recheck_tree,
 )
-from core.filesystem_changes import (
-    FilesystemChangeError,
-    execute_filesystem_change,
-    prepare_directory_creation,
+from core.filesystem_changes import FilesystemChangeError
+from core.directory_creation import (
+    DirectoryCreationState, fixed_directory_observations,
 )
 from core.internal_materials import (
     InternalMaterialError,
@@ -83,20 +81,6 @@ class ProtectionPublicationError(OSError):
             "前序正式依据和编号材料不自动删除。\n"
             f"{error}"
         )
-
-
-def _absent_from_chain(observed, target):
-    index = next(
-        number for number, (path, _) in enumerate(observed.chain)
-        if path == target
-    )
-    chain = observed.chain[:index + 1]
-    if chain[-1][1] != "absent":
-        raise ValueError("内部目录计划只能消费固定不存在事实")
-    return FileObservation(
-        target, chain, "absent",
-        None, None, None, None, None, None,
-    )
 
 
 def _absent_child(parent, name):
@@ -290,25 +274,20 @@ class RecoveryProtectionSession:
         if self._task_expected.kind != "absent":
             raise ValueError("保护任务目录必须固定为不存在")
         self._check_isolation()
-        self._directories = tuple(
-            _absent_from_chain(self._task_expected, path)
-            for path, kind in self._task_expected.chain
-            if kind == "absent"
+        self._directories = fixed_directory_observations(
+            self._task_expected, include_target=True,
         )
-        self._files_expected = _absent_child(self._task_expected, "files")
         self._manifest_expected = _absent_child(
             self._task_expected, "recovery.json",
         )
         self._completion_expected = _absent_child(
             self._task_expected, "backup.complete",
         )
-        self._objects = {
-            member.object_id: member for member in projection.objects
-        }
+
         self.material_paths = build_backup_material_paths(
             projection, base=material_base,
         )
-        # 全部位置在首个材料准备之前固定；逐单元保护不改变布局。
+        # 所有业务只在此消费唯一布局；全量材料准备及事实更新不重算位置。
         self._material_expected = {
             member.object_id: observe_file(
                 task_root / "files" / self.material_paths[member.object_id],
@@ -321,7 +300,7 @@ class RecoveryProtectionSession:
             for expected in self._material_expected.values()
         ):
             raise ValueError("本任务材料位置必须固定为不存在")
-        self._material_directories = {}
+        self._directory_state = DirectoryCreationState()
         self._units = {
             member.unit_id: member for member in projection.units
         }
@@ -336,7 +315,7 @@ class RecoveryProtectionSession:
         self._failed = False
         self._busy = False
         self._initialized = False
-        self._files_created = False
+
         self.backup_completed = False
         self.backup_cleanup_report = ""
         self.backup_cleanup_error = None
@@ -413,61 +392,29 @@ class RecoveryProtectionSession:
             raise ValueError("保护协调不允许重入")
         self._busy = True
 
-    def _create_directory(self, expected, role):
-        self._stage(role, expected.path, "固定内部目录创建")
-        try:
-            result = execute_filesystem_change(
-                prepare_directory_creation(expected),
-            )
-        except FilesystemChangeError as error:
-            self._directory_results.append(error.result)
-            raise
-        self._directory_results.append(result)
-
     def _initialize(self):
         if self._initialized:
             return
         self._check_isolation()
-        for expected in self._directories:
-            self._create_directory(expected, "内部任务目录")
+        self._directory_state.ensure_all(
+            self._directories,
+            record_step=self._directory_results.append,
+            stage=lambda target, phase:
+            self._stage("内部任务目录", target, phase),
+        )
         self._initialized = True
 
-    def _ensure_files_directory(self):
-        if not self._files_created:
-            self._create_directory(self._files_expected, "编号材料目录")
-            self._files_created = True
-
     def _ensure_material_parents(self, expected):
-        """只创建预演固定的材料父目录，正常创建结果复用一次。"""
-        self._ensure_files_directory()
-        root = self.task_root / "files"
-        for path, kind in expected.chain[:-1]:
-            if identity(path) == identity(root) or not contains(root, path):
-                continue
-            if kind != "absent":
-                raise ValueError("新任务材料父目录没有固定不存在前提")
-            key = identity(path)
-            created = self._material_directories.get(key)
-            if created is not None:
-                target, chain = checked_chain(path, include_observation=True)
-                if chain[-1][1] != "directory":
-                    raise ValueError("已创建材料父目录存在性或类型变化")
-                attributes = target.lstat()
-                if (
-                    ObjectIdentity(attributes.st_dev, attributes.st_ino)
-                    != created.object_identity
-                ):
-                    raise ValueError("已创建材料父目录身份变化")
-                continue
-            self._create_directory(
-                _absent_from_chain(expected, path), "材料路径目录",
-            )
-            receipt = self._directory_results[-1]
-            if not receipt.succeeded or receipt.created_directory is None:
-                raise RuntimeError("正常材料目录创建缺少正式对象结果")
-            self._material_directories[key] = receipt.created_directory
+        """同一固定原链、同一目录机制；内部结果不进入工作账本。"""
+        self._directory_state.ensure_all(
+            fixed_directory_observations(expected),
+            record_step=self._directory_results.append,
+            stage=lambda target, phase:
+            self._stage("材料路径目录", target, phase),
+        )
 
     def _check_materials(self):
+        self._directory_state.recheck()
         for observed in self._material_observations.values():
             self._stage("已发布编号材料", observed.path, "正式引用材料复核")
             _recheck_observation(observed)
@@ -497,9 +444,12 @@ class RecoveryProtectionSession:
         self._document = candidate
         self._candidate = None
         self._stage("恢复清单", target, "已发布清单固定观察")
-        actual = observe_file(target, include_digest=True)
+        actual = result.observation
+        if not isinstance(actual, FileObservation):
+            raise RuntimeError("正常清单发布缺少正式成果观察")
         if (
-            actual.kind != "file"
+            actual.path != target
+            or actual.kind != "file"
             or actual.object_identity != ObjectIdentity(*artifact.identity)
             or actual.link_count != 1
             or actual.attributes.st_size != artifact.length
@@ -526,23 +476,6 @@ class RecoveryProtectionSession:
             result = error.result
         raise ProtectionPublicationError(self, error, result) from error
 
-    def _dispose_manifest_staging(self):
-        artifact = self._artifact
-        if artifact is None or artifact._lifecycle in ("completed", "disposed"):
-            return
-        if artifact.mechanism == "in_place" and artifact._lifecycle == "attempted":
-            # 完整硬链接应急由发布失败事实保留，禁止通用清理。
-            return
-        try:
-            dispose_content_artifact(artifact)
-        except (OSError, ValueError) as error:
-            print(
-                f"[清单成果放弃清理失败] {artifact.path}：{error}",
-                file=sys.stderr,
-            )
-            return
-        self._artifact = None
-
     def discard_before_work(self):
         """放弃工作开始前的本次备份；失败由所属业务提示人工处理。
 
@@ -561,20 +494,9 @@ class RecoveryProtectionSession:
         )
         if chain[-1][1] == "absent":
             return
-        owned = next((
-            receipt.created_directory
-            for receipt in self._directory_results
-            if receipt.succeeded
-            and identity(receipt.target) == identity(target)
-        ), None)
-        if chain[-1][1] != "directory" or owned is None:
+        if chain[-1][1] != "directory":
             raise ValueError("无法确认本次备份任务目录所有权，未删除")
-        attributes = target.lstat()
-        if (
-            ObjectIdentity(attributes.st_dev, attributes.st_ino)
-            != owned.object_identity
-        ):
-            raise ValueError("本次备份任务目录身份变化，未删除")
+        self._directory_state.require(target)
         shutil.rmtree(target)
 
     def protect_all(self):
@@ -614,14 +536,17 @@ class RecoveryProtectionSession:
                         self._stage(
                             "编号材料", receipt.target, "正式材料固定观察",
                         )
-                        self._material_observations[number] = _observe_material(
-                            receipt.target,
-                            {
-                                "kind": member.original.kind,
-                                "records": member.original.records,
-                            },
-                            include_bytes=False,
-                        )
+                        actual = receipt.observation
+                        if not isinstance(actual, (FileObservation, TreeObservation)):
+                            raise RuntimeError("正常内部材料缺少正式成果观察")
+                        kind, records = _material_records(actual)
+                        if (
+                            actual.path != receipt.target
+                            or kind != member.original.kind
+                            or records != member.original.records
+                        ):
+                            raise OSError("正式材料成果不对应固定原状态")
+                        self._material_observations[number] = actual
                         self._active_material = None
                     self._publish(build_document(
                         self.projection, self.task_root,
@@ -634,7 +559,8 @@ class RecoveryProtectionSession:
                 self._busy = False
                 if not prepared:
                     self._failed = True
-                    self._dispose_manifest_staging()
+                    if cleanup_content_artifact(self._artifact):
+                        self._artifact = None
 
             self.recheck_all_before_work()
             try:
@@ -663,24 +589,27 @@ class RecoveryProtectionSession:
                     "备份完成凭据", self._completion_expected.path,
                     "已发布完成凭据固定观察",
                 )
-                completion = observe_file(
-                    self._completion_expected.path,
-                    include_bytes=True, include_digest=True,
-                )
+                completion = receipt.observation
+                if not isinstance(completion, FileObservation):
+                    raise RuntimeError("正常完成凭据发布缺少正式成果观察")
                 if (
-                    completion.kind != "file"
+                    completion.path != self._completion_expected.path
+                    or completion.kind != "file"
                     or completion.object_identity
                     != ObjectIdentity(*self._artifact.identity)
                     or completion.link_count != 1
+                    or completion.attributes.st_size != self._artifact.length
                     or completion.digest != self._artifact.digest
-                    or completion.source_bytes != self._artifact.content
                 ):
                     raise OSError("已发布备份完成凭据与固定成果不符")
-                self._completion_expected = completion
+                self._completion_expected = replace(
+                    completion, source_bytes=self._artifact.content,
+                )
                 self._artifact = None
             except (OSError, ValueError) as error:
                 self._failed = True
-                self._dispose_manifest_staging()
+                if cleanup_content_artifact(self._artifact):
+                    self._artifact = None
                 raise ProtectionPublicationError(self, error) from error
             self.backup_completed = True
             return self._document
@@ -770,7 +699,8 @@ class RecoveryProtectionSession:
             self._busy = False
             if not completed:
                 self._failed = True
-                self._dispose_manifest_staging()
+                if cleanup_content_artifact(self._artifact):
+                    self._artifact = None
 
     def begin(self, unit_id):
         """正常返回才满足started屏障，工作目录创建必须在其后。"""

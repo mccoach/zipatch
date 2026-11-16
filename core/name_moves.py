@@ -4,26 +4,27 @@
 
 import os
 import stat
-import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from core.content_publication import (
     ContentPublicationError, ContentPublicationOptions, ContentPublicationResult,
-    dispose_content_artifact, prepare_copy_content_artifact, publish_content,
+    cleanup_content_artifact, prepare_copy_content_artifact, publish_content,
 )
 from core.file_observation import (
-    FileObservation, ObjectIdentity, TreeObservation,
+    FileObservation, TreeObservation,
     project_removed_file_links, recheck_file, recheck_tree,
 )
 from core.filesystem_changes import (
-    FilesystemChangeError, FilesystemChangeResult, TreeCopyStepResult,
+    FilesystemChangeError, FilesystemChangeResult,
+    tree_execution_results,
     execute_filesystem_change, execute_tree_copy, execute_tree_removal,
     prepare_directory_creation, prepare_file_removal,
     prepare_tree_copy, prepare_tree_removal,
 )
 from core.recovery_paths import checked_chain, overlaps
+from core.execution_ledger import ExecutionLedger
 
 
 class NameMoveError(OSError):
@@ -204,10 +205,9 @@ class PreparedNameMove:
     plan: NameMovePlan
     mechanism: str
     _lifecycle: str
-    _results: tuple
+    _execution: ExecutionLedger
     _current: Path | None
     _phase: str
-    _active: object
     _artifact: object
     _final_observations: tuple
 
@@ -221,7 +221,7 @@ class PreparedNameMove:
 
     @property
     def results(self):
-        return self._results
+        return self._execution.results
 
     @property
     def current(self):
@@ -234,7 +234,7 @@ class PreparedNameMove:
     @property
     def active_change(self):
         """失败子核心现场只读保留，不恢复其执行资格。"""
-        return self._active
+        return self._execution.active_change
 
 
 @dataclass(frozen=True)
@@ -388,8 +388,8 @@ def prepare_observed_name_move(source, expected):
     for name, value in (
         ("source", source), ("expected", expected), ("plan", plan),
         ("mechanism", mechanism), ("_lifecycle", "prepared"),
-        ("_results", ()), ("_current", None), ("_phase", "prepared"),
-        ("_active", None), ("_artifact", None),
+        ("_execution", ExecutionLedger(tree_execution_results)),
+        ("_current", None), ("_phase", "prepared"), ("_artifact", None),
         ("_final_observations", ()),
     ):
         object.__setattr__(move, name, value)
@@ -463,33 +463,7 @@ def _append_move_results(move, results):
         for member in results
     ):
         raise TypeError("名称组合必须消费正式步骤结果")
-    object.__setattr__(move, "_results", (*move.results, *results))
-
-
-def _execute_move_tree_step(move, prepared, executor):
-    """子核心拥有细分现场；所有退出路径均保留已产生的真实结果。"""
-    object.__setattr__(move, "_active", prepared)
-    completed = False
-    try:
-        result = executor(prepared)
-        completed = True
-        return result
-    finally:
-        _append_move_results(
-            move,
-            tuple(
-                member.change if isinstance(member, TreeCopyStepResult)
-                else member
-                for member in prepared.results
-            ),
-        )
-        if completed:
-            object.__setattr__(move, "_active", None)
-        else:
-            # 不捕获程序缺陷，也不抹去子核心的准确位置和阶段。
-            # 失败实例保留供诊断，不授予继续执行或重试资格。
-            _move_stage(move, prepared.current, prepared.phase)
-
+    move._execution.append_results(tuple(results))
 
 
 def _execute_move_file_removal(move, expected):
@@ -503,57 +477,6 @@ def _execute_move_file_removal(move, expected):
     _append_move_results(move, (result,))
     return result
 
-
-
-def _copied_move_tree(source, target, copy):
-    """目标身份来自真实复制结果，正文和时间来自固定来源。"""
-    relocated = _relocated_move_source(source, target)
-    directory_ids, file_ids = {}, {}
-    for receipt in copy.results:
-        if not receipt.succeeded:
-            raise ValueError("独立复制目标只能消费真实成功结果")
-        relative = receipt.target.relative_to(target).as_posix()
-        relative = "" if relative == "." else relative
-        if receipt.kind == "create_directory":
-            directory_ids[relative] = receipt.object_identity
-        elif receipt.kind == "content":
-            file_ids[relative] = receipt.object_identity
-    return replace(
-        relocated,
-        directories=tuple(
-            (
-                relative,
-                replace(directory, object_identity=directory_ids[relative]),
-            )
-            for relative, directory in relocated.directories
-        ),
-        files=tuple(
-            (
-                relative,
-                replace(
-                    observed, object_identity=file_ids[relative],
-                    link_count=1, source_bytes=None,
-                ),
-            )
-            for relative, observed in relocated.files
-        ),
-    )
-
-
-def _dispose_move_artifact(move):
-    artifact = move._artifact
-    if artifact is None:
-        return
-    if artifact._lifecycle not in ("completed", "disposed"):
-        try:
-            dispose_content_artifact(artifact)
-        except (OSError, ValueError) as cleanup_error:
-            print(
-                f"[名称移动独立暂存清理失败] {artifact.path}：{cleanup_error}",
-                file=sys.stderr,
-            )
-            return
-    object.__setattr__(move, "_artifact", None)
 
 
 def _execute_native_name(move, source, plan):
@@ -653,11 +576,9 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
                 _move_stage(move, error.result.target, error.result.phase)
                 raise
             _append_move_results(move, (publication,))
-            copied = replace(
-                source, path=expected.path,
-                object_identity=ObjectIdentity(*artifact.identity),
-                link_count=1, source_bytes=None, digest=artifact.digest,
-            )
+            copied = publication.observation
+            if not isinstance(copied, FileObservation):
+                raise RuntimeError("正常跨卷文件发布缺少正式目标观察")
             _move_stage(move, expected.path, "来源移除前完整目标核验")
             _recheck_move_object(copied)
             _move_stage(move, source.path, "来源移除前固定来源复核")
@@ -670,7 +591,10 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
             if isinstance(expected, TreeObservation):
                 _move_stage(move, expected.path, "固定已有目标树名称移除")
                 removal = prepare_tree_removal(expected)
-                _execute_move_tree_step(move, removal, execute_tree_removal)
+                move._execution.execute_active(
+                    removal, execute_tree_removal,
+                    stage=lambda current, phase: _move_stage(move, current, phase),
+                )
                 if move.mechanism == "native":
                     # 完整旧目标树已正常移除，才扣除其原有名称数量。
                     source = project_removed_file_links(
@@ -691,15 +615,23 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
             else:
                 _move_stage(move, expected.path, "跨卷固定独立目标树重建")
                 copy = prepare_tree_copy(source, expected)
-                _execute_move_tree_step(move, copy, execute_tree_copy)
-                copied = _copied_move_tree(source, expected.path, copy)
+                move._execution.execute_active(
+                    copy, execute_tree_copy,
+                    stage=lambda current, phase: _move_stage(move, current, phase),
+                )
+                copied = copy.final_observation
+                if not isinstance(copied, TreeObservation):
+                    raise RuntimeError("正常跨卷目录复制缺少最终目标观察")
                 _move_stage(move, expected.path, "来源移除前完整目标树核验")
                 _recheck_move_object(copied)
                 _move_stage(move, source.path, "来源移除前固定来源树复核")
                 _recheck_move_object(source)
                 _move_stage(move, source.path, "跨卷固定来源树名称移除")
                 removal = prepare_tree_removal(source)
-                _execute_move_tree_step(move, removal, execute_tree_removal)
+                move._execution.execute_active(
+                    removal, execute_tree_removal,
+                    stage=lambda current, phase: _move_stage(move, current, phase),
+                )
                 _move_stage(move, expected.path, "跨卷目录最终成果核验")
                 _recheck_move_object(copied)
     except (OSError, ValueError) as error:
@@ -708,7 +640,8 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
             move.results, False, move.current, move.phase, error,
         )) from error
     finally:
-        _dispose_move_artifact(move)
+        if cleanup_content_artifact(move._artifact):
+            object.__setattr__(move, "_artifact", None)
 
     final_target = (
         _relocated_move_source(source, plan.target)

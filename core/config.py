@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 
 import json
-import sys
 
 from core.content_publication import (
     ContentPublicationError, ContentPublicationResult,
-    dispose_content_artifact, prepare_content_artifact, publish_content,
+    cleanup_content_artifact, prepare_content_artifact, publish_content,
 )
-from core.file_observation import FileObservation, observe_file
-from core.filesystem_changes import (
-    FilesystemChangeError, execute_filesystem_change,
-    prepare_directory_creation,
+from core.file_observation import observe_file
+from core.directory_creation import (
+    DirectoryCreationState, fixed_directory_observations,
 )
 
 from contextlib import contextmanager
@@ -288,7 +286,7 @@ def validate_rule_config_source(source):
             first_names[name] = number
 
 
-def load_user_config(path=None, *, notices=None):
+def load_user_config(path=None):
     """只有文件不存在才创建默认配置；损坏或读取故障不重建、不覆盖。"""
     path = Path(path) if path is not None else get_config_path()
 
@@ -304,22 +302,9 @@ def load_user_config(path=None, *, notices=None):
             "原配置文件未修改，请修正配置后重新启动。"
         ) from error
 
-    # 仅在加载边界转换明确的旧保存值；其他未知值仍按正式契约拒绝。
-    restore_source = source.get("restore") if isinstance(source, dict) else None
-    converted = (
-        isinstance(restore_source, dict)
-        and restore_source.get("existing_file_policy") == "rename"
-    )
-    if converted:
-        restore_source["existing_file_policy"] = "skip"
     validate_rule_config_source(source)
     config = normalize_config(deep_merge_config(DEFAULT_CONFIG, source))
-    if converted and notices is not None:
-        notices.append(
-            "代码拆分已取消自动改名；原“自动改名”设置"
-            "已调整为“跳过已有文件”，请核对。"
-        )
-    return config, converted or config != source
+    return config, config != source
 
 
 class SaveStatus(Enum):
@@ -541,24 +526,17 @@ class ConfigSaveManager:
         try:
             expected = observe_file(self.path, include_digest=True)
             phase = "固定必要配置目录创建"
-            for index, (directory, kind) in enumerate(expected.chain[:-1]):
-                if kind != "absent":
-                    continue
-                absent = FileObservation(
-                    directory, expected.chain[:index + 1], "absent",
-                    None, None, None, None, None, None,
-                )
-                try:
-                    result = execute_filesystem_change(
-                        prepare_directory_creation(absent),
-                    )
-                except FilesystemChangeError as error:
-                    directory_results.append(error.result)
-                    raise
-                directory_results.append(result)
+            directories = DirectoryCreationState()
+            directories.ensure_all(
+                fixed_directory_observations(expected),
+                record_step=directory_results.append,
+                stage=lambda target, current_phase: None,
+            )
 
             phase = "完整配置成果准备"
             artifact = prepare_content_artifact(expected, content)
+            phase = "完整配置准备后必要目录身份复核"
+            directories.recheck_parents(expected)
             phase = "配置成果正式发布"
             try:
                 publication = publish_content(artifact)
@@ -585,19 +563,7 @@ class ConfigSaveManager:
                 if artifact._lifecycle in ("attempted", "completed"):
                     self.required_write = True
                     self._pending = True
-                if artifact._lifecycle not in ("completed", "disposed"):
-                    if not (
-                        artifact.mechanism == "in_place"
-                        and artifact._lifecycle == "attempted"
-                    ):
-                        try:
-                            dispose_content_artifact(artifact)
-                        except (OSError, ValueError) as cleanup_error:
-                            print(
-                                f"[配置自有暂存清理失败] {artifact.path}："
-                                f"{cleanup_error}",
-                                file=sys.stderr,
-                            )
+                cleanup_content_artifact(artifact)
             self.metrics["publication_seconds"] += perf_counter() - start
 
         # 名称替换指标不把硬链接原对象写回冒充os.replace。
