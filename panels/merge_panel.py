@@ -15,7 +15,7 @@ from ui.operation_lock import locked_page
 from ui.text_output_settings import edit_output_format_settings, show_output_help
 from ui.theme import styled_button, styled_frame
 from ui.widgets import (
-    browse_folder, create_entry_row, make_checkbutton, make_radiobutton,
+    browse_folder, create_entry_row, make_checkbutton,
     open_output_file, open_path_with_default_app, resolve_output_file_conflict,
 )
 
@@ -84,20 +84,6 @@ class MergePanel(BasePanel):
 
         row = styled_frame(body, bg=THEME["bg_panel"])
         row.pack(fill="x", pady=(10, 0))
-        self.merge_mode = tk.StringVar(value=self.cfg["merge_mode"])
-        tk.Label(
-            row, text="合并模式", bg=THEME["bg_panel"],
-            fg=THEME["fg_label"], font=THEME["font_main"],
-        ).pack(side="left", padx=(0, 4))
-        for label, value in (
-            ("仅目录", "directory"),
-            ("仅列表", "list"),
-            ("目录+列表", "combined"),
-        ):
-            make_radiobutton(
-                row, label, self.merge_mode, value,
-                commits=self.commits, config=self.cfg, field="merge_mode",
-            ).pack(side="left", padx=(0, 4))
 
         for field, label in (
             ("open_after_done", "完成后立即打开成果文件"),
@@ -138,9 +124,25 @@ class MergePanel(BasePanel):
         styled_button(
             row, "正文规则", lambda: show_output_help(self.root), width=10,
         ).pack(side="left", padx=(0, 8))
-        styled_button(
-            row, "合并", self.execute_merge, width=12, accent=True,
-        ).pack(side="right")
+        # right 按登记顺序从右向左排列，使最终顺序为目录、列表、组合。
+        for label, mode, color in (
+            ("目录+列表合并", "combined", "#a85d12"),
+            ("仅列表合并", "list", "#287044"),
+            ("仅目录合并", "directory", "#28679b"),
+        ):
+            button = styled_button(
+                row, label,
+                lambda selected=mode: self.execute_merge(selected),
+                width=12,
+            )
+            button.configure(
+                bg=color, fg=THEME["fg_on_dark"],
+                activebackground=color,
+                activeforeground=THEME["fg_on_dark"],
+            )
+            button._normal_bg = color
+            button._normal_fg = THEME["fg_on_dark"]
+            button.pack(side="right", padx=(8, 0))
 
     def open_merge_list_dialog(self):
         from ui.demand_editor import open_demand_editor
@@ -170,14 +172,15 @@ class MergePanel(BasePanel):
         )
         return output, header, footer
 
-    def execute_merge(self):
+    def execute_merge(self, mode):
         if self.commits.operation_depth:
             return
         with self.commits.operation(), locked_page(self):
-            return self._execute_merge()
+            return self._execute_merge(mode)
 
-    def _execute_merge(self):
-        mode = self.cfg["merge_mode"]
+    def _execute_merge(self, mode):
+        # 本次模式来自点击的按钮；沿原配置接受和保存屏障记录最近模式。
+        self.commits.manager.accept(self.cfg, {"merge_mode": mode})
         fields = {
             "merge_mode", "output_folder", "output_filename",
             "preamble_text", "ending_text", "code_header_line",
