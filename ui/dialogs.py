@@ -90,8 +90,8 @@ def create_managed_text_box(
 
     text._content_operation_completed = content_completed
     text._text_editor_controller = TextEditorController(
-        parent=parent, toolbar_parent=parent, text_widget=text,
-        before_text_frame=frame, enable_find=True,
+        toolbar_parent=parent, text_widget=text,
+        before_text_frame=frame, commits=commits, enable_find=True,
         enable_replace=not readonly, enable_undo=not readonly,
         readonly=readonly,
         on_content_changed=lambda prepared=None:

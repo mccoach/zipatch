@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from core.text_search import DEFAULT_BOUNDARY_CODEPOINTS
+
 # --- 默认附加文本 ---
 
 PREAMBLE_TEXT = ("我正在开发缠论分析系统，以下是现有的全量前端代码和开发规范、需求规则等，"
@@ -218,6 +220,9 @@ THEME = {
 
 DEFAULT_CONFIG = {
     "active_mode": "merge",
+    "search": {
+        "boundary_codepoints": list(DEFAULT_BOUNDARY_CODEPOINTS),
+    },
     "settings": {
         "entry_history_max_items": 20,
         "crlf_file_list": "*.bat\n*.CMD",

@@ -15,6 +15,8 @@ from feature_registry import get_feature_registry
 from ui.config_editing import ConfigCommitController
 from ui.dialogs import create_managed_text_box
 from ui.feature_tabs import DraggableFeatureTabs
+from ui.global_settings import open_global_settings
+from ui.search_icons import linear_icon_button
 from ui.theme import apply_global_theme, styled_button, styled_frame
 from ui.window_manager import (
     exit_blocking_popup, focus_window, prepare_all_for_exit,
@@ -50,7 +52,7 @@ class ZipatchApp:
 
     def build_ui(self):
         root = self.root
-        root.title("智派-文本代码修改合并助手 Zipatch v3.9.2-20261117")
+        root.title("智派-文本代码修改合并助手 Zipatch v3.9.3-20261118")
         root.protocol("WM_DELETE_WINDOW", self.close_application)
         root.resizable(True, True)
         center_window(root, 1080, 800)
@@ -81,6 +83,13 @@ class ZipatchApp:
         styled_button(top, "联系作者", self.show_contact, width=8).pack(
             side="right", padx=(8, 0),
         )
+        linear_icon_button(
+            top, "settings",
+            lambda: open_global_settings(self.root, self.commits)
+            if not self.commits.operation_depth else None,
+            "全局设置",
+            text=" 全局设置",
+        ).pack(side="right", padx=(8, 0))
 
         self.content_frame = tk.Frame(
             root, bg=THEME["bg_panel"], highlightbackground=THEME["border"],

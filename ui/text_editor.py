@@ -3,9 +3,14 @@
 import tkinter as tk
 from contextlib import nullcontext
 from tkinter import TclError
+from bisect import bisect_left, bisect_right
 
 from core.constants import THEME
-from ui.theme import styled_frame, styled_entry, styled_button
+from core.text_search import (
+    SearchResult, compose_search_replacement, find_text_matches,
+)
+from ui.search_icons import linear_icon_button, set_mode_button_state
+from ui.theme import styled_frame, styled_entry
 
 
 
@@ -70,18 +75,16 @@ class TextEditorController:
 
     def __init__(
         self,
-        parent,
         toolbar_parent,
         text_widget,
         before_text_frame,
+        commits,
         enable_find=True,
         enable_replace=True,
         enable_undo=True,
         readonly=False,
         on_content_changed=None,
     ):
-        self.parent = parent
-        self.toolbar_parent = toolbar_parent
         self.text_widget = text_widget
         self.before_text_frame = before_text_frame
         self.enable_find = enable_find
@@ -92,7 +95,30 @@ class TextEditorController:
 
         self.find_var = tk.StringVar()
         self.replace_var = tk.StringVar()
-        self.search_state = {"current_start": None}
+        self.commits = commits
+
+        self.case_sensitive = tk.BooleanVar(master=text_widget, value=False)
+        self.whole_word = tk.BooleanVar(master=text_widget, value=False)
+        self.wildcard = tk.BooleanVar(master=text_widget, value=False)
+        self.match_status = tk.StringVar(master=text_widget, value="—")
+        self.matches = SearchResult()
+        self.current_index = None
+        self._source = ""
+        self._source_dirty = True
+        self._line_starts = (0,)
+        self._supplementary_positions = ()
+        self._tk_uses_surrogates = int(
+            text_widget.tk.call("string", "length", "\U0001F600")
+        ) == 2
+        self._refresh_after_id = None
+        self._refresh_anchor = None
+        # 只区分本控制器的查找跳转与外部光标移动；
+        # 实时光标位置仍由Text控件唯一拥有，不保存第二份光标坐标。
+        self._moving_search_cursor = False
+        self._destroyed = False
+        self._boundary_binding = text_widget._root().bind(
+            "<<SearchBoundariesChanged>>", self.on_boundaries_changed, add="+",
+        )
 
         self.search_bar = styled_frame(toolbar_parent)
         self.search_bar.pack(fill="x", pady=(0, 6), before=before_text_frame)
@@ -103,10 +129,7 @@ class TextEditorController:
         self.bind_shortcuts()
 
     def create_search_bar(self):
-        """一行等宽输入和紧凑符号动作，不改变正文及查找算法。"""
-        # 创建控件时模块导入已完成；避免编辑器与widgets的顶层循环依赖。
-        from ui.widgets import add_tooltip
-
+        """输入、稳定状态、三个独立模式、原五个动作共用一行。"""
         replace_enabled = self.enable_replace and not self.readonly
         self.search_bar.grid_columnconfigure(
             1, weight=1, uniform="search_inputs",
@@ -119,7 +142,6 @@ class TextEditorController:
             self.search_bar, self.find_var,
         )
         find_frame.grid(row=0, column=1, sticky="ew")
-
         if replace_enabled:
             self.search_bar.grid_columnconfigure(
                 3, weight=1, uniform="search_inputs",
@@ -135,48 +157,86 @@ class TextEditorController:
         else:
             self.replace_entry = None
 
-        actions = styled_frame(self.search_bar)
-        actions.grid(
+        controls = styled_frame(self.search_bar)
+        controls.grid(
             row=0, column=4 if replace_enabled else 2,
-            sticky="e", padx=(4, 0),
+            sticky="e", padx=(5, 0),
         )
+        self.status_label = tk.Label(
+            controls, textvariable=self.match_status, width=8, anchor="e",
+            bg=THEME["bg"], fg=THEME["fg_dim"], font=THEME["font_main"],
+        )
+        self.status_label.pack(side="left", padx=(0, 4))
+        from ui.widgets import add_tooltip
+        add_tooltip(self.status_label, "当前匹配位置 / 全部非重叠匹配数量")
+
+        modes = tk.Frame(
+            controls, bg=THEME["bg"], bd=0,
+            highlightthickness=1, highlightbackground=THEME["border_light"],
+            padx=1, pady=1,
+        )
+        modes.pack(side="left", padx=(2, 0))
+        self.mode_buttons = []
+        for icon, label, variable in (
+            ("case", "区分大小写", self.case_sensitive),
+            ("whole", "全词匹配", self.whole_word),
+            ("wildcard", "通配符 * 和 ?", self.wildcard),
+        ):
+            button = linear_icon_button(
+                modes, icon,
+                lambda selected=variable: self.toggle_mode(selected), label,
+            )
+            button.pack(side="left", padx=(1, 0))
+            self.mode_buttons.append((button, label, variable))
+        self.refresh_mode_buttons()
+
+        actions = tk.Frame(
+            controls, bg=THEME["bg"], bd=0,
+            highlightthickness=1, highlightbackground=THEME["border_light"],
+            padx=1, pady=1,
+        )
+        actions.pack(side="left", padx=(4, 0))
         definitions = [
-            ("↑", "上一处（Shift+Enter）", self.find_prev),
-            ("↓", "下一处（Enter）", self.find_next),
+            ("previous", "上一处（Shift+Enter）", self.find_prev),
+            ("next", "下一处（Enter）", self.find_next),
         ]
         if replace_enabled:
             definitions.extend((
-                ("→", "替换当前命中", self.replace_current),
-                ("⇒", "全部替换", self.replace_all),
+                ("replace", "替换当前命中；替换正文按字面插入", self.replace_current),
+                ("replace_all", "全部替换；替换正文按字面插入", self.replace_all),
             ))
-        definitions.append(("×", "关闭查找替换（Esc）", self.hide_search_bar))
-        for symbol, description, command in definitions:
-            button = styled_button(actions, symbol, command, width=2)
-            button.configure(padx=2, pady=1)
+        definitions.append(("close", "关闭查找替换（Esc）", self.hide_search_bar))
+        self.action_buttons = []
+        for icon, description, command in definitions:
+            button = linear_icon_button(actions, icon, command, description)
             button.pack(side="left", padx=(1, 0))
-            add_tooltip(button, description)
-
+            self.action_buttons.append(button)
         self.find_var.trace_add("write", self.on_find_text_changed)
+
+    def refresh_mode_buttons(self):
+        for button, label, variable in self.mode_buttons:
+            set_mode_button_state(button, label, variable.get())
+
+    def toggle_mode(self, variable):
+        variable.set(not variable.get())
+        self.refresh_mode_buttons()
+        self.refresh_matches(relocate=True)
+
+    def on_boundaries_changed(self, event=None):
+        if not self._destroyed and self.whole_word.get():
+            self.refresh_matches(relocate=True)
 
     def configure_text_widget(self):
         if not self.readonly:
             self.text_widget.configure(
-                undo=True,
-                maxundo=-1,
-                autoseparators=True,
+                undo=True, maxundo=-1, autoseparators=True,
             )
-
         self.text_widget.tag_configure("search_match", background="#fff2a8")
         self.text_widget.tag_configure(
-            "search_current",
-            background="#ff9f43",
-            foreground="#000000",
+            "search_current", background="#ff9f43", foreground="#000000",
         )
         self.text_widget.tag_raise("search_match")
         self.text_widget.tag_raise("search_current")
-
-        # 执行监听随原生 Text 命令的 rename 保留。
-        # 不读取全文、不复制名单修订，也不消费 Modified 标记。
         self._search_python_command = self.text_widget._register(
             self.on_text_command,
         )
@@ -195,38 +255,185 @@ class TextEditorController:
         )
         self.text_widget.bind("<Destroy>", self.on_text_destroyed, add="+")
 
+    def _current_offsets(self):
+        if (
+            self.current_index is not None
+            and self.current_index < len(self.matches.ranges)
+        ):
+            return self.matches.ranges[self.current_index]
+        return None
+
     def invalidate_current_match(self):
-        """正文修改尝试先撤销旧命中；标签只承担派生显示。"""
-        self.search_state["current_start"] = None
-        self.search_state["keyword"] = None
+        self.current_index = None
+
         self.clear_search_highlight()
+        self.update_match_status()
 
     def on_text_command(self, command, operation):
         arguments = self.text_widget.tk.splitlist(command)
+        if (
+            len(arguments) >= 5
+            and arguments[1:4] == ("mark", "set", "insert")
+            and not self._moving_search_cursor
+            and self.text_widget.index(arguments[4])
+            != self.text_widget.index("insert")
+        ):
+            # 鼠标、方向键及其他组件通过原生insert标记移动光标。
+            # 外部新位置优先于旧命中；总数及全部高亮继续消费原结果。
+            self.current_index = None
+            self._refresh_anchor = None
+
+            self.text_widget.tag_remove("search_current", "1.0", "end")
+            if not self._source_dirty:
+                self.update_match_status()
         if len(arguments) >= 2:
             subcommand = arguments[1]
             if subcommand in ("insert", "delete", "replace") or (
-                subcommand == "edit"
-                and len(arguments) > 2
+                subcommand == "edit" and len(arguments) > 2
                 and arguments[2] in ("undo", "redo")
             ):
+                if self._refresh_after_id is None:
+                    self._refresh_anchor = self._current_offsets()
+                self._source_dirty = True
+                self.matches = SearchResult()
                 self.invalidate_current_match()
-        # Tkinter 报告 Python 缺陷后不会返回此值。
-        # Tcl 监听据此拒绝继续原修改命令，不将失败当成正常完成。
+                # 正文编辑只使派生结果失效，不取得光标或滚动所有权。
+                # 隐藏查找及空查询不读取全文；下次实际查找时再更新快照。
+                if self.find_var.get() and self.search_bar.winfo_manager():
+                    self.match_status.set("查找中…")
+                    if self._refresh_after_id is None:
+                        self._refresh_after_id = self.text_widget.after_idle(
+                            self.finish_scheduled_refresh,
+                        )
         return "ZIPATCH_SEARCH_OBSERVED"
+
+    def finish_scheduled_refresh(self):
+        self._refresh_after_id = None
+        if self.find_var.get() and self.search_bar.winfo_manager():
+            self.refresh_matches()
+
+    def _read_search_source(self):
+        self._source = self.text_widget.get("1.0", "end-1c")
+        self._line_starts = (
+            0, *(index + 1 for index, character in enumerate(self._source)
+                 if character == "\n"),
+        )
+        self._supplementary_positions = (
+            tuple(index for index, character in enumerate(self._source)
+                  if ord(character) > 0xFFFF)
+            if self._tk_uses_surrogates else ()
+        )
+        self._source_dirty = False
+
+    def _tk_index(self, offset):
+        line = bisect_right(self._line_starts, offset)
+        start = self._line_starts[line - 1]
+        column = offset - start
+        column += (
+            bisect_left(self._supplementary_positions, offset)
+            - bisect_left(self._supplementary_positions, start)
+        )
+        return self.text_widget.index(f"{line}.{column}")
+
+    def refresh_matches(self, *, relocate=False):
+        if self._destroyed:
+            return
+        if self._refresh_after_id is not None:
+            self.text_widget.after_cancel(self._refresh_after_id)
+            self._refresh_after_id = None
+        anchor = self._current_offsets() or self._refresh_anchor
+        self._refresh_anchor = None
+        query = self.find_var.get()
+        if query and self._source_dirty:
+            self._read_search_source()
+        self.matches = find_text_matches(
+            self._source, query,
+            case_sensitive=self.case_sensitive.get(),
+            whole_word=self.whole_word.get(),
+            wildcard=self.wildcard.get(),
+            boundary_codepoints=self.commits.manager.config_data[
+                "search"
+            ]["boundary_codepoints"],
+        )
+        self.current_index = None
+
+        self.clear_search_highlight()
+        if self.search_bar.winfo_manager():
+            for start, end in self.matches.ranges:
+                self.text_widget.tag_add(
+                    "search_match", self._tk_index(start), self._tk_index(end),
+                )
+        if anchor is not None and self.matches.ranges:
+            if anchor in self.matches.ranges:
+                self.current_index = self.matches.ranges.index(anchor)
+            elif relocate:
+                self.current_index = next(
+                    (index for index, (start, _) in enumerate(self.matches.ranges)
+                     if start >= anchor[0]),
+                    0,
+                )
+        self._display_current(move=relocate and self.current_index is not None)
+        self.update_match_status()
+
+    def _display_current(self, *, move=False):
+        self.text_widget.tag_remove("search_current", "1.0", "end")
+        offsets = self._current_offsets()
+        if offsets is None:
+
+            return
+        start, end = map(self._tk_index, offsets)
+
+        if self.search_bar.winfo_manager():
+            self.text_widget.tag_add("search_current", start, end)
+            self.text_widget.tag_raise("search_current")
+            self.text_widget.tag_raise("sel")
+        if move and self.search_bar.winfo_manager():
+            self._moving_search_cursor = True
+            try:
+                self.text_widget.mark_set("insert", end)
+            finally:
+                self._moving_search_cursor = False
+            self.text_widget.see(start)
+
+    def update_match_status(self):
+        query = self.find_var.get()
+        if not query:
+            description, warning = "—", False
+            detail = "查询为空"
+        elif self.matches.issue:
+            description, warning = "查询不完整", True
+            detail = self.matches.issue
+        elif not self.matches.ranges:
+            description, warning = "无匹配", True
+            detail = "当前正文没有匹配；不会移动光标或执行替换"
+        else:
+            number = 0 if self.current_index is None else self.current_index + 1
+            description = f"{number} / {len(self.matches.ranges)}"
+            warning = False
+            detail = "当前匹配位置 / 全部非重叠匹配数量"
+        self.match_status.set(description)
+        self.status_label.configure(
+            fg=THEME["warning"] if warning else THEME["fg_dim"],
+        )
+        self.status_label._tooltip.text = detail
 
     def on_text_destroyed(self, event):
         if event.widget is not self.text_widget:
             return
+        self._destroyed = True
+        if self._refresh_after_id is not None:
+            self.text_widget.after_cancel(self._refresh_after_id)
+            self._refresh_after_id = None
+        self.text_widget._root().unbind(
+            "<<SearchBoundariesChanged>>", self._boundary_binding,
+        )
         callback = self._search_trace_command
         if callback is None:
             return
         editing = getattr(self.text_widget, "_list_text_editing", None)
         command = (
-            editing.original_command
-            if editing is not None else self.text_widget._w
+            editing.original_command if editing is not None else self.text_widget._w
         )
-        # 原生命令已销毁时，其执行监听也已释放；不猜测异常消息。
         if self.text_widget.tk.call("info", "commands", command):
             self.text_widget.tk.call(
                 "trace", "remove", "execution", command, "enter", callback,
@@ -235,20 +442,17 @@ class TextEditorController:
         self.text_widget.deletecommand(self._search_python_command)
         self._search_trace_command = None
         self._search_python_command = None
+        self._source = ""
+        self.matches = SearchResult()
 
     def current_match_range(self, keyword):
-        """命中须对应当前条件、记录位置、标签边界及实际正文。"""
-        recorded = self.search_state["current_start"]
-        if not recorded or self.search_state.get("keyword") != keyword:
+        if self._source_dirty or keyword != self.find_var.get():
             return None
-        ranges = self.text_widget.tag_ranges("search_current")
-        if len(ranges) != 2:
+        offsets = self._current_offsets()
+        if offsets is None:
             return None
-        start, end = map(self.text_widget.index, ranges)
-        expected_end = self.text_widget.index(f"{recorded}+{len(keyword)}c")
-        if start != recorded or end != expected_end:
-            return None
-        if self.text_widget.get(start, end) != keyword:
+        start, end = map(self._tk_index, offsets)
+        if self.text_widget.get(start, end) != self._source[offsets[0]:offsets[1]]:
             return None
         return start, end
 
@@ -311,148 +515,85 @@ class TextEditorController:
         self.text_widget.tag_remove("search_current", "1.0", "end")
 
     def highlight_all_matches(self):
-        self.text_widget.tag_remove("search_match", "1.0", "end")
-        keyword = self.find_var.get()
-
-        if not keyword:
-            return
-
-        start = "1.0"
-
-        while True:
-            index = self.text_widget.search(keyword, start, stopindex="end")
-
-            if not index:
-                break
-
-            end = f"{index}+{len(keyword)}c"
-            self.text_widget.tag_add("search_match", index, end)
-            start = end
+        self.refresh_matches()
 
     def show_search_bar(self, focus_replace=False):
-        if not self.search_bar.winfo_ismapped():
+        if not self.search_bar.winfo_manager():
             self.search_bar.pack(
-                fill="x",
-                pady=(0, 6),
-                before=self.before_text_frame,
+                fill="x", pady=(0, 6), before=self.before_text_frame,
             )
-
         if focus_replace and self.replace_entry is not None:
             self.replace_entry.focus_set()
             self.replace_entry.select_range(0, "end")
         else:
             self.find_entry.focus_set()
             self.find_entry.select_range(0, "end")
-
-        self.highlight_all_matches()
+        self.refresh_matches()
 
     def hide_search_bar(self, event=None):
-        if self.search_bar.winfo_ismapped():
+        if self.search_bar.winfo_manager():
             self.invalidate_current_match()
             self.search_bar.pack_forget()
             self.text_widget.focus_set()
             return "break"
-
         return None
 
-    def find_next(self, event=None):
-        keyword = self.find_var.get()
+    def _ensure_matches(self):
+        if self._source_dirty or self._refresh_after_id is not None:
+            self.refresh_matches()
 
-        if not keyword:
+    def _navigate(self, direction):
+        self._ensure_matches()
+        ranges = self.matches.ranges
+        if not ranges:
+            self.update_match_status()
             return "break"
-
-        self.highlight_all_matches()
-        self.text_widget.tag_remove("search_current", "1.0", "end")
-
-        start = self.text_widget.index("insert")
-
-        if self.search_state["current_start"]:
-            start = f"{self.search_state['current_start']}+1c"
-
-        index = self.text_widget.search(keyword, start, stopindex="end")
-
-        if not index:
-            index = self.text_widget.search(keyword, "1.0", stopindex="end")
-
-        if not index:
-            self.search_state["current_start"] = None
-            return "break"
-
-        end = f"{index}+{len(keyword)}c"
-        self.text_widget.tag_add("search_current", index, end)
-        self.text_widget.mark_set("insert", end)
-        self.text_widget.see(index)
-        self.search_state["current_start"] = self.text_widget.index(index)
-        self.search_state["keyword"] = keyword
-
+        if self.current_index is not None:
+            self.current_index = (self.current_index + direction) % len(ranges)
+        else:
+            position = min(
+                len(self._source), len(self.text_widget.get("1.0", "insert")),
+            )
+            if direction > 0:
+                self.current_index = next(
+                    (index for index, (start, _) in enumerate(ranges)
+                     if start >= position),
+                    0,
+                )
+            else:
+                self.current_index = next(
+                    (index for index in range(len(ranges) - 1, -1, -1)
+                     if ranges[index][0] < position),
+                    len(ranges) - 1,
+                )
+        self._display_current(move=True)
+        self.update_match_status()
         return "break"
+
+    def find_next(self, event=None):
+        return self._navigate(1)
 
     def find_prev(self, event=None):
-        keyword = self.find_var.get()
-
-        if not keyword:
-            return "break"
-
-        self.highlight_all_matches()
-        self.text_widget.tag_remove("search_current", "1.0", "end")
-
-        start = self.text_widget.index("insert")
-
-        if self.search_state["current_start"]:
-            start = self.search_state["current_start"]
-
-        index = self.text_widget.search(
-            keyword,
-            start,
-            stopindex="1.0",
-            backwards=True,
-        )
-
-        if not index:
-            index = self.text_widget.search(
-                keyword,
-                "end",
-                stopindex="1.0",
-                backwards=True,
-            )
-
-        if not index:
-            self.search_state["current_start"] = None
-            return "break"
-
-        end = f"{index}+{len(keyword)}c"
-        self.text_widget.tag_add("search_current", index, end)
-        self.text_widget.mark_set("insert", end)
-        self.text_widget.see(index)
-        self.search_state["current_start"] = self.text_widget.index(index)
-        self.search_state["keyword"] = keyword
-
-        return "break"
+        return self._navigate(-1)
 
     def replace_current(self, event=None):
         if self.readonly or str(self.text_widget.cget("state")) != "normal":
             return "break"
-
-        keyword = self.find_var.get()
-        if not keyword:
-            self.invalidate_current_match()
+        self._ensure_matches()
+        if not self.matches.ranges:
             return "break"
-
+        keyword = self.find_var.get()
         located = self.current_match_range(keyword)
         if located is None:
-            self.invalidate_current_match()
             self.find_next()
             located = self.current_match_range(keyword)
             if located is None:
                 return "break"
-
         start, end = located
         replacement = self.replace_var.get()
-        if keyword == replacement:
+        if self.text_widget.get(start, end) == replacement:
             return self.find_next()
 
-        # 原生修改开始前同步撤销旧命中。
-        # 本次修改只消费刚核验的局部范围，不再从漂移标签获取位置。
         scope = getattr(self.text_widget, "_edit_text_scope", None)
         with scope() if scope is not None else nullcontext():
             automatic = self.text_widget.cget("autoseparators")
@@ -465,44 +606,27 @@ class TextEditorController:
                 self.text_widget.configure(autoseparators=automatic)
 
         self.content_completed()
-        # 保留连续替换交互；下一项是新正文上重新查找形成的命中。
+        # 发布和原有完成回调之后，从实际新正文重新匹配。
+        self._refresh_anchor = None
+        self.refresh_matches()
         return self.find_next()
 
     def replace_all(self, event=None):
         if self.readonly or str(self.text_widget.cget("state")) != "normal":
             return "break"
-
-        keyword = self.find_var.get()
-        replacement = self.replace_var.get()
-
-        if not keyword:
+        self._ensure_matches()
+        if not self.matches.ranges:
             return "break"
-
-        binding = getattr(self.text_widget, "_config_binding", None)
-        editing = getattr(self.text_widget, "_list_text_editing", None)
-        if editing is not None:
-            # 名单消费已收口的完整正文；全部替换不负责删除物理空行。
-            content = editing.complete()
-        elif binding is not None:
-            # 配置绑定统一拥有读取契约及观测，已支持真实尾换行保留。
-            content = binding.read_current_value()
-        elif getattr(self.text_widget, "_preserve_trailing_newlines", False):
-            content = self.text_widget.get("1.0", "end-1c")
-        else:
-            content = get_text_value(self.text_widget)
-        count = content.count(keyword)
-
-        if count <= 0 or keyword == replacement:
-            self.highlight_all_matches()
+        final_content = compose_search_replacement(
+            self._source, self.matches.ranges, self.replace_var.get(),
+        )
+        if final_content == self._source:
+            self.refresh_matches()
             return "break"
-
-        final_content = content.replace(keyword, replacement)
         replace_text_keep_undo(self.text_widget, final_content)
-
-        self.search_state["current_start"] = None
-        self.highlight_all_matches()
-
         self.content_completed(final_content)
+        self._refresh_anchor = None
+        self.refresh_matches()
         return "break"
 
     def toggle_disabled_lines(self, event=None):
@@ -555,8 +679,7 @@ class TextEditorController:
         return "break"
 
     def on_find_text_changed(self, *_):
-        self.invalidate_current_match()
-        self.highlight_all_matches()
+        self.refresh_matches(relocate=True)
 
     def open_find(self, event=None):
         self.show_search_bar(focus_replace=False)

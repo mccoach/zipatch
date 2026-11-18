@@ -22,6 +22,7 @@ from core.constants import DEFAULT_CONFIG
 from core.favorite_order import order_favorites
 from core.merged_format import OutputSettingsError, validate_output_settings
 from core.paths import get_config_path
+from core.text_search import validate_search_settings
 
 
 
@@ -161,6 +162,8 @@ def validate_rule_config_source(source):
     """名单结构先于默认合并检查；非法规则正文仍保留。"""
     if not isinstance(source, dict):
         raise ValueError("配置顶层必须是 JSON 对象；原文件未修改。")
+    if "search" in source:
+        validate_search_settings(source["search"])
     for section_name in ("merge", "restore"):
         if section_name in source:
             validate_output_settings(section_name, source[section_name])
@@ -438,6 +441,8 @@ class ConfigSaveManager:
         if self._batch_aborted:
             raise RuntimeError("异常批次尚未恢复，禁止继续接受配置或保存。")
 
+        if target is self.config_data.get("search"):
+            validate_search_settings({**target, **values})
         if target is self.config_data.get("restore"):
             validate_restore_settings({**target, **values})
 
@@ -585,6 +590,8 @@ class ConfigSaveManager:
         if self._batch_aborted:
             raise RuntimeError("异常批次尚未恢复，禁止保存半完成配置。")
 
+        if "search" in self.config_data:
+            validate_search_settings(self.config_data["search"])
         for section_name in ("merge", "restore"):
             if section_name in self.config_data:
                 validate_output_settings(section_name, self.config_data[section_name])
