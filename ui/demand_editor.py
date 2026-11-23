@@ -814,6 +814,21 @@ class DemandDraftSession(TextDraftSession):
     def apply(self):
         return self.start_final("apply")
 
+    def merge(self):
+        """保存当前列表并关闭，再复用主页面唯一列表合并流程。"""
+        if (
+            self._destroyed or self.busy or self._close_in_progress
+            or self.commits.operation_depth
+        ):
+            return False
+        # 不先重复后台检查；正式合并入口会重新检查当前完整列表，
+        # 并在首次跟随链接前取得本次授权。
+        # 基类保存成功后关闭窗口，退出保存生命周期再启动业务。
+        if not super().save_and_close():
+            return False
+        self.panel.execute_merge("list")
+        return True
+
     def save_and_close(self):
         return self.start_final("save")
 
@@ -961,6 +976,9 @@ def open_demand_editor(panel):
         bottom, "取消", session.cancel, width=10,
     )
     session.cancel_button.pack(side="right", padx=(8, 0))
+    styled_button(
+        bottom, "合并", session.merge, width=10, accent=True,
+    ).pack(side="right", padx=(8, 0))
     styled_button(
         bottom, "保存", session.save_and_close, width=10, accent=True,
     ).pack(side="right", padx=(8, 0))
