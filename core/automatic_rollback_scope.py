@@ -15,12 +15,24 @@ from core.recovery_paths import contains, identity
 
 
 def _members(observed):
+    from core.link_paths import LinkPathObservation, link_definition_digest
+
+    if isinstance(observed, LinkPathObservation):
+        if observed.follow_final_link or observed.entry_link is None:
+            raise ValueError("回滚结构成员必须是不跟随的链接入口")
+        return ((
+            observed.actual_path, observed.kind, observed.object_identity,
+            link_definition_digest(observed.entry_link),
+        ),)
     if isinstance(observed, TreeObservation):
         return (
             *((directory.path, "directory", directory.object_identity, "")
               for _, directory in observed.directories),
             *((file.path, "file", file.object_identity, file.digest)
               for _, file in observed.files),
+            *((member.actual_path, member.kind, member.object_identity,
+               link_definition_digest(member.entry_link))
+              for _, member in observed.links),
         )
     if not isinstance(observed, FileObservation):
         raise TypeError("回滚现场必须是正式文件或完整树观察")
@@ -75,12 +87,18 @@ def validate_automatic_rollback_scope(projection, actions, *, results):
 
     permitted_absence = set()
     attempted_content_objects = set()
+    failed = False
+    seen_receipts = set()
     for receipt in results:
         if not isinstance(receipt, (
             ContentPublicationResult, FilesystemChangeResult,
             NativeNameMoveResult,
         )):
             raise TypeError("回滚授权只接受正式工作步骤")
+        if failed or id(receipt) in seen_receipts:
+            raise ValueError("回滚必须消费未完成步骤截止的唯一实际结果前缀")
+        seen_receipts.add(id(receipt))
+        failed = not receipt.succeeded
         attempted = (
             receipt.mutation_attempted
             if isinstance(receipt, ContentPublicationResult) else receipt.attempted
@@ -136,6 +154,39 @@ def validate_automatic_rollback_scope(projection, actions, *, results):
                 candidates.setdefault(key, []).append((
                     "directory", created.object_identity, "",
                 ))
+        elif receipt.kind == "create_link":
+            required_kind = generated.get(key)
+            if required_kind not in (
+                "file_symlink", "directory_symlink", "junction",
+            ):
+                raise ValueError("链接创建步骤越出原固定成果范围")
+            if receipt.succeeded:
+                observed = receipt.created_link
+                if (
+                    observed is None or identity(observed.actual_path) != key
+                    or observed.kind != required_kind
+                ):
+                    raise ValueError("正常链接创建缺少可靠对应成果")
+                member = _members(observed)[0]
+                desired = next(
+                    digest
+                    for unit in projection.units for effect in unit.effects
+                    for relative, kind, digest in effect.after.records
+                    if identity(effect.before.path / relative) == key
+                    and kind == required_kind
+                )
+                if member[3] != desired:
+                    raise ValueError("正常链接成果不对应原固定定义")
+                candidates.setdefault(key, []).append((
+                    member[1], member[2], member[3],
+                ))
+        elif receipt.kind == "remove_link":
+            original = originals.get(key)
+            if original is None or original[1] not in (
+                "file_symlink", "directory_symlink", "junction",
+            ):
+                raise ValueError("链接移除步骤越出原固定入口")
+            permitted_absence.add(key)
         elif receipt.kind in ("remove_file", "remove_empty_directory"):
             original = originals.get(key)
             expected_kind = (
@@ -144,7 +195,10 @@ def validate_automatic_rollback_scope(projection, actions, *, results):
             if original is None or original[1] != expected_kind:
                 raise ValueError("名称移除步骤越出原固定成员")
             permitted_absence.add(key)
-        elif receipt.kind != "set_directory_attributes":
+        elif receipt.kind == "set_directory_attributes":
+            if generated.get(key) != "directory":
+                raise ValueError("目录属性步骤越出原固定成果范围")
+        else:
             raise ValueError("自动回滚遇到未知工作步骤")
 
     for action in actions:

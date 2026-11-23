@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""整包恢复摘要与一次确认，不提供部分恢复或子项决定。"""
+"""已固定所选恢复范围的执行确认；对象选择在当前状态获取前完成。"""
 
 import tkinter as tk
 
@@ -20,7 +20,7 @@ def select_backup_restore(parent, preview, *, keep_source_path, commits):
     try:
         dialog = tk.Toplevel(parent)
         dialog.withdraw()
-        dialog.title("确认整包恢复")
+        dialog.title("确认所选范围恢复")
         dialog.configure(bg=THEME["bg"])
         dialog.transient(parent)
         controls = styled_frame(dialog)
@@ -30,13 +30,14 @@ def select_backup_restore(parent, preview, *, keep_source_path, commits):
         notice = (
             "\n\n成功后保留来源路径，不删除备份。"
             if keep_source_path else
-            "\n\n成功后清空来源输入框，不删除备份。"
+            "\n\n只有整份备份完整恢复成功才清空来源；"
+            "部分恢复、取消或失败保留来源，不删除备份。"
         )
         create_managed_text_box(
             body, "恢复范围与影响", preview.preview_text + notice,
             height=26, readonly=True, commits=commits,
             enable_favorites=False, enable_clear=False,
-            enable_wrap_toggle=False,
+            enable_wrap_toggle=False, enable_copy=True,
         )
 
         def cancel():
@@ -59,7 +60,7 @@ def select_backup_restore(parent, preview, *, keep_source_path, commits):
         cancel_button = styled_button(controls, "取消", cancel, width=12)
         cancel_button.pack(side="right", padx=(8, 0))
         styled_button(
-            controls, "确认整包恢复", confirm, width=18, danger=True,
+            controls, "确认所选范围恢复", confirm, width=18, danger=True,
         ).pack(side="right")
         center_window(
             dialog, 1000, min(740, dialog.winfo_screenheight() - 100),

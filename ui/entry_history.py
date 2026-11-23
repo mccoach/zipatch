@@ -347,7 +347,7 @@ class EntryHistoryPlugin:
             self.commits.select(
                 self.binding.page, {"code_header_line", "code_footer_line"},
             )
-            if self.binding.page in ("merge", "restore")
+            if self.binding.page == "merge"
             and self.binding.field in ("code_header_line", "code_footer_line")
             else [self.binding]
         )

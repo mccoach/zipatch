@@ -23,26 +23,29 @@ from ui.widgets import (
 def merge_completion_message(result, mode):
     incomplete = result.read_failure_count or result.mtime_failures
     title = "合并完成，存在缺失信息" if incomplete else "合并完成"
+    counts = dict(result.entry_counts)
     message = (
-        f"{mode}成果已发布。\n\n处理文件：{result.total_files} 个。\n"
-        f"主动忽略：{result.excluded_count} 个。\n"
-        f"被动失败：{result.read_failure_count} 个。\n"
-        f"修改时间未取得：{len(result.mtime_failures)} 个。\n\n"
-        f"已保存到：\n{result.output_file}"
+        f"{mode}成果已发布：成功正文文件 {counts.get('file', 0)} 个。\n"
+        f"共输出 {result.total_files} 个入口块；"
+        f"普通目录：{counts.get('directory', 0)}。\n"
+        f"文件软链接：{counts.get('file_symlink', 0)}；"
+        f"目录软链接：{counts.get('directory_symlink', 0)}；"
+        f"Junction：{counts.get('junction', 0)}。\n\n"
+        f"主动忽略：{result.excluded_count}；"
+        f"正文失败：{result.read_failure_count}；"
+        f"时间缺失：{len(result.mtime_failures)}。\n"
+        "链接块保存原定义，不包含引用目标正文。\n\n"
+        f"保存位置：\n{result.output_file}"
     )
     if result.excluded_count or result.read_failure_count:
         message += (
-            "\n\n占位项未提供真实源码；成果保留对应文件路径和占位标识，"
-            "请查看运行日志。"
-        )
-    if result.read_failure_count:
-        message += (
-            "\n被动失败项未成功读取或解码；请排查后重新合并，"
-            "本次没有自动重试。"
+            "\n\n忽略及正文失败项不生成源码块；"
+            "名单集中位于成果末尾，目录范围不展开后代。"
         )
     if result.mtime_failures:
-        message += "\n\n以下文件的修改时间未取得，追溯信息不完整：\n"
-        message += "\n".join(path for path, _ in result.mtime_failures)
+        message += "\n\n时间未取得：\n" + "\n".join(
+            path for path, _ in result.mtime_failures
+        )
     return title, message
 
 
@@ -110,7 +113,7 @@ class MergePanel(BasePanel):
             row, "附加文本", self.open_extra_text_dialog, width=10,
         ).pack(side="left", padx=(0, 8))
         styled_button(
-            row, "标记与占位",
+            row, "容器标记",
             lambda: edit_output_format_settings(
                 self.root, self.commits, self.cfg, "merge",
             ),
@@ -186,7 +189,6 @@ class MergePanel(BasePanel):
             "preamble_text", "ending_text", "code_header_line",
             "code_footer_line", "open_after_done", "force_overwrite",
             "normalize_text_newlines", "record_file_mtime",
-            "ignore_text", "failure_text",
         }
         if mode in ("directory", "combined"):
             fields |= {"source_folder", "exclude_folders", "exclude_files"}
@@ -229,7 +231,19 @@ class MergePanel(BasePanel):
             self.set_status(f"正在合并文件代码：{mode_label}...")
             self.log(f"用户启动：合并（{mode_label}）")
             self.commits.metrics["business_starts"] += 1
+            from ui.message_dialogs import safe_ask_risk_confirm
+
+            from ui.source_scope import make_enumeration_selector, make_merge_selector
+
             result = merge_files(
+                select_merge_enumeration=make_enumeration_selector(
+                    self.root, self.commits,
+                ),
+                select_merge_scope=make_merge_selector(self.root, self.commits),
+                authorize_merge_scope=lambda title, description:
+                safe_ask_risk_confirm(
+                    title, description, self.root, danger=True,
+                ),
                 mode=cfg["merge_mode"],
                 source_folder=cfg.get("source_folder", ""),
                 list_text=cfg.get("demand_file_list_text", ""),
@@ -240,8 +254,7 @@ class MergePanel(BasePanel):
                 log_func=self.log,
                 normalize_text_newlines=cfg["normalize_text_newlines"],
                 record_file_mtime=cfg["record_file_mtime"],
-                ignore_text=cfg["ignore_text"],
-                failure_text=cfg["failure_text"],
+
                 output_rules=output_rules,
             )
         except (OSError, ValueError) as error:

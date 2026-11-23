@@ -112,8 +112,6 @@ def normalize_config(config):
             for value in values
         ])
 
-    if config["patch"]["patch_mode"] not in ("apply", "restore"):
-        config["patch"]["patch_mode"] = "apply"
     validate_restore_settings(config["restore"])
 
     return config
@@ -134,13 +132,6 @@ def validate_restore_settings(settings):
             "restore.backup_dir 必须是字符串；原文件未修改。"
         )
 
-    execution_mode = settings.get(
-        "execution_mode", DEFAULT_CONFIG["restore"]["execution_mode"],
-    )
-    if type(execution_mode) is not str or execution_mode not in ("split", "restore"):
-        raise OutputSettingsError(
-            "restore.execution_mode 必须是 split 或 restore；原文件未修改。"
-        )
 
     mode = settings.get("target_mode", DEFAULT_CONFIG["restore"]["target_mode"])
     policy = settings.get(
@@ -204,17 +195,15 @@ def validate_rule_config_source(source):
         if not isinstance(wraps, dict):
             raise ValueError("配置 text_wrap 必须是对象；原文件未修改。")
         for field in (
-            "settings.crlf_file_list", "merge.ignore_text", "restore.ignore_text",
-            "merge.failure_text", "restore.failure_text",
+            "settings.crlf_file_list",
             "merge.code_header_line", "merge.code_footer_line",
-            "restore.code_header_line", "restore.code_footer_line",
         ):
             if field in wraps and type(wraps[field]) is not bool:
                 raise ValueError(
                     f"配置 text_wrap.{field} 必须是布尔值；原文件未修改。"
                 )
 
-    for section_name in ("patch", "restore"):
+    for section_name in ("backup_restore",):
         if section_name not in source:
             continue
         section = source[section_name]
@@ -223,16 +212,31 @@ def validate_rule_config_source(source):
                 f"配置 {section_name} 必须是对象；原文件未修改。"
             )
         for field, expected_type in (
-            ("restore_project_root", str),
             ("restore_source_dir", str),
+            ("backup_dir", str),
+            ("last_result_text", str),
             ("keep_restore_source_path", bool),
-
             ("open_backup_after_done", bool),
         ):
             if field in section and type(section[field]) is not expected_type:
                 raise ValueError(
                     f"配置 {section_name}.{field} 类型无效；原文件未修改。"
                 )
+
+    if "import_directories" in source:
+        directories = source["import_directories"]
+        if (
+            type(directories) is not dict
+            or any(
+                type(key) is not str or not key
+                or type(value) is not str
+                for key, value in directories.items()
+            )
+        ):
+            raise ValueError(
+                "import_directories必须是文本框用途到目录字符串的映射；"
+                "原文件未修改。"
+            )
 
     if "favorites" not in source:
         return
@@ -289,6 +293,42 @@ def validate_rule_config_source(source):
             first_names[name] = number
 
 
+def remove_retired_output_config(source):
+    """仅移除已撤销的输出设置，不掩盖其余配置或收藏结构错误。
+
+    保留原解析对象供加载结果比较，确保清理需要正常持久化。
+    已撤销的收藏类别须先清理，不能被未知类别校验阻断启动。
+    """
+    if not isinstance(source, dict):
+        return source
+    result = dict(source)
+    retired_fields = {
+        "merge": ("ignore_text", "failure_text"),
+        "restore": (
+            "ignore_text", "failure_text",
+            "code_header_line", "code_footer_line",
+        ),
+        "text_wrap": (
+            "merge.ignore_text", "merge.failure_text",
+            "restore.ignore_text", "restore.failure_text",
+            "restore.code_header_line", "restore.code_footer_line",
+        ),
+        "favorites": (
+            "merge_ignore_text", "merge_failure_text",
+            "restore_ignore_text", "restore_failure_text",
+            "restore_code_header_line", "restore_code_footer_line",
+        ),
+    }
+    for section_name, fields in retired_fields.items():
+        section = result.get(section_name)
+        if isinstance(section, dict):
+            result[section_name] = {
+                key: value for key, value in section.items()
+                if key not in fields
+            }
+    return result
+
+
 def load_user_config(path=None):
     """只有文件不存在才创建默认配置；损坏或读取故障不重建、不覆盖。"""
     path = Path(path) if path is not None else get_config_path()
@@ -305,8 +345,9 @@ def load_user_config(path=None):
             "原配置文件未修改，请修正配置后重新启动。"
         ) from error
 
-    validate_rule_config_source(source)
-    config = normalize_config(deep_merge_config(DEFAULT_CONFIG, source))
+    current_source = remove_retired_output_config(source)
+    validate_rule_config_source(current_source)
+    config = normalize_config(deep_merge_config(DEFAULT_CONFIG, current_source))
     return config, config != source
 
 
@@ -447,7 +488,7 @@ class ConfigSaveManager:
             validate_restore_settings({**target, **values})
 
         output_fields = {
-            "code_header_line", "code_footer_line", "ignore_text", "failure_text",
+            "code_header_line", "code_footer_line",
             "normalize_text_newlines", "record_file_mtime", "merge_mode",
         }
         if output_fields.intersection(values):

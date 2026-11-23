@@ -25,6 +25,12 @@ from core.filesystem_changes import (
 )
 from core.recovery_paths import checked_chain, overlaps
 from core.execution_ledger import ExecutionLedger
+from core.link_paths import (
+    LinkPathObservation, inspect_link_path, recheck_link_path,
+    specification_from_link,
+)
+from core.filesystem_changes import prepare_link_creation, prepare_link_removal
+from core.link_paths import validate_link_specification
 
 
 class NameMoveError(OSError):
@@ -41,6 +47,7 @@ class NameMovePlan:
     target_links: int | None
     file_states: tuple
     destination_device: int
+    target_kind: str
 
     @property
     def has_hardlinks(self):
@@ -52,12 +59,30 @@ class NameMovePlan:
 
 
 def _attributes(path, kind):
-    """检查原路径链后读取lstat，不消除或跟随链接入口。"""
-    target = checked_chain(path)
-    attributes = target.lstat()
-    expected_mode = stat.S_ISREG if kind == "file" else stat.S_ISDIR
-    if not expected_mode(attributes.st_mode):
-        raise ValueError(f"名称操作对象不再是普通{kind}：{target}")
+    """名称身份查询不跟随末级链接，普通对象继续使用原链政策。"""
+    if kind in ("file_symlink", "directory_symlink", "junction"):
+        observed = inspect_link_path(path, follow_final_link=False)
+        if (
+            observed.kind != kind or observed.entry_link is None
+            or observed.followed_links or observed.actual_path != path
+        ):
+            raise ValueError(f"固定名称入口类型或父链变化：{path}")
+        target = observed.actual_path
+        attributes = target.lstat()
+        if (
+            (attributes.st_dev, attributes.st_ino)
+            != (
+                observed.object_identity.device,
+                observed.object_identity.inode,
+            )
+        ):
+            raise ValueError(f"名称入口身份查询期间变化：{path}")
+    else:
+        target = checked_chain(path)
+        attributes = target.lstat()
+        expected_mode = stat.S_ISREG if kind == "file" else stat.S_ISDIR
+        if not expected_mode(attributes.st_mode):
+            raise ValueError(f"名称操作对象不再是普通{kind}：{target}")
     if (
         type(attributes.st_dev) is not int
         or attributes.st_dev < 0
@@ -106,13 +131,15 @@ def recheck_name_move(plan):
             f"移动来源对象身份已偏离固定计划：{plan.source}；"
             "必须重新预演及确认。"
         )
-    _, observation = checked_chain(plan.target, include_observation=True)
-    target_kind = observation[-1][1]
+    target_access = inspect_link_path(plan.target, follow_final_link=False)
+    if target_access.followed_links or target_access.actual_path != plan.target:
+        raise ValueError("名称移动目标父链不得经过链接")
+    target_kind = target_access.kind
     if plan.target_identity is None:
         if target_kind != "absent":
             raise ValueError(f"移动目标不再不存在：{plan.target}")
     else:
-        if target_kind != plan.source_kind:
+        if target_kind != plan.target_kind:
             raise ValueError(f"移动目标类型已偏离固定计划：{plan.target}")
         attributes = _attributes(plan.target, target_kind)
         if _object_identity(attributes) != plan.target_identity:
@@ -283,9 +310,17 @@ class FixedNameMoveError(NameMoveError):
 def _move_kind(observed):
     if isinstance(observed, TreeObservation):
         return "directory"
-    if isinstance(observed, FileObservation):
+    if isinstance(observed, (FileObservation, LinkPathObservation)):
         return observed.kind
-    raise TypeError("名称移动必须消费正式文件或完整树观察")
+    raise TypeError("名称移动必须消费正式文件、链接入口或完整树观察")
+
+
+def _name_family(kind):
+    if kind in ("file", "file_symlink"):
+        return "file"
+    if kind in ("directory", "directory_symlink", "junction"):
+        return "directory"
+    return kind
 
 
 def _move_identity(observed):
@@ -306,6 +341,10 @@ def _validate_move_observation(observed, *, source=False):
         raise ValueError("名称移动来源必须存在")
     if isinstance(observed, TreeObservation):
         prepare_tree_removal(observed)
+    elif isinstance(observed, LinkPathObservation):
+        prepare_link_removal(observed)
+        if observed.followed_links or observed.nominal_path != observed.actual_path:
+            raise ValueError("名称入口不得通过其他目录链接定位")
     elif kind == "file":
         prepare_file_removal(observed)
     elif kind == "absent":
@@ -348,8 +387,8 @@ def prepare_observed_name_move(source, expected):
     """
     source_kind = _validate_move_observation(source, source=True)
     target_kind = _validate_move_observation(expected)
-    if target_kind not in ("absent", source_kind):
-        raise ValueError("名称移动来源与目标类型不匹配")
+    if target_kind != "absent" and _name_family(target_kind) != _name_family(source_kind):
+        raise ValueError("名称移动来源与目标的文件／目录语义不匹配")
     if overlaps(source.path, expected.path):
         raise ValueError("名称移动来源目标不得相同或父子重叠")
     source_identity = _move_identity(source)
@@ -362,6 +401,12 @@ def prepare_observed_name_move(source, expected):
     fixed_identity = (source_identity.device, source_identity.inode)
     _check_hardlink_device(fixed_identity[0], device, states)
     mechanism = "copy_remove" if fixed_identity[0] != device else "native"
+    if mechanism == "copy_remove" and isinstance(source, LinkPathObservation):
+        # 原定义在新入口位置必须可解释；准备时发现错误，
+        # 不能等旧目标已经移除后才判断是否能够重建。
+        validate_link_specification(
+            specification_from_link(source.entry_link), expected.path,
+        )
     if mechanism == "copy_remove":
         for _, observed in _move_files(source):
             if (
@@ -382,7 +427,7 @@ def prepare_observed_name_move(source, expected):
         expected.link_count
         if isinstance(expected, FileObservation) and expected.kind == "file"
         else None,
-        states, device,
+        states, device, target_kind,
     )
     move = object.__new__(PreparedNameMove)
     for name, value in (
@@ -411,6 +456,8 @@ def _move_stage(move, current, phase):
 
 
 def _recheck_move_object(expected):
+    if isinstance(expected, LinkPathObservation):
+        return recheck_link_path(expected)
     if isinstance(expected, TreeObservation):
         current = recheck_tree(
             expected, check_mtime=bool(expected.file_times),
@@ -438,20 +485,83 @@ def _recheck_move_object(expected):
 
 
 def _relocated_move_source(source, target):
-    """只改变固定对象的路径投影，不用后来观察重建内容前提。"""
+    """原生移动结束边界核验原对象，不把后来现场当成新授权。
+
+    普通文件继续消费原固定观察。完整树的链接观察包含入口位置、
+    普通父目录依赖及直接引用位置，不能只改树根和普通成员路径。
+    目标观察须严格对应原固定结构、成员身份和全部原定义，
+    才能交付本次原生移动的正式成果；不读取链接目标正文。
+    """
+    if isinstance(source, LinkPathObservation):
+        actual = inspect_link_path(target, follow_final_link=False)
+        if (
+            actual.followed_links or actual.actual_path != target
+            or actual.entry_link is None
+            or actual.kind != source.kind
+            or actual.object_identity != source.object_identity
+            or specification_from_link(actual.entry_link)
+            != specification_from_link(source.entry_link)
+        ):
+            raise OSError("原生移动未保持链接入口身份及实际原定义")
+        return actual
     if isinstance(source, FileObservation):
         return replace(source, path=target)
-    return replace(
-        source, path=target,
-        directories=tuple(
-            (relative, replace(directory, path=target / relative))
-            for relative, directory in source.directories
-        ),
-        files=tuple(
-            (relative, replace(observed, path=target / relative))
-            for relative, observed in source.files
-        ),
+    from core.file_observation import observe_tree
+
+    actual = observe_tree(
+        target, include_mtime=bool(source.file_times),
+        include_links=bool(source.links),
     )
+    if (
+        actual.content_records != source.content_records
+        or actual.file_times != source.file_times
+        or tuple(
+            (relative, member.object_identity)
+            for relative, member in actual.directories
+        ) != tuple(
+            (relative, member.object_identity)
+            for relative, member in source.directories
+        )
+        or tuple(
+            (relative, member.object_identity, member.link_count)
+            for relative, member in actual.files
+        ) != tuple(
+            (relative, member.object_identity, member.link_count)
+            for relative, member in source.files
+        )
+        or tuple(
+            (
+                relative, member.object_identity,
+                specification_from_link(member.entry_link),
+            )
+            for relative, member in actual.links
+        ) != tuple(
+            (
+                relative, member.object_identity,
+                specification_from_link(member.entry_link),
+            )
+            for relative, member in source.links
+        )
+    ):
+        raise OSError(
+            "原生移动目标没有保持固定完整结构、原对象身份、"
+            "文件链接数量、内容、正式时间或链接原定义"
+        )
+    for originals, relocated in (
+        (source.directories, actual.directories),
+        (source.files, actual.files),
+    ):
+        for (relative, original), (position, member) in zip(
+            originals, relocated,
+        ):
+            if (
+                relative != position
+                or member.path != target / relative
+                or stat.S_IMODE(member.attributes.st_mode)
+                != stat.S_IMODE(original.attributes.st_mode)
+            ):
+                raise OSError("原生移动成员位置或基础权限不对应原固定对象")
+    return actual
 
 
 def _append_move_results(move, results):
@@ -479,6 +589,88 @@ def _execute_move_file_removal(move, expected):
 
 
 
+def _execute_cross_volume_link(move, source, expected, plan):
+    """固定原定义重建目标并核验后，才移除固定来源入口。
+
+    来源及目标均为已授权实际位置，不解析引用目标。
+    正常创建身份只来自正式创建结果；失败不清理未知成果，
+    不重试、不换机制，所属修改包消费真实前缀决定回滚。
+    """
+    specification = specification_from_link(source.entry_link)
+    validate_link_specification(specification, expected.path)
+
+    def execute_step(step):
+        move._execution.scene = step
+        try:
+            receipt = execute_filesystem_change(step)
+        except FilesystemChangeError as error:
+            _append_move_results(move, (error.result,))
+            _move_stage(move, error.result.target, error.result.phase)
+            raise
+        _append_move_results(move, (receipt,))
+        move._execution.scene = None
+        return receipt
+
+    _move_stage(move, source.path, "跨卷链接目标改变前固定来源复核")
+    _recheck_move_object(source)
+    _move_stage(move, expected.path, "跨卷链接目标改变前固定两端复核")
+    _recheck_move_object(expected)
+    recheck_name_move(plan)
+
+    if isinstance(expected, TreeObservation):
+        _move_stage(move, expected.path, "跨卷链接固定旧目标树移除")
+        removal = prepare_tree_removal(expected)
+        move._execution.execute_active(
+            removal, execute_tree_removal,
+            stage=lambda current, phase: _move_stage(move, current, phase),
+            before_step=lambda: _recheck_move_object(source),
+        )
+    elif isinstance(expected, LinkPathObservation):
+        _move_stage(move, expected.path, "跨卷链接固定旧目标入口移除")
+        execute_step(prepare_link_removal(expected))
+    elif expected.kind == "file":
+        _move_stage(move, expected.path, "跨卷链接固定旧目标文件名称移除")
+        execute_step(prepare_file_removal(expected))
+    elif expected.kind != "absent":
+        raise ValueError("跨卷链接固定目标类型非法")
+
+    missing = _absent_move_target(expected)
+    absent_plan = replace(
+        plan, target_identity=None, target_links=None,
+        target_kind="absent",
+    )
+    _move_stage(move, expected.path, "跨卷链接创建前固定缺失目标复核")
+    recheck_name_move(absent_plan)
+    _recheck_move_object(source)
+
+    _move_stage(move, expected.path, "跨卷链接保存原定义目标创建")
+    created = execute_step(prepare_link_creation(missing, specification))
+    copied = created.created_link
+    if (
+        not isinstance(copied, LinkPathObservation)
+        or copied.actual_path != expected.path
+        or copied.followed_links
+        or copied.entry_link is None
+        or copied.kind != source.kind
+        or specification_from_link(copied.entry_link) != specification
+    ):
+        raise RuntimeError("正常跨卷链接创建缺少对应的正式完整成果")
+
+    _move_stage(move, copied.path, "来源移除前跨卷链接完整成果复核")
+    _recheck_move_object(copied)
+    _move_stage(move, source.path, "来源移除前固定链接来源复核")
+    _recheck_move_object(source)
+    # 来源复核跨越新边界；最后再次核对目标，不以早先成功代替。
+    _move_stage(move, copied.path, "来源移除前目标链接最终复核")
+    _recheck_move_object(copied)
+
+    _move_stage(move, source.path, "跨卷固定来源链接入口移除")
+    execute_step(prepare_link_removal(source))
+    _move_stage(move, copied.path, "跨卷链接移动最终成果复核")
+    _recheck_move_object(copied)
+    return copied
+
+
 def _execute_native_name(move, source, plan):
     attempted = False
     try:
@@ -493,7 +685,7 @@ def _execute_native_name(move, source, plan):
             raise ValueError("固定名称移动要求必要父目录已经存在")
         _move_stage(move, plan.target, "原生名称调用")
         attempted = True
-        if plan.source_kind == "file":
+        if plan.source_kind in ("file", "file_symlink"):
             os.replace(plan.source, plan.target)
         else:
             os.rename(plan.source, plan.target)
@@ -527,12 +719,14 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
     source, expected, plan = move.source, move.expected, move.plan
     try:
         if removed_link_counts is not None:
-            source = project_removed_file_links(
-                source, removed_link_counts,
-            )
-            expected = project_removed_file_links(
-                expected, removed_link_counts,
-            )
+            if not isinstance(source, LinkPathObservation):
+                source = project_removed_file_links(
+                    source, removed_link_counts,
+                )
+            if not isinstance(expected, LinkPathObservation):
+                expected = project_removed_file_links(
+                    expected, removed_link_counts,
+                )
             plan = replace(
                 plan,
                 file_states=_move_file_states(source),
@@ -555,7 +749,27 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
         if any(kind != "directory" for _, kind in parents):
             raise ValueError("名称移动必要父目录必须由所属固定计划先行创建")
 
-        if plan.source_kind == "file" and move.mechanism == "copy_remove":
+        if isinstance(expected, LinkPathObservation):
+            _move_stage(move, expected.path, "固定已有目标链接入口移除")
+            step = prepare_link_removal(expected)
+            try:
+                receipt = execute_filesystem_change(step)
+            except FilesystemChangeError as error:
+                _append_move_results(move, (error.result,))
+                _move_stage(move, error.result.target, error.result.phase)
+                raise
+            _append_move_results(move, (receipt,))
+            expected = _absent_move_target(expected)
+            plan = replace(
+                plan, target_identity=None, target_links=None,
+                target_kind="absent",
+            )
+
+        if isinstance(source, LinkPathObservation) and move.mechanism == "copy_remove":
+            copied = _execute_cross_volume_link(
+                move, source, expected, plan,
+            )
+        elif plan.source_kind == "file" and move.mechanism == "copy_remove":
             _move_stage(move, expected.path, "跨卷固定来源完整独立成果准备")
             artifact = prepare_copy_content_artifact(
                 source, expected, preserve_target_mode=False,
@@ -595,7 +809,7 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
                     removal, execute_tree_removal,
                     stage=lambda current, phase: _move_stage(move, current, phase),
                 )
-                if move.mechanism == "native":
+                if move.mechanism == "native" and not isinstance(source, LinkPathObservation):
                     # 完整旧目标树已正常移除，才扣除其原有名称数量。
                     source = project_removed_file_links(
                         source,

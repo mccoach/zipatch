@@ -45,6 +45,12 @@ def format_patch_preview(
         f"全局校验：{'不通过' if has_global_errors else '通过'}",
         "全局校验范围：整包规则、文件成果准备及适用的保护规划。",
         f"最终可执行 OP：{success_count}",
+        (
+            f"本次可执行选择：{success_count} 项；"
+            f"固定或授权跳过：{len(ops) - success_count} 项。"
+            if not failed_count else
+            "整包未通过；不把单项校验通过数量计为可执行选择。"
+        ),
     ]
 
     if backup_root is not None:

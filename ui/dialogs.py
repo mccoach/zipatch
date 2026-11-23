@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, TclError
+from pathlib import Path
+
+from core.paths import get_initial_dir_from_path
 
 from core.constants import THEME
 from ui.message_dialogs import safe_show_error, safe_show_info
@@ -44,7 +47,7 @@ def create_managed_text_box(
     enable_import_text=False, wrap_config_key=None,
     config=None, field=None, page=None, on_content_changed=None,
     preserve_trailing_newlines=False, preserve_import_newlines=False,
-    show_statistics=False, title_action_factory=None,
+    show_statistics=False, title_action_factory=None, enable_copy=False,
 ):
     title_row = styled_frame(parent)
     title_row.pack(fill="x", pady=(8, 2))
@@ -105,33 +108,53 @@ def create_managed_text_box(
         )
 
     if not readonly and enable_import_text:
+        import_key = wrap_config_key or (
+            f"{page}.{field}" if page and field else label_text
+        )
+        import_directories = commits.manager.config_data["import_directories"]
+
         def import_text():
             if commits.operation_depth or str(text.cget("state")) != "normal":
                 return
             try:
                 with commits.operation():
+                    owner = text.winfo_toplevel()
+                    previous_directory = import_directories.get(import_key, "")
+                    try:
+                        initial = get_initial_dir_from_path(previous_directory)
+                    except (OSError, ValueError) as error:
+                        safe_show_error(
+                            "导入目录不可访问",
+                            f"上次导入目录：{previous_directory}\n{error}",
+                            owner,
+                        )
+                        return
                     path = filedialog.askopenfilename(
                         title="导入文本文件", filetypes=[("All Files", "*.*")],
-                        parent=text.winfo_toplevel(),
+                        initialdir=initial, parent=owner,
                     )
                     if not path:
                         return
                     try:
-                        if preserve_import_newlines:
-                            content, encoding = read_import_text(
-                                path, preserve_newlines=True,
-                            )
-                        else:
-                            content, encoding = read_import_text(path)
+                        content, encoding = read_import_text(
+                            path, preserve_newlines=preserve_import_newlines,
+                        )
                     except (OSError, ValueError) as error:
-                        safe_show_error("导入失败", str(error), text.winfo_toplevel())
+                        safe_show_error("导入失败", str(error), owner)
                         return
                     replace_text_keep_undo(text, content)
-                    if text._content_operation_completed(content):
+                    # 成功取得并放入正文后才记录；取消或读取失败不覆盖。
+                    commits.manager.accept(
+                        import_directories,
+                        {import_key: str(Path(path).parent)},
+                    )
+                    completed = text._content_operation_completed(content)
+                    saved = commits.finish(owner)
+                    if completed and saved.request_satisfied:
                         safe_show_info(
                             "导入完成",
                             f"文本文件已导入。\n\n编码：{encoding}\n路径：\n{path}",
-                            text.winfo_toplevel(),
+                            owner,
                         )
             finally:
                 restore_editor_interaction(text)
@@ -158,6 +181,46 @@ def create_managed_text_box(
         title_bar_button(title_row, "清空", clear, width=6).pack(
             side="right", padx=(0, 6),
         )
+
+    if enable_copy:
+        def copy_all():
+            # 业务确认窗口处于operation中也允许复制只读详情。
+            # 复制不接受配置、不改变正文、选区或窗口滚动。
+            try:
+                content = text.get("1.0", "end-1c")
+                text.clipboard_clear()
+                text.clipboard_append(content)
+            except TclError as error:
+                safe_show_error("复制失败", str(error), text.winfo_toplevel())
+                return
+            copy_button.configure(text="已复制")
+            pending = getattr(copy_button, "_feedback_after_id", None)
+            if pending is not None:
+                copy_button.after_cancel(pending)
+
+            def reset_feedback():
+                copy_button._feedback_after_id = None
+                copy_button.configure(text="复制")
+
+            copy_button._feedback_after_id = copy_button.after(
+                1200, reset_feedback,
+            )
+
+        copy_button = title_bar_button(
+            title_row, "复制", copy_all, width=6,
+        )
+        copy_button._feedback_after_id = None
+        copy_button.pack(side="right", padx=(0, 6))
+
+        def cancel_copy_feedback(event):
+            if event.widget is copy_button:
+                pending = copy_button._feedback_after_id
+                if pending is not None:
+                    copy_button.after_cancel(pending)
+                    copy_button._feedback_after_id = None
+
+        copy_button.bind("<Destroy>", cancel_copy_feedback, add="+")
+        text._copy_all_button = copy_button
 
     if title_action_factory is not None:
         # right按登记顺序从右向左排列：业务动作紧邻清空左侧。

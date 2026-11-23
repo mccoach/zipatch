@@ -36,6 +36,7 @@ from core.internal_materials import (
     InternalMaterialError,
     prepare_internal_material,
     publish_internal_material,
+    validate_material_state,
 )
 from core.protection_projection import (
     ProtectionProjection,
@@ -60,6 +61,75 @@ class RecoveryEvidence:
     document: RecoveryDocument
     materials: object
     completion: FileObservation | None = None
+    material_layout: TreeObservation | None = None
+
+
+def _check_material_layout(task, document, materials):
+    """整个files范围准确对应引用材料及必要普通目录。
+
+    任务根的合法辅助日志不属于files材料范围。
+    不忽略临时名称、未引用文件或空的额外目录；
+    活动链接由普通树观察拒绝，材料文件必须独立。
+    新观察只服务固定来源校验，不增加恢复对象。
+    """
+    required_ids = {
+        entry["id"] for entry in document.value["objects"]
+        if entry["material"] is not None
+    }
+    if set(materials) != required_ids:
+        raise ValueError("恢复材料编号必须准确覆盖清单引用")
+    root = task / "files"
+    if not required_ids:
+        _, chain = checked_chain(root, include_observation=True)
+        if chain[-1][1] != "absent":
+            raise ValueError("无引用材料的备份不得包含额外files目录")
+        return None
+
+    records = {"": ("", "directory", "")}
+    for entry in document.value["objects"]:
+        if entry["material"] is None:
+            continue
+        observed = materials[entry["id"]]
+        position = entry["material"]
+        if observed.path != root / position:
+            raise ValueError("编号材料实际位置不对应清单")
+        from core.recovery_document import content_state_from_value
+        validate_material_state(
+            observed,
+            content_state_from_value(
+                entry["original"], target=Path(entry["target"]),
+            ),
+            target=Path(entry["target"]),
+        )
+        parent = Path(position).parent
+        while parent.as_posix() != ".":
+            relative = parent.as_posix()
+            records[relative] = (relative, "directory", "")
+            parent = parent.parent
+        members = (
+            observed.content_records
+            if isinstance(observed, TreeObservation) else
+            (("", "file", observed.digest),)
+        )
+        for relative, kind, digest in members:
+            located = position + "/" + relative if relative else position
+            record = (located, kind, digest)
+            previous = records.setdefault(located, record)
+            if previous != record:
+                raise ValueError("编号材料与必要目录位置矛盾")
+
+    current = observe_tree(root)
+    required = tuple(sorted(
+        records.values(), key=lambda record: record[0].encode("utf-8"),
+    ))
+    if (
+        current.content_records != required
+        or any(member.link_count != 1 for _, member in current.files)
+    ):
+        raise ValueError(
+            "files材料范围包含缺失、额外、损坏、类型错配或共享材料"
+        )
+    return current
 
 
 class ProtectionPublicationError(OSError):
@@ -92,6 +162,10 @@ def _absent_child(parent, name):
 
 
 def _recheck_observation(observed):
+    from core.link_paths import LinkPathObservation, recheck_link_path
+
+    if isinstance(observed, LinkPathObservation):
+        return recheck_link_path(observed)
     if isinstance(observed, TreeObservation):
         return recheck_tree(observed)
     if isinstance(observed, FileObservation):
@@ -99,35 +173,23 @@ def _recheck_observation(observed):
     raise TypeError("固定来源复核必须消费正式观察")
 
 
-def _material_records(observed):
-    if isinstance(observed, TreeObservation):
-        if any(member.link_count != 1 for _, member in observed.files):
-            raise ValueError("正式目录材料必须具有独立单链接文件")
-        return "directory", observed.content_records
-    if observed.kind != "file" or observed.link_count != 1:
-        raise ValueError("正式文件材料必须是独立单链接普通文件")
-    return "file", (("", "file", observed.digest),)
 
+def _observe_material(path, original, *, include_bytes, target):
+    from core.recovery_document import content_state_from_value
 
-def _observe_material(path, original, *, include_bytes):
-    if original["kind"] == "directory":
+    state = content_state_from_value(original, target=target)
+    if state.kind == "directory":
         observed = observe_tree(
             path, include_bytes=include_bytes, include_mtime=include_bytes,
         )
-    elif original["kind"] == "file":
+    elif state.kind != "absent":
         observed = observe_file(
             path, include_bytes=include_bytes, include_digest=True,
             include_mtime=include_bytes,
         )
     else:
         raise ValueError("不存在原状态没有编号材料")
-    kind, records = _material_records(observed)
-    if (
-        kind != original["kind"]
-        or records != tuple(tuple(member) for member in original["records"])
-    ):
-        raise ValueError(f"正式编号材料缺失、类型错误或损坏：{path}")
-    return observed
+    return validate_material_state(observed, state, target=target)
 
 
 def _check_evidence_isolation(task, document, forbidden_roots):
@@ -160,8 +222,8 @@ def read_recovery_evidence(task_root, *, forbidden_roots=()):
     manifest = observe_file(
         task / "recovery.json", include_bytes=True, include_digest=True,
     )
-    if manifest.kind != "file":
-        raise ValueError("缺少正式recovery.json；不读取旧manifest")
+    if manifest.kind != "file" or manifest.link_count != 1:
+        raise ValueError("缺少独立普通recovery.json；不读取旧manifest")
     document = decode_document(manifest.source_bytes)
     completion = observe_file(
         task / "backup.complete", include_bytes=True, include_digest=True,
@@ -184,9 +246,12 @@ def read_recovery_evidence(task_root, *, forbidden_roots=()):
             materials[entry["id"]] = _observe_material(
                 task / "files" / entry["material"],
                 entry["original"], include_bytes=True,
+                target=Path(entry["target"]),
             )
+    layout = _check_material_layout(task, document, materials)
     evidence = RecoveryEvidence(
-        task, manifest, document, MappingProxyType(materials), completion,
+        task, manifest, document, MappingProxyType(materials),
+        completion, layout,
     )
     # 晚材料获取可能跨越早材料变化；新边界复核只比较，
     # 后续工作仍消费第一次获取的完整bytes。
@@ -208,16 +273,30 @@ def read_protection_evidence(session):
     } != set(session._units):
         raise ValueError("本次全部原状态保护尚未完成")
     _check_evidence_isolation(session.task_root, document, ())
+    # 回滚取得完整bytes是新的读取边界，不是重新认证备份身份的边界。
+    # 先消费正式材料发布时固定的身份及完整files范围；
+    # 不调用失败清单复核，不因事实发布失败而回退读取旧清单。
+    session._check_materials()
+    recheck_file(session._completion_expected)
     materials = {
         entry["id"]: _observe_material(
             session.task_root / "files" / entry["material"],
             entry["original"], include_bytes=True,
+            target=Path(entry["target"]),
         )
         for entry in document.value["objects"]
         if entry["material"] is not None
     }
+    # 晚材料读取可能跨越早材料替换；仍比回正式发布的固定对象，
+    # 不用这次新观察替代原备份身份、范围或完成凭据。
+    session._check_materials()
+    recheck_file(session._completion_expected)
+    layout = _check_material_layout(
+        session.task_root, document, materials,
+    )
     evidence = RecoveryEvidence(
         session.task_root, None, document, MappingProxyType(materials),
+        session._completion_expected, layout,
     )
     recheck_recovery_evidence(evidence)
     return evidence
@@ -236,6 +315,19 @@ def recheck_recovery_evidence(evidence, *, forbidden_roots=()):
         recheck_file(evidence.completion)
     for observed in evidence.materials.values():
         _recheck_observation(observed)
+    if evidence.material_layout is not None:
+        recheck_tree(evidence.material_layout)
+        if any(
+            member.link_count != 1
+            for _, member in evidence.material_layout.files
+        ):
+            raise ValueError("固定材料范围包含非独立文件")
+    else:
+        # 无材料时同样拒绝额外files范围。
+        # 明确构造的内存依据也必须满足准确材料对应，不补猜定义。
+        _check_material_layout(
+            evidence.task_root, evidence.document, evidence.materials,
+        )
     if evidence.manifest is not None:
         recheck_file(evidence.manifest)
     if evidence.completion is not None:
@@ -308,6 +400,7 @@ class RecoveryProtectionSession:
         self._candidate = None
         self._material_results = {}
         self._material_observations = {}
+        self._material_layout = None
         self._directory_results = []
         self._publication_results = []
         self._active_material = None
@@ -415,6 +508,13 @@ class RecoveryProtectionSession:
 
     def _check_materials(self):
         self._directory_state.recheck()
+        if self._material_layout is not None:
+            recheck_tree(self._material_layout)
+        elif self._document is not None:
+            _check_material_layout(
+                self.task_root, self._document,
+                self._material_observations,
+            )
         for observed in self._material_observations.values():
             self._stage("已发布编号材料", observed.path, "正式引用材料复核")
             _recheck_observation(observed)
@@ -482,7 +582,11 @@ class RecoveryProtectionSession:
         只删除本任务实际创建且身份未变的唯一目录，
         不比较工作文件，不删除其他任务或原有父目录。
         """
-        import shutil
+        import os
+        import stat
+        from core.filesystem_changes import (
+            execute_tree_removal, prepare_tree_removal,
+        )
 
         if self._document is not None and any(
             unit["fact"]["state"] != "prepared"
@@ -496,8 +600,21 @@ class RecoveryProtectionSession:
             return
         if chain[-1][1] != "directory":
             raise ValueError("无法确认本次备份任务目录所有权，未删除")
-        self._directory_state.require(target)
-        shutil.rmtree(target)
+        owned = self._directory_state.require(target)
+        # 备份失败的清理范围仅为本次任务目录，不是工作恢复范围。
+        # 先固定完整普通树；活动链接或共享文件导致停止并提示人工处理。
+        current = observe_tree(target)
+        if current.directories[0][1].object_identity != owned.object_identity:
+            raise ValueError("失败备份任务目录身份变化，禁止清理")
+        if any(member.link_count != 1 for _, member in current.files):
+            raise ValueError("失败备份包含共享文件，禁止通用清理")
+        for _, member in current.files:
+            fixed = recheck_file(member)
+            mode = stat.S_IMODE(fixed.attributes.st_mode)
+            if not mode & stat.S_IWRITE:
+                os.chmod(member.path, mode | stat.S_IWRITE)
+        removal = prepare_tree_removal(current)
+        execute_tree_removal(removal)
 
     def protect_all(self):
         """三个入口共用：全部材料、一次完整清单、首个工作修改屏障。
@@ -539,19 +656,22 @@ class RecoveryProtectionSession:
                         actual = receipt.observation
                         if not isinstance(actual, (FileObservation, TreeObservation)):
                             raise RuntimeError("正常内部材料缺少正式成果观察")
-                        kind, records = _material_records(actual)
-                        if (
-                            actual.path != receipt.target
-                            or kind != member.original.kind
-                            or records != member.original.records
-                        ):
-                            raise OSError("正式材料成果不对应固定原状态")
+                        if actual.path != receipt.target:
+                            raise OSError("正式材料成果位置不对应固定材料结果")
+                        validate_material_state(
+                            actual, member.original, target=member.target,
+                        )
                         self._material_observations[number] = actual
                         self._active_material = None
-                    self._publish(build_document(
+                    candidate = build_document(
                         self.projection, self.task_root,
                         self.task_id, self.task_kind, self._material_results,
-                    ))
+                    )
+                    self._material_layout = _check_material_layout(
+                        self.task_root, candidate,
+                        self._material_observations,
+                    )
+                    self._publish(candidate)
                     prepared = True
                 except (OSError, ValueError) as error:
                     self._raise_failure(error)

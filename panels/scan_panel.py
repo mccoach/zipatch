@@ -118,7 +118,17 @@ class ScanPanel(BasePanel):
             self.set_status("正在执行全景扫描...")
             self.log("用户启动：路径全景扫描")
             self.commits.metrics["business_starts"] += 1
+            from ui.scan_authorization import make_scan_authorizer
+            from ui.source_scope import make_enumeration_selector, make_scan_selector
+
             result = panoramic_scan(
+                select_scan_enumeration=make_enumeration_selector(
+                    self.root, self.commits,
+                ),
+                select_scan_scope=make_scan_selector(self.root, self.commits),
+                authorize_scan_scope=make_scan_authorizer(
+                    self.root, self.commits,
+                ),
                 source_folder=source, output_file=output,
                 exclusions=exclusions,
                 preamble_text=cfg["preamble_text"], ending_text=cfg["ending_text"],
@@ -133,6 +143,11 @@ class ScanPanel(BasePanel):
         safe_show_info(
             "成功",
             f"全景扫描完成！\n\n目录 {result.dir_count} 个，文件 {result.file_count} 个。\n"
+            f"链接入口 {result.link_count} 个："
+            f"文件软链接 {result.file_symlink_count}，"
+            f"目录软链接 {result.directory_symlink_count}，"
+            f"Junction {result.junction_count}。\n"
+            "链接按叶子记录，不读取正文；所选大小／日期只查询经授权的目标元信息。\n"
             f"已保存到：\n{result.output_file}",
             self.root,
         )

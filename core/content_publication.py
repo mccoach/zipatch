@@ -15,7 +15,10 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from core.atomic_file import sync_directory
-from core.file_observation import FileObservation, observe_file, recheck_file
+from core.file_observation import (
+    FileObservation, attach_file_access, observe_file,
+    recheck_file, recheck_file_access,
+)
 from core.hardlink_content import (
     HardlinkContentError, HardlinkContentExpectation,
     _publish_prepared_hardlink, _stream_digest, _write_all,
@@ -174,10 +177,12 @@ def _check_target_access(expected, current):
 
 def _check_preparation_target(expected):
     """只检查准备适用性；不重新规划、不创建工作目录。"""
+    recheck_file_access(expected)
     _check_target_access(expected, observe_file(expected.path))
     _, parents = checked_chain(expected.path.parent, include_observation=True)
     if any(kind != "directory" for _, kind in parents):
         raise ValueError("成果准备要求必要父目录已存在且为普通目录")
+    recheck_file_access(expected)
 
 
 def _recheck_target(artifact):
@@ -501,17 +506,18 @@ def prepare_copy_content_artifact(
 
 
 def dispose_content_artifact(artifact):
-    """明确放弃未执行成果，或清理失败后的普通暂存。
+    """明确放弃未发布成果，不清理已消费发布资格后的残余。
 
-    disposing与发布attempted分开：取消清理失败可明确重试清理，
-    已尝试硬链接发布的完整应急禁止通用清理。
+    disposing与发布attempted分开：取消清理失败可以明确重试清理，
+    任何已尝试发布的成果均不重新授予通用取消资格。
+    备份阶段的任务目录清理由正式保护生命周期单独负责。
     """
     if not isinstance(artifact, PreparedContentArtifact):
         raise TypeError("成果清理必须消费PreparedContentArtifact")
     if artifact._lifecycle in ("completed", "disposed"):
         raise ValueError("成果已经消费或清理，不能再次操作")
-    if artifact.mechanism == "in_place" and artifact._lifecycle == "attempted":
-        raise ValueError("发布失败后的完整应急必须保留，禁止通用清理")
+    if artifact._lifecycle == "attempted":
+        raise ValueError("发布资格已消费，禁止通用清理残余成果")
     object.__setattr__(artifact, "_lifecycle", "disposing")
     _remove_owned(artifact.path, artifact.identity)
     object.__setattr__(artifact, "_lifecycle", "disposed")
@@ -544,7 +550,7 @@ def _verify_published_atomic(artifact):
         mode = stat.S_IMODE(artifact.expected.attributes.st_mode)
     if mode is not None and stat.S_IMODE(actual.attributes.st_mode) != mode:
         raise OSError("正式替换后成果基础权限不符")
-    return actual
+    return attach_file_access(actual, artifact.expected.access)
 
 
 def publish_content(artifact):
@@ -607,6 +613,7 @@ def publish_content(artifact):
                 or stat.S_IMODE(observation.attributes.st_mode) != mode
             ):
                 raise OSError("原对象正式结束观察的身份、内容或属性不符")
+            observation = attach_file_access(observation, expected.access)
         else:
             phase = "原子名称替换"
             mutation_attempted = True
@@ -662,7 +669,7 @@ def cleanup_content_artifact(artifact):
         raise TypeError("退出清理必须消费PreparedContentArtifact")
     if artifact._lifecycle in ("completed", "disposed"):
         return True
-    if artifact.mechanism == "in_place" and artifact._lifecycle == "attempted":
+    if artifact._lifecycle == "attempted":
         return False
     try:
         dispose_content_artifact(artifact)

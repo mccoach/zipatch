@@ -9,7 +9,7 @@
 
 import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -39,6 +39,9 @@ class FileObservation:
     source_bytes: bytes | None
     digest: str | None
     mtime_ns: int | None
+    # path和chain始终属于实际普通对象；access仅保留原预演访问依赖。
+    # 发布后的文件身份由本观察拥有，不改写原链接路径快照。
+    access: object | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,9 @@ class TreeObservation:
     content_records: tuple
     integrity: object
     file_times: tuple
+    # 每项为相对入口位置及不跟随末级链接的正式路径观察。
+    # 链接后代不属于该结构树；读取目标须另行授权和观察。
+    links: tuple = ()
 
 
 def _boolean(value, description):
@@ -207,12 +213,14 @@ def recheck_file(expected, *, check_mtime=False):
     if check_mtime and expected.kind == "file" and expected.mtime_ns is None:
         raise ValueError("原观察未请求正式时间，不能补猜时间前提")
 
+    recheck_file_access(expected)
     current = observe_file(
         expected.path,
         include_bytes=expected.source_bytes is not None,
         include_digest=expected.digest is not None,
         include_mtime=check_mtime,
     )
+    current = attach_file_access(current, expected.access)
     if current.kind != expected.kind:
         raise ValueError(f"固定文件存在性或类型变化：{expected.path}")
     if current.kind == "absent":
@@ -264,21 +272,32 @@ def _check_observed_file_attributes(expected):
     _assert_file_attributes(current, expected.attributes, expected.path)
 
 
-def observe_tree(path, *, include_bytes=False, include_mtime=False):
-    """一次完整树枚举；内容记录、指纹和时间消费同次文件结果。
+def observe_tree(
+    path, *, include_bytes=False, include_mtime=False, include_links=False,
+):
+    """一次完整结构树枚举；显式决定是否记录链接入口。
 
-    仅用于明确需要完整树的范围，不展开排除或未命中范围。
+    默认严格用途继续拒绝链接。include_links=True仅记录入口，
+    不读取链接目标正文，也不展开目录链接目标。
+    树根仍要求实际普通目录；经链接访问树根由所属协调先行定位。
     Windows的DirEntry属性可能缺少可靠编号，因此枚举消费名称，
     实际对象使用不跟随的lstat；不把零编号当身份。
     """
+    import stat
+    from core.link_paths import (
+        inspect_link_path, link_definition_digest, recheck_link_path,
+    )
+
     _boolean(include_bytes, "树原字节获取开关")
     _boolean(include_mtime, "树正式时间获取开关")
+    _boolean(include_links, "树链接入口记录开关")
     root, chain = checked_chain(path, include_observation=True)
     if chain[-1][1] != "directory":
         raise ValueError(f"目录树观察要求既有普通目录：{root}")
     root_observation = _directory(root, root.lstat())
     directories = [("", root_observation)]
     files = []
+    links = []
     pending = [root_observation]
 
     while pending:
@@ -288,8 +307,37 @@ def observe_tree(path, *, include_bytes=False, include_mtime=False):
                 validate_component(entry.name)
                 child = folder.path / entry.name
                 attributes = child.lstat()
-                kind = entity_type_from_attributes(child, attributes)
                 relative = child.relative_to(root).as_posix()
+                reparse = (
+                    stat.S_ISLNK(attributes.st_mode)
+                    or bool(getattr(attributes, "st_file_attributes", 0) & 0x400)
+                )
+                if include_links and reparse:
+                    observed_link = inspect_link_path(
+                        child, follow_final_link=False,
+                    )
+                    if (
+                        observed_link.entry_link is None
+                        or observed_link.actual_path != child
+                        or observed_link.followed_links
+                        or observed_link.object_identity
+                        != _object_identity(attributes, child)
+                    ):
+                        raise ValueError(
+                            f"树观察期间链接入口或父目录前提变化：{child}"
+                        )
+                    definition = observed_link.entry_link
+                    if (
+                        definition.revision[0] != attributes.st_size
+                        or definition.revision[1] != attributes.st_mtime_ns
+                        or definition.revision[2] != attributes.st_ctime_ns
+                    ):
+                        raise ValueError(
+                            f"树观察期间链接定义前提变化：{child}"
+                        )
+                    links.append((relative, observed_link))
+                    continue
+                kind = entity_type_from_attributes(child, attributes)
                 if kind == "directory":
                     observed_directory = _directory(child, attributes)
                     directories.append((relative, observed_directory))
@@ -315,14 +363,19 @@ def observe_tree(path, *, include_bytes=False, include_mtime=False):
         _check_observed_file_attributes(observed_file)
     for _, directory in directories:
         _check_directory(directory)
+    for _, observed_link in links:
+        recheck_link_path(observed_link)
 
     position_key = lambda member: member[0].encode("utf-8")
     directories.sort(key=position_key)
     files.sort(key=position_key)
+    links.sort(key=position_key)
     records = tuple(sorted(
         [
             *((relative, "directory", "") for relative, _ in directories),
             *((relative, "file", observed.digest) for relative, observed in files),
+            *((relative, observed.kind, link_definition_digest(observed.entry_link))
+              for relative, observed in links),
         ],
         key=position_key,
     ))
@@ -333,7 +386,7 @@ def observe_tree(path, *, include_bytes=False, include_mtime=False):
     )
     return TreeObservation(
         root, chain, tuple(directories), tuple(files),
-        records, integrity, times,
+        records, integrity, times, tuple(links),
     )
 
 
@@ -347,7 +400,12 @@ def recheck_tree(expected, *, check_mtime=False):
     ):
         raise ValueError("原树观察未请求正式时间，不能补猜时间前提")
 
-    current = observe_tree(expected.path, include_mtime=check_mtime)
+    current = observe_tree(
+        expected.path, include_mtime=check_mtime,
+        include_links=bool(expected.links),
+    )
+    if current.links != expected.links:
+        raise ValueError(f"固定目录树链接定义、位置或身份变化：{expected.path}")
     expected_directories = tuple(
         (relative, observed.object_identity)
         for relative, observed in expected.directories
@@ -436,3 +494,80 @@ def project_removed_file_links(observed, removed_link_counts=None):
         return observed
     from dataclasses import replace
     return replace(observed, files=files)
+
+
+def recheck_file_access(observed):
+    """只核对文件的原访问依赖；不读正文，不更新原授权或内容基线。"""
+    if not isinstance(observed, FileObservation):
+        raise TypeError("文件访问复核必须消费FileObservation")
+    if observed.access is None:
+        return None
+    from core.link_paths import LinkPathObservation, recheck_link_dependencies
+
+    access = observed.access
+    if (
+        not isinstance(access, LinkPathObservation)
+        or not access.follow_final_link
+        or access.entry_link is not None
+        or observed.path != access.actual_path
+    ):
+        raise ValueError("文件访问事实没有对应实际普通对象位置")
+    return recheck_link_dependencies(access)
+
+
+def attach_file_access(observed, access):
+    """关联原访问依赖与新的正式文件事实，不改变任何对象执行资格。
+
+    新文件身份必须由正式观察或发布核心取得。
+    原路径快照只负责访问关系，不使用其中旧末级身份覆盖新文件事实。
+    """
+    if not isinstance(observed, FileObservation):
+        raise TypeError("访问关联必须消费FileObservation")
+    if observed.access is not None and observed.access is not access:
+        raise ValueError("不得替换已关联文件的原访问依赖")
+    if access is None:
+        return observed
+    linked = replace(observed, access=access)
+    recheck_file_access(linked)
+    return linked
+
+
+def observe_accessed_file(
+    access, *, include_bytes=False, include_digest=False, include_mtime=False,
+):
+    """所属预演完成适用访问授权后，消费固定路径事实取得普通文件事实。
+
+    授权和局部跳过归业务协调，本能力不弹窗、不自行授予权限。
+    首次读取前仍使用完整路径快照检查末级身份；
+    正文只从实际普通路径读取，继续消费唯一observe_file算法。
+    返回观察的path是实际位置，access保留名义位置及原链接依赖。
+    """
+    from core.link_paths import LinkPathObservation, recheck_link_path
+
+    if not isinstance(access, LinkPathObservation):
+        raise TypeError("文件访问必须消费正式LinkPathObservation")
+    for value, description in (
+        (include_bytes, "原字节获取开关"),
+        (include_digest, "指纹获取开关"),
+        (include_mtime, "正式时间获取开关"),
+    ):
+        _boolean(value, description)
+    if (
+        not access.follow_final_link
+        or access.entry_link is not None
+        or access.kind not in ("absent", "file")
+    ):
+        raise ValueError("文件内容访问要求已解析的普通文件或缺失位置")
+    recheck_link_path(access)
+    observed = observe_file(
+        access.actual_path,
+        include_bytes=include_bytes,
+        include_digest=include_digest,
+        include_mtime=include_mtime,
+    )
+    if (
+        observed.kind != access.kind
+        or observed.object_identity != access.object_identity
+    ):
+        raise ValueError("首次文件获取期间实际对象偏离固定路径观察")
+    return attach_file_access(observed, access)

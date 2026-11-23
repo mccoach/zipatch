@@ -73,6 +73,7 @@ def create_entry_row(
     parent, label_text, text_var, *, commits, config, field, page,
     browse_command=None, open_command=None, open_fields=None,
     label_width=10, history_key=None, tooltip_text=None, value_normalizer=None,
+    on_accepted=None,
 ):
     row = styled_frame(parent, bg=THEME["bg_panel"])
     row.pack(fill="x", pady=4)
@@ -88,6 +89,7 @@ def create_entry_row(
     binding = commits.register(
         entry, config, field, page, variable=text_var,
         normalizer=value_normalizer or str.strip, history_key=history_key,
+        on_accepted=on_accepted,
     )
 
     if history_key:

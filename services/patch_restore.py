@@ -48,7 +48,8 @@ def _step_description(receipt):
 class BackupRestoreExecutor:
     def __init__(
         self, evidence, backup_dir="", *,
-        backup_project_root="",
+        backup_project_root="", authorize_restore_scope=None,
+        select_restore_scope=None,
     ):
         if not isinstance(evidence, RecoveryEvidence):
             raise TypeError("恢复必须消费正式依据")
@@ -69,11 +70,27 @@ class BackupRestoreExecutor:
         )
         self.evidence = evidence
         self.source = evidence.task_root
-        self.plan = plan_restore(evidence)
+        self.plan = plan_restore(
+            evidence, authorize_restore_scope=authorize_restore_scope,
+            select_restore_scope=select_restore_scope,
+        )
+        self.selected_object_ids = tuple(
+            action.original["id"] for action in self.plan.actions
+        )
+        self.unselected_object_ids = tuple(
+            entry["id"] for entry in evidence.document.value["objects"]
+            if entry["id"] not in set(self.selected_object_ids)
+        )
+        # 名义访问先定位并在需要时授权；实际工作只使用普通父链。
+        # 完整当前结构、原定义及两种位置属于同一本次固定任务。
+        # apply只比较这些前提，不重新询问、定位或扩大恢复范围。
         self.confirmed = False
         self.execution_result = None
         self.auxiliary_result = None
         self.auxiliary_execution = None
+        self.rollback_status = "not_attempted"
+        self.rollback_report = ""
+        self.rollback_error = None
         self.backup_root = None
         self.role = "恢复准备"
         self.current = self.source
@@ -89,6 +106,7 @@ class BackupRestoreExecutor:
             protection_root=self.backup_root,
             protection_task_id=task_id,
             material_base=self.backup_project_root,
+            selected_object_ids=self.selected_object_ids,
         )
         self.risk_summary = {
             "restore_count": sum(action.execute for action in self.plan.actions),
@@ -117,12 +135,15 @@ class BackupRestoreExecutor:
     def format_preview(self):
         summary = self.risk_summary
         lines = [
-            "【整包备份恢复】",
+            "【固定所选备份恢复】",
+            f"清单对象：{len(self.evidence.document.value['objects'])} 个；"
+            f"所选：{len(self.selected_object_ids)} 个；"
+            f"未选：{len(self.unselected_object_ids)} 个。",
+            "未选对象不获取当前正文、不加入还原前保护或执行依赖。",
+            "完整目录树为一个恢复对象，不任意拆开树内成员。",
             f"来源：{self.source}",
-            f"保护根目录：{self.backup_project_root}",
-            "保护根用于定位备份保存目录，并作为共用材料布局的明确基准。",
-            "同卷对象按共同基准保留相对位置；跨卷对象由共用布局按卷分组。",
-            "该基准不限制、解释或改变原清单中的恢复目标。",
+            "恢复目标由清单决定；还原保护目录只保存本次独立保护任务。",
+            "仅恢复所列文件、链接和目录树，不回退整个项目。",
             "恢复清单记录的完整原状态，不重放原修改包。",
             "按内容、存在性和目录结构比较；仅时间不同不触发恢复。",
             f"预检需恢复：{summary['restore_count']} 个对象；"
@@ -139,9 +160,17 @@ class BackupRestoreExecutor:
                 continue
             kind = action.original["original"]["kind"]
             current = action.current
-            if kind == "absent":
+            if kind in ("file_symlink", "directory_symlink", "junction"):
                 description = (
-                    "删除新增目录及全部当前内容"
+                    "移除当前固定入口或结构，按保存的实际原定义重建链接入口；"
+                    "不访问链接目标"
+                )
+            elif kind == "absent":
+                from core.link_paths import LinkPathObservation
+                description = (
+                    "只删除新增链接入口，不展开目标"
+                    if isinstance(current, LinkPathObservation) else
+                    "删除新增目录及全部固定当前成员"
                     if isinstance(current, TreeObservation) else "删除新增文件"
                 )
             elif kind == "directory":
@@ -152,27 +181,87 @@ class BackupRestoreExecutor:
                 description = "重建原文件"
             else:
                 description = "恢复原文件完整内容"
-            lines.append(f"- {action.target}\n  {description}")
+            lines.append(
+                f"- 清单名义位置：{action.access.nominal_path}\n"
+                f"  实际恢复位置：{action.target}\n  {description}"
+            )
+            for definition in action.access.followed_links:
+                lines.extend((
+                    f"  访问依赖入口：{definition.entry_path}",
+                    f"  访问依赖原定义：{definition.raw_target!r}",
+                    f"  直接引用位置：{definition.direct_target}",
+                    "  此依赖不追加为保护、删除或恢复对象。",
+                ))
             if isinstance(current, TreeObservation):
                 lines.extend(
                     f"  - {current.path / relative}"
                     for relative, _, _ in current.content_records if relative
                 )
+        from core.protection_projection import observation_state
+        from core.recovery_document import content_state_from_value
+        from core.link_paths import validate_link_specification
+        from core.recovery_paths import contains
+
+        lines.extend((
+            "", "【全部链接入口及定义授权范围】",
+            "下面的直接目标仅由原定义解释，不查询其存在性、不读取正文。",
+            "目录软链接和junction是叶子入口，不展开或删除目标目录。",
+            "指向中间链接时保留该直接引用，不改成最终目标。",
+            "本次只在清单固定目标位置移除当前结构及恢复保存原定义。",
+            "经过目录链接的父链已在第一次目标枚举或旧正文读取前单独授权。",
+            "实际工作、还原前保护及失败回滚共同固定这些访问依赖。",
+            "预演后改指向时停止；不改用新指向，不修改清单名义目标。",
+        ))
+        found = False
+        for action in self.plan.actions:
+            desired = content_state_from_value(
+                action.original["original"], target=action.target,
+            )
+            current, _ = observation_state(action.current)
+            for title, state in (("保存原状态", desired), ("当前现场", current)):
+                for relative, specification in state.link_definitions:
+                    found = True
+                    entry = action.target / relative
+                    direct = validate_link_specification(specification, entry)
+                    outside = not contains(self.backup_project_root, direct)
+                    lines.extend((
+                        f"- {title}；入口：{entry}",
+                        f"  类型：{specification.kind}",
+                        f"  实际原定义：{specification.raw_target!r}",
+                        f"  相对定义：{specification.relative}",
+                        f"  直接引用位置：{direct}",
+                        "  相对于保护根："
+                        + ("根外引用" if outside else "根内引用")
+                        + "；该引用位置不取得正文访问或恢复对象资格。",
+                    ))
+        if not found:
+            lines.append("本次没有链接入口定义。")
         lines.extend((
             "",
+            "确认所选范围恢复，同时授权上述所选固定入口移除及原定义重建。",
+            "所有必要当前状态备份成功后才开始恢复。",
             "现存硬链接通过完整内容写回原对象，保留关联关系。",
             "前序恢复已使关联名称达到原状态时，后续名称直接跳过。",
             "重建文件或目录树不重建原硬链接拓扑，结果记录重建名称。",
             "确认后仍检查固定前提，不接受外部变化来扩大覆盖范围。",
             "操作期间不要用其他程序修改涉及位置。",
-            "失败停止并提示；不自动重试，不删除原备份。",
+            "工作恢复失败停止后续，按本任务实际步骤及固定范围自动回滚；"
+            "不生成二次备份、不自动续执行。",
+            "回滚无法可靠对应现场或失败时保留两份备份并提示人工处理。",
+            "不承诺完整元数据、整批原子事务或断电恢复。",
         ))
         return "\n".join(lines)
 
     def _report(self):
         result = self.execution_result
         lines = [
-            "整包原状态恢复完成，全部目标通过最终内容检查。",
+            (
+                "整包原状态恢复完成，全部目标通过最终内容检查。"
+                if result.complete_original_state else
+                "所选对象原状态恢复完成，通过所选范围最终检查；"
+                "本次不是整份备份全部恢复。"
+            ),
+            f"未选对象：{len(self.unselected_object_ids)} 个。",
             f"实际恢复对象：{len(result.completed_units)}；"
             f"跳过未变对象：{len(result.skipped_paths)}。",
             f"原备份保留：{self.source}",
@@ -231,11 +320,79 @@ class BackupRestoreExecutor:
         if self.auxiliary_result is not None:
             lines.append("【独立恢复日志结果】")
             lines.extend(_step_description(self.auxiliary_result))
+        if self.rollback_report:
+            lines.extend(("", "【失败处理结果】", self.rollback_report))
         lines.extend((
-            "此前恢复步骤保留，原备份保留；不自动重试。",
+            "正式步骤保留，原备份保留；不自动重试或续执行。",
             str(error),
         ))
         return "\n".join(lines)
+
+    def _rollback_failed_work(self):
+        """失败恢复只消费本次保护对象及实际工作步骤，不再次备份。"""
+        if self.execution.task_execution.work_completed:
+            return
+        results = self.execution.results
+        attempted = any(
+            receipt.mutation_attempted
+            if isinstance(receipt, ContentPublicationResult)
+            else receipt.attempted
+            for receipt in results
+        )
+        if not self.execution.backup_completed:
+            if attempted:
+                raise RuntimeError("还原前全部备份屏障之前出现工作改变")
+            self.rollback_status = "not_required"
+            self.rollback_report = (
+                self.execution.backup_cleanup_report
+                or "工作恢复尚未发起；不需要回滚，原来源备份保留。"
+            )
+            return
+        if not attempted:
+            self.rollback_status = "not_required"
+            self.rollback_report = (
+                "未发起工作恢复改变；原来源及还原前保护备份保留。"
+            )
+            return
+        from core.automatic_rollback_scope import validate_automatic_rollback_scope
+        from core.recovery_protection import read_protection_evidence
+
+        try:
+            self.execution.recheck_access_dependencies()
+            evidence = read_protection_evidence(self.protection)
+            plan = plan_restore(evidence)
+            self.execution.recheck_access_dependencies()
+            validate_automatic_rollback_scope(
+                self.protection.projection, plan.actions, results=results,
+            )
+            rollback = RecoveryExecution(
+                evidence, plan.actions,
+                recheck_context=self.execution.recheck_access_dependencies,
+            )
+            result = rollback.execute()
+        except (OSError, ValueError) as error:
+            self.rollback_status = "failed"
+            self.rollback_error = error
+            self.rollback_report = (
+                "工作恢复失败，自动回滚未完整完成，不能认定现场已恢复。\n"
+                "原来源备份和还原前保护备份均保留，请人工处理；"
+                "不自动重试、再备份或续执行。\n"
+                f"还原前保护：{self.backup_root}\n{error}"
+            )
+        else:
+            self.rollback_status = "completed"
+            self.rollback_report = (
+                "工作恢复失败，已自动恢复本次还原开始前的全部固定原状态。\n"
+                "这不表示原来源备份恢复任务成功；未自动续执行。\n"
+                "未生成二次备份，两份备份均保留。\n"
+                f"实际恢复对象：{len(result.completed_units)}；"
+                f"跳过未变对象：{len(result.skipped_paths)}。"
+            )
+            if result.rebuilt_files:
+                self.rollback_report += (
+                    "\n以下普通文件名称独立重建，不重建原硬链接拓扑：\n"
+                    + "\n".join(map(str, result.rebuilt_files))
+                )
 
     def apply(self):
         if self.consumed or not self.confirmed:
@@ -249,6 +406,7 @@ class BackupRestoreExecutor:
                 self.current, self.phase = error.result.current, error.result.phase
                 if self.protection is not None and self.protection.failed:
                     self.role = "正式保护"
+                self._rollback_failed_work()
                 raise
             report = self._report()
             self._write_execution_log(report)

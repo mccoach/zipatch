@@ -16,21 +16,43 @@ def verify_fixed_effects(effects, actuals):
     effects = tuple(effects)
     if type(actuals) is not tuple or len(actuals) != len(effects):
         raise RuntimeError("正式动作必须交付对应全部effects的对象约束元组")
+    from core.link_paths import (
+        LinkPathObservation, link_definition_digest, recheck_link_path,
+        specification_from_link,
+    )
+
     for effect, actual in zip(effects, actuals):
-        if not isinstance(actual, (FileObservation, TreeObservation)):
-            raise TypeError("正式成果必须是文件或完整目录观察")
+        if not isinstance(actual, (
+            FileObservation, TreeObservation, LinkPathObservation,
+        )):
+            raise TypeError("正式成果必须是文件、链接入口或完整目录观察")
         if actual.path != effect.before.path:
             raise RuntimeError("正式成果位置不对应固定effect")
+        definitions = ()
         if isinstance(actual, TreeObservation):
             kind, records = "directory", actual.content_records
+            definitions = tuple(
+                (relative, specification_from_link(member.entry_link))
+                for relative, member in actual.links
+            )
             recheck_tree(actual)
+        elif isinstance(actual, LinkPathObservation):
+            if actual.follow_final_link or actual.entry_link is None:
+                raise ValueError("正式链接成果必须是不跟随的结构入口")
+            kind = actual.kind
+            records = (("", kind, link_definition_digest(actual.entry_link)),)
+            definitions = (("", specification_from_link(actual.entry_link)),)
+            recheck_link_path(actual)
         else:
             kind = actual.kind
             records = (
                 (("", "file", actual.digest),) if kind == "file" else ()
             )
             recheck_file(actual)
-        if kind != effect.after.kind or records != effect.after.records:
+        if (
+            kind != effect.after.kind or records != effect.after.records
+            or definitions != effect.after.link_definitions
+        ):
             raise OSError(f"正式成果内容、存在性或目录结构不符：{actual.path}")
 
 

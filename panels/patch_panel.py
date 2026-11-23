@@ -27,10 +27,7 @@ from core.time_utils import current_timestamp_text
 from panels.base_panel import BasePanel, publication_failure_title
 from services.patch_backup import resolve_backup_base_dir
 from services.patch_file_plan import patch_observation_kind
-from ui.backup_restore import (
-    open_last_backup_folder, open_restore_source,
-    resolve_restore_backup_dir, run_backup_restore,
-)
+from ui.backup_restore import open_last_backup_folder
 from services.patch_protocol_doc_service import get_patch_protocol_doc
 from services.patch_protocol_doc_sync import (
     apply_protocol_doc_update, is_protocol_doc_update_available, preview_protocol_doc_update,
@@ -57,113 +54,48 @@ class PatchPanel(BasePanel):
 
     def build(self):
         body = self.make_body()
-        for field in (
-            "project_root", "backup_dir", "restore_source_dir",
-            "restore_project_root",
-        ):
-            setattr(self, field, tk.StringVar(value=self.cfg[field]))
-        self.patch_mode = tk.StringVar(value=self.cfg["patch_mode"])
+        self.project_root = tk.StringVar(value=self.cfg["project_root"])
+        self.backup_dir = tk.StringVar(value=self.cfg["backup_dir"])
         self.last_backup_root = ""
-
         self.project_root_entry = create_entry_row(
             body, "项目根目录", self.project_root,
             commits=self.commits, config=self.cfg, field="project_root", page="patch",
-            history_key="patch.project_root", value_normalizer=normalize_windows_display_path,
-            browse_command=lambda: browse_folder(self.project_root, "选择项目根目录", parent=self.root),
-            open_command=lambda: open_path_with_default_app(self.project_root.get(), self.root),
+            history_key="patch.project_root",
+            value_normalizer=normalize_windows_display_path,
+            browse_command=lambda: browse_folder(
+                self.project_root, "选择项目根目录", parent=self.root,
+            ),
+            open_command=lambda: open_path_with_default_app(
+                self.project_root.get(), self.root,
+            ),
         )
         self.backup_dir_entry = create_entry_row(
             body, "备份目录", self.backup_dir,
             commits=self.commits, config=self.cfg, field="backup_dir", page="patch",
-            history_key="patch.backup_dir", value_normalizer=normalize_windows_display_path,
-            browse_command=lambda: self.browse_project_relative_folder(self.backup_dir, "选择备份保存目录"),
-            open_fields={"backup_dir", "restore_project_root"},
-            open_command=self.open_configured_backup_dir,
-            tooltip_text=(
-                "执行修改：相对备份位置基于执行修改的项目根目录。"
-                "备份还原：相对备份位置基于当前显示的独立保护项目根目录。"
-                "绝对备份位置保持不变；此目录不是恢复目的地。"
-            ),
-        )
-        self.restore_source_entry = create_entry_row(
-            body, "备份来源", self.restore_source_dir,
-            commits=self.commits, config=self.cfg, field="restore_source_dir", page="patch",
-            history_key="patch.restore_source_dir", value_normalizer=normalize_windows_display_path,
-            browse_command=lambda: browse_folder(
-                self.restore_source_dir,
-                "选择包含 recovery.json 的备份任务目录",
-                parent=self.root,
-            ),
-            open_command=lambda: open_restore_source(self),
-            tooltip_text=(
-                "填写完整绝对任务目录；仅支持严格version 4 recovery.json。"
-                "恢复目标使用清单记录的绝对位置，不使用项目根目录。"
-                "旧格式不转换或兼容读取，不删除备份材料。"
-            ),
-        )
-
-        self.restore_project_root_entry = create_entry_row(
-            body, "保护根目录", self.restore_project_root,
-            commits=self.commits, config=self.cfg,
-            field="restore_project_root", page="patch",
-            history_key="patch.restore_project_root",
+            history_key="patch.backup_dir",
             value_normalizer=normalize_windows_display_path,
-            browse_command=lambda: browse_folder(
-                self.restore_project_root, "选择还原前保护项目根目录",
-                parent=self.root,
+            browse_command=lambda: self.browse_project_relative_folder(
+                self.backup_dir, "选择备份保存目录",
             ),
-            open_command=lambda: open_path_with_default_app(
-                self.restore_project_root.get(), self.root,
-            ),
-            tooltip_text=(
-                "还原前保护：相对备份保存目录以此为基准，"
-                "材料相对位置也消费同一明确根基准。"
-                "与执行修改的项目根独立，不限制或改变原清单恢复目标。"
-            ),
+            open_command=self.open_configured_backup_dir,
+            tooltip_text="相对备份目录基于项目根目录；绝对目录直接定位。",
         )
-
-        self.mode_row = styled_frame(body, bg=THEME["bg_panel"])
-        self.mode_row.pack(fill="x", pady=(10, 0))
-        tk.Label(
-            self.mode_row, text="执行模式", width=10, anchor="w",
-            bg=THEME["bg_panel"], fg=THEME["fg_label"], font=THEME["font_main"],
-        ).pack(side="left", padx=(0, 8))
-        for label, value, danger in (
-            ("执行修改", "apply", False), ("备份还原", "restore", True),
-        ):
-            make_radiobutton(
-                self.mode_row, label, self.patch_mode, value, commits=self.commits,
-                config=self.cfg, field="patch_mode", command=self.refresh_mode_ui, danger=danger,
-            ).pack(side="left", padx=(0, 8))
-        self.mode_hint = tk.Label(
-            self.mode_row, text="", bg=THEME["bg_panel"],
-            fg=THEME["danger"], font=THEME["font_title"],
-        )
-        self.mode_hint.pack(side="right", padx=(8, 0))
-
-        # 执行模式与所属勾选项共用一行，不增加第二选项行。
-        option_row = self.mode_row
-        for field, label, attribute, tip in (
-            ("allow_delete", "允许删除文件/文件夹（危险）", "allow_delete_check", "允许修改包中的删除操作；仍保留路径校验和执行确认。"),
-            ("allow_multi_replace_exact", "允许多处精确替换", "allow_multi_replace_check", "允许按修改包声明替换多处完全相同文本。"),
-            ("normalize_text_newlines", "标准化文本换行", "normalize_text_newlines_check", "默认打开：按本次固定名单转换为 LF 或 CRLF，不裁剪空白、不补末尾换行。关闭：保留最终正文中的 CRLF、LF 和单独 CR，不校验换行名单。仅影响修改包文本写入，不影响复制、移动或备份恢复。"),
-
-            ("keep_restore_source_path", "保留备份来源路径", "keep_restore_source_path_check", "不勾选时，仅在还原成功后清空来源，不删除备份文件。"),
-            ("open_backup_after_done", "完成后打开本次备份", "open_backup_after_done_check", "修改时打开本次修改备份；恢复时打开本次还原前保护任务。没有生成则不自动打开来源或历史目录。"),
+        options = styled_frame(body, bg=THEME["bg_panel"])
+        options.pack(fill="x", pady=(10, 0))
+        for field, label in (
+            ("allow_delete", "允许删除文件/文件夹（危险）"),
+            ("allow_multi_replace_exact", "允许多处精确替换"),
+            ("normalize_text_newlines", "标准化文本换行"),
+            ("open_backup_after_done", "完成后打开本次备份"),
         ):
             variable = tk.BooleanVar(value=self.cfg[field])
             setattr(self, field, variable)
-            widget = make_checkbutton(
-                option_row, label, variable, commits=self.commits,
-                config=self.cfg, field=field, tooltip_text=tip,
-
-            )
-            setattr(self, attribute, widget)
-            widget.pack(side="left", padx=(0, 24))
-
+            make_checkbutton(
+                options, label, variable, commits=self.commits,
+                config=self.cfg, field=field,
+            ).pack(side="left", padx=(0, 12))
         area = styled_frame(body, bg=THEME["bg_panel"])
         area.pack(fill="both", expand=True, pady=(10, 0))
-        # 列分配归正文区域，不由标题、统计或临时查找栏决定。
         area.grid_columnconfigure(0, weight=1, uniform="patch_text_columns")
         area.grid_columnconfigure(1, weight=1, uniform="patch_text_columns")
         area.grid_rowconfigure(0, weight=1)
@@ -175,78 +107,41 @@ class PatchPanel(BasePanel):
             height=22, mono=True, show_statistics=True,
             commits=self.commits, config=self.cfg,
             field="patch_text", page="patch", favorite_key="patch_text",
-            wrap="none", enable_import_text=True, wrap_config_key="patch.patch_text",
+            wrap="none", enable_import_text=True,
+            wrap_config_key="patch.patch_text",
             preserve_trailing_newlines=True, preserve_import_newlines=True,
-            title_action_factory=lambda text, title_row: PatchOpSelection(
-                text, title_row, self.commits,
-            ),
+            title_action_factory=lambda text, title_row:
+            PatchOpSelection(text, title_row, self.commits),
         )
         self.result_text = create_managed_text_box(
             right, "预演 / 执行结果", self.cfg["last_result_text"],
             height=22, mono=True, readonly=True, commits=self.commits,
-            enable_favorites=False, wrap="none", wrap_config_key="patch.result_text",
+            enable_favorites=False, enable_copy=True,
+            wrap="none", wrap_config_key="patch.result_text",
             on_content_changed=self.accept_result_control,
         )
-
         row = styled_frame(body, bg=THEME["bg_panel"])
         row.pack(fill="x", pady=(12, 0))
-        styled_button(row, "一键清空", self.clear_all, width=10).pack(side="left", padx=(0, 8))
-        styled_button(row, "打开本次备份", self.open_last_backup_dir, width=12).pack(side="left")
-        self.newline_settings_button = styled_button(
-            row, "换行设置", self.open_newline_settings, width=10,
+        styled_button(row, "一键清空", self.clear_all, width=10).pack(
+            side="left", padx=(0, 8),
         )
-        self.newline_settings_button.pack(side="left", padx=(8, 0))
-        self.apply_button = styled_button(row, "预演并执行", self.apply, width=12, danger=True)
+        styled_button(row, "打开本次备份", self.open_last_backup_dir, width=12).pack(
+            side="left",
+        )
+        styled_button(row, "换行设置", self.open_newline_settings, width=10).pack(
+            side="left", padx=(8, 0),
+        )
+        self.apply_button = styled_button(
+            row, "预演并执行", self.apply, width=12, danger=True,
+        )
         self.apply_button.pack(side="right", padx=(8, 0))
-        self.preview_button = styled_button(row, "仅预演", self.preview, width=14, accent=True)
+        self.preview_button = styled_button(
+            row, "仅预演", self.preview, width=14, accent=True,
+        )
         self.preview_button.pack(side="right")
         styled_button(row, "修改包协议规范", self.show_protocol_doc, width=16).pack(
             side="right", padx=(0, 8),
         )
-        self.refresh_mode_ui()
-
-    def refresh_mode_ui(self):
-        restore = self.patch_mode.get() == "restore"
-        if restore:
-            self.newline_settings_button.pack_forget()
-        elif not self.newline_settings_button.winfo_manager():
-            self.newline_settings_button.pack(side="left", padx=(8, 0))
-        # 两种业务的定位输入占同一行；恢复不消费隐藏项目根。
-        self.project_root_entry._row_frame.pack_forget()
-        self.restore_source_entry._row_frame.pack_forget()
-        active_entry = (
-            self.restore_source_entry if restore else self.project_root_entry
-        )
-        active_entry._row_frame.pack(
-            fill="x", pady=4, before=self.backup_dir_entry._row_frame,
-        )
-        self.restore_project_root_entry._row_frame.pack_forget()
-        if restore:
-            self.restore_project_root_entry._row_frame.pack(
-                fill="x", pady=4, before=self.backup_dir_entry._row_frame,
-            )
-        option_widgets = (
-            (self.allow_delete_check, not restore),
-            (self.allow_multi_replace_check, not restore),
-            (self.normalize_text_newlines_check, not restore),
-
-            (self.keep_restore_source_path_check, restore),
-            (self.open_backup_after_done_check, True),
-        )
-        for widget, _ in option_widgets:
-            widget.pack_forget()
-        for widget, visible in option_widgets:
-            if visible:
-                widget.pack(side="left", padx=(0, 6))
-        self.mode_hint.configure(text="当前为备份还原模式，请谨慎操作" if restore else "")
-        self.preview_button.configure(text="仅预演")
-        color = THEME["danger"] if restore else THEME["warning"]
-        self.apply_button.configure(
-            text="预演并还原" if restore else "预演并执行",
-            bg=color, fg=THEME["fg_on_dark"], activebackground=color,
-        )
-        self.apply_button._normal_bg = color
-        self.apply_button._normal_fg = THEME["fg_on_dark"]
 
     def resolve_project_relative_initial_dir(self, value):
         root_text = normalize_windows_display_path(self.project_root.get())
@@ -265,8 +160,7 @@ class PatchPanel(BasePanel):
         return get_initial_dir_from_path(str(target)) or str(root)
 
     def browse_project_relative_folder(self, variable, title):
-        if self.patch_mode.get() == "restore":
-            return browse_folder(variable, title, parent=self.root)
+
         return browse_folder(
             variable, title,
             initial_dir=self.resolve_project_relative_initial_dir(variable.get()),
@@ -275,18 +169,13 @@ class PatchPanel(BasePanel):
 
     def open_configured_backup_dir(self):
         try:
-            if self.patch_mode.get() == "restore":
-                path = resolve_restore_backup_dir(self.cfg)
-            else:
-                # 相对修改备份仍需要当前已接受项目根；
-                # 恢复模式不会接受或读取这个隐藏字段。
-                editors = self.commits.select("patch", {"project_root"})
-                self.commits.submit_editors(editors, self.root)
-                if any(editor.dirty for editor in editors):
-                    return
-                path = resolve_backup_base_dir(
-                    self.cfg["project_root"], self.cfg["backup_dir"],
-                )
+            editors = self.commits.select("patch", {"project_root"})
+            self.commits.submit_editors(editors, self.root)
+            if any(editor.dirty for editor in editors):
+                return
+            path = resolve_backup_base_dir(
+                self.cfg["project_root"], self.cfg["backup_dir"],
+            )
         except (OSError, ValueError) as error:
             safe_show_error("打开失败", str(error), self.root)
             return
@@ -297,33 +186,17 @@ class PatchPanel(BasePanel):
             self.log("换行设置已保存")
 
     def prepare_parameters(self):
-        output_rules = (
-            self.commits.prepare_rule(
-                self.config_data["settings"], "crlf_file_list", "file",
+        parameters = self.prepare({
+            "project_root", "backup_dir", "open_backup_after_done",
+            "allow_delete", "allow_multi_replace_exact",
+            "normalize_text_newlines", "patch_text",
+        })
+        if parameters is not None:
+            parameters["output_rules"] = (
+                self.commits.prepare_rule(
+                    self.config_data["settings"], "crlf_file_list", "file",
+                ) if parameters["normalize_text_newlines"] else None
             )
-            if (
-                self.cfg["patch_mode"] == "apply"
-                and self.cfg["normalize_text_newlines"]
-            ) else None
-        )
-        fields = {
-            "project_root", "patch_mode", "backup_dir",
-            "open_backup_after_done",
-        }
-        if self.cfg["patch_mode"] == "restore":
-            fields.discard("project_root")
-            fields |= {
-                "restore_source_dir", "keep_restore_source_path",
-                "restore_project_root",
-            }
-        else:
-            fields |= {
-                "allow_delete", "allow_multi_replace_exact",
-                "normalize_text_newlines", "patch_text",
-            }
-        parameters = self.prepare(fields)
-        if parameters is not None and parameters["patch_mode"] == "apply":
-            parameters["output_rules"] = output_rules
         return parameters
 
     def display_result(self, text):
@@ -353,7 +226,7 @@ class PatchPanel(BasePanel):
             self.log("修改包执行器：已一键清空输入和结果")
 
     def result_section(self, title, content, cfg):
-        mode = "备份还原" if cfg["patch_mode"] == "restore" else "执行修改"
+        mode = "执行修改"
         return (
             "=" * 60 + "\n"
             f"【{current_timestamp_text()}｜{title}｜{mode}】\n"
@@ -388,7 +261,16 @@ class PatchPanel(BasePanel):
         project = validate_required_path(cfg["project_root"], "项目根目录")
 
         patch = validate_required_path(cfg["patch_text"], "修改包内容")
+        from ui.patch_link_authorization import (
+            make_patch_enumeration_selector, make_patch_scope_authorizer,
+        )
         return preview_patch(
+            authorize_patch_scope=make_patch_scope_authorizer(
+                self.root, self.commits,
+            ),
+            select_patch_enumeration=make_patch_enumeration_selector(
+                self.root, self.commits,
+            ),
             output_rules=cfg["output_rules"],
             normalize_text_newlines=cfg["normalize_text_newlines"],
             project_root=project, patch_text=patch,
@@ -488,8 +370,7 @@ class PatchPanel(BasePanel):
         cfg = self.prepare_parameters()
         if cfg is None:
             return
-        if cfg["patch_mode"] == "restore":
-            return run_backup_restore(self, cfg, execute=False)
+
         self.set_status("正在执行 Dry Run 预演...")
         result = None
         try:
@@ -545,7 +426,12 @@ class PatchPanel(BasePanel):
             # 不存在的目标没有实体类型，按已校验操作的文件/目录语义分类。
             for expected in action.expectations:
                 observed_kind = patch_observation_kind(expected)
-                object_kind = observed_kind
+                object_kind = (
+                    "file" if observed_kind == "file_symlink" else
+                    "directory" if observed_kind in (
+                        "directory_symlink", "junction",
+                    ) else observed_kind
+                )
                 if object_kind == "absent":
                     object_kind = "directory" if kind.endswith("_dir") else "file"
                 if object_kind not in object_paths:
@@ -646,8 +532,7 @@ class PatchPanel(BasePanel):
         cfg = self.prepare_parameters()
         if cfg is None:
             return
-        if cfg["patch_mode"] == "restore":
-            return run_backup_restore(self, cfg, execute=True)
+
         self.set_status("正在执行 Dry Run 预演...")
         preview = None
         try:
@@ -722,16 +607,6 @@ class PatchPanel(BasePanel):
         finally:
             if preview is not None:
                 invalidate_preview(preview)
-
-    def record_backup_restore_result(self, text, updates, outcome):
-        """恢复报告沿既有长期结果保存；来源控件只是配置派生视图。"""
-        if "restore_source_dir" in updates:
-            self.restore_source_dir.set(updates["restore_source_dir"])
-            self.restore_source_entry._config_binding.dirty = False
-        return self.finish_result(
-            self.result_section(outcome, text, {"patch_mode": "restore"}),
-            updates, outcome=outcome,
-        )
 
     def open_last_backup_dir(self):
         return open_last_backup_folder(self)

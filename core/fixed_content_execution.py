@@ -21,7 +21,7 @@ class FixedContentExecution:
     def __init__(
         self, expected, content=None, *, source=None,
         options=ContentPublicationOptions(), preserve_target_mode=True,
-        desired_digest=None,
+        desired_digest=None, replace_target_name=False,
     ):
         if not isinstance(expected, FileObservation):
             raise TypeError("固定文件执行必须消费FileObservation")
@@ -34,6 +34,10 @@ class FixedContentExecution:
             raise TypeError("固定文件执行必须具有明确发布选项")
         if type(preserve_target_mode) is not bool:
             raise TypeError("保留目标权限开关必须是布尔值")
+        if type(replace_target_name) is not bool:
+            raise TypeError("替换指定名称开关必须是布尔值")
+        if replace_target_name and (source is None or preserve_target_mode):
+            raise ValueError("名称复制必须提供固定来源并使用来源基础权限")
         if desired_digest is not None and (
             type(desired_digest) is not str
             or len(desired_digest) != 64
@@ -46,6 +50,7 @@ class FixedContentExecution:
         self.source = source
         self.options = options
         self.preserve_target_mode = preserve_target_mode
+        self.replace_target_name = replace_target_name
         self.desired_digest = desired_digest
         self.artifact = None
         self.publication = None
@@ -89,6 +94,7 @@ class FixedContentExecution:
                     self.source, self.expected,
                     preserve_target_mode=self.preserve_target_mode,
                     options=self.options,
+                    replace_target_name=self.replace_target_name,
                 )
             )
             if (

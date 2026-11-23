@@ -55,6 +55,18 @@ from services.patch_ops import (
 )
 from services.patch_reporter import format_patch_preview
 from services.text_mutations import locate_replacement
+from services.patch_link_authorization import (
+    format_link_content_access, format_link_structure_access,
+)
+from core.link_paths import (
+    LinkPathObservation, inspect_link_path, recheck_link_path,
+    specification_from_link,
+)
+from core.filesystem_changes import prepare_link_creation, prepare_link_removal
+from services.patch_scope import (
+    prepare_operation_scope, expand_operation_scope, materialize_scope_observation,
+    recheck_scope_accesses, format_package_scope,
+)
 
 
 def make_op_locator(op):
@@ -109,6 +121,8 @@ def _recheck(observed):
             raise ValueError(f"固定跳过路径前提变化：{observed.path}")
     elif isinstance(observed, TreeObservation):
         recheck_tree(observed)
+    elif isinstance(observed, LinkPathObservation):
+        recheck_link_path(observed)
     else:
         recheck_file(observed)
 
@@ -146,7 +160,22 @@ class PatchExecutor:
         allow_multi_replace_exact=False,
         backup_dir="99_归档/AI文件修改备份",
         patch_text="", preview_text="", normalize_text_newlines=True,
+        authorize_patch_scope=None, authorize_patch_enumeration=None,
+        select_patch_enumeration=None,
     ):
+        if select_patch_enumeration is not None and not callable(select_patch_enumeration):
+            raise TypeError("修改包先行枚举选择必须可调用")
+        self.select_patch_enumeration = select_patch_enumeration
+        self._enumeration_skipped = set()
+        if authorize_patch_enumeration is not None and not callable(authorize_patch_enumeration):
+            raise TypeError("修改包实际目录枚举授权必须可调用")
+        self.authorize_patch_enumeration = authorize_patch_enumeration
+        if authorize_patch_scope is not None and not callable(authorize_patch_scope):
+            raise TypeError("本包范围决定必须是可调用对象")
+        self.authorize_patch_scope = authorize_patch_scope
+        self._scopes = {}
+        self._scope_decisions = {}
+        self.scope_report = ""
         for name, value in (
             ("允许删除", allow_delete),
             ("允许多处精确替换", allow_multi_replace_exact),
@@ -285,7 +314,21 @@ class PatchExecutor:
                 raise ValueError(f"{self.op_label(op)}.if_exists 非法")
         if kind in ("delete_file", "delete_dir") and not self.allow_delete:
             raise ValueError("当前未勾选允许删除")
-        return safe_join(self.root, op["path"]), count
+        return self._nominal_position(op["path"]), count
+
+    def _nominal_position(self, expression):
+        # 修改包只提供根相对入口；实际访问由正式探查另行表达。
+        from core.recovery_paths import contains
+
+        relative = normalize_rel_path(expression)
+        nominal = self.root / relative
+        if (
+            any(ord(character) < 32 for character in relative)
+            or not contains(self.root, nominal)
+            or identity(nominal) == identity(self.root)
+        ):
+            raise ValueError("名义入口越界、含控制字符或作用于项目根")
+        return nominal
 
     def _observe(self, path, kind):
         key = identity(path)
@@ -297,14 +340,20 @@ class PatchExecutor:
                 raise ValueError(f"准备期间对象类型变化：{path}")
             return previous
         try:
-            observed = (
-                observe_tree(path, include_bytes=True, include_mtime=True)
-                if kind == "directory" else
-                observe_file(
+            if kind in ("file_symlink", "directory_symlink", "junction"):
+                observed = inspect_link_path(path, follow_final_link=False)
+                if observed.followed_links or observed.actual_path != path:
+                    raise ValueError("结构入口父链不得经过链接")
+            elif kind == "directory":
+                observed = observe_tree(
+                    path, include_bytes=True, include_mtime=True,
+                    include_links=True,
+                )
+            else:
+                observed = observe_file(
                     path, include_bytes=True, include_digest=True,
                     include_mtime=True,
                 )
-            )
             if patch_observation_kind(observed) != kind:
                 raise ValueError(f"准备期间对象类型变化：{path}")
         except (OSError, ValueError) as error:
@@ -313,68 +362,177 @@ class PatchExecutor:
         self._observations[key] = observed
         return observed
 
-    def _prepare_action(self, op, primary):
-        kind = op["op"]
-        source, source_chain = checked_chain(primary, include_observation=True)
-        source_kind = source_chain[-1][1]
-        paths = [(source, source_chain, source_kind)]
-        if kind in DUAL_PATH_OPS:
-            target, target_chain = checked_chain(
-                safe_join(self.root, op["new_path"]), include_observation=True,
-            )
-            target_kind = target_chain[-1][1]
-            paths.append((target, target_chain, target_kind))
-            required = "directory" if kind.endswith("_dir") else "file"
-            if source_kind != required:
-                raise ValueError(f"{self.op_label(op)} 源路径不存在或类型不匹配")
-            if target_kind not in ("absent", required):
-                raise ValueError(f"{self.op_label(op)} 目标类型不匹配")
-            if overlaps(source, target):
-                raise ValueError(f"{self.op_label(op)} 来源目标路径冲突")
-            if kind in ("rename_file", "rename_dir") and source.parent != target.parent:
-                raise ValueError(f"{self.op_label(op)} 只能在同一父目录内改名")
-            policy = op.get("if_exists", "error")
-            if target_kind != "absent" and policy == "error":
-                raise ValueError(f"{self.op_label(op)} 目标已存在")
-            execute = target_kind == "absent" or policy != "skip"
-        elif kind == "write_file":
-            if source_kind == "directory":
-                raise ValueError(f"{self.op_label(op)} 目标是目录")
-            policy = op.get("if_exists", "error")
-            if source_kind != "absent" and policy == "error":
-                raise ValueError(f"{self.op_label(op)} 目标已存在")
-            execute = source_kind == "absent" or policy != "skip"
-        elif kind == "create_dir":
-            if source_kind not in ("absent", "directory"):
-                raise ValueError(f"{self.op_label(op)} 目标已存在但不是目录")
-            if source_kind == "directory" and op.get("if_exists", "skip") == "error":
-                raise ValueError(f"{self.op_label(op)} 目标目录已存在")
-            execute = source_kind == "absent"
-        else:
-            required = "directory" if kind == "delete_dir" else "file"
-            if source_kind != required:
-                raise ValueError(f"{self.op_label(op)} 目标文件不存在或类型不匹配")
-            execute = True
-        expectations = tuple(
-            self._observe(path, observed_kind)
-            if execute else SkippedPatchPath(path, chain, observed_kind)
-            for path, chain, observed_kind in paths
+    def _prepare_scopes(self, operations):
+        """整包参数及无正文范围先准备，全部成立才进入一次范围决定。"""
+        checks = []
+        for operation in operations:
+            try:
+                primary, _ = self.validate_op(operation)
+                scope = prepare_operation_scope(
+                    operation, primary,
+                    position=self._nominal_position, text_ops=TEXT_WRITE_OPS,
+                    enumerate_directories=False,
+                )
+                self._scopes[operation["id"]] = scope
+            except (OSError, ValueError) as error:
+                checks.append(PatchOpCheckResult(
+                    operation.get("id", ""), operation.get("op", ""),
+                    operation.get("path", ""), False, str(error),
+                    make_op_locator(operation),
+                ))
+        nominal_errors = collect_path_contract_errors(operations)
+        checks.extend(
+            make_result_for_global_error("路径互斥：" + message)
+            for message in nominal_errors
         )
-        move = None
-        if execute and kind in (
-            "move_file", "rename_file", "move_dir", "rename_dir",
-        ):
-            move = prepare_observed_name_move(*expectations)
-        if execute and kind == "copy_file":
-            before, target = expectations
+        if checks:
+            return checks
+
+        enumeration_scopes = tuple(
+            self._scopes[operation["id"]]
+            for operation in operations
+            if not self._scopes[operation["id"]].fixed_skip
+            and any(
+                access.kind == "directory" and access.followed_links
+                for access in self._scopes[operation["id"]].accesses
+            )
+        )
+        if enumeration_scopes and self.select_patch_enumeration is not None:
+            from core.work_selection import selected_indices
+
+            retained = set(selected_indices(
+                self.select_patch_enumeration(enumeration_scopes, self.root),
+                len(enumeration_scopes),
+                description="修改包先行枚举范围选择",
+            ))
+            self._enumeration_skipped = {
+                scope.operation["id"]
+                for number, scope in enumerate(enumeration_scopes)
+                if number not in retained
+            }
+
+        # 全部参数和名义路径检查已通过。只展开未跳过OP，
+        # 且始终消费第一次固定的入口，不用后来现场重建范围。
+        expansion_checks = []
+        for operation in operations:
+            identifier = operation["id"]
+            scope = self._scopes[identifier]
+            if identifier in self._enumeration_skipped:
+                self._scopes[identifier] = replace(
+                    scope, observations=(), fixed_skip=True,
+                )
+                continue
+            if scope.fixed_skip:
+                continue
+            try:
+                self._scopes[identifier] = expand_operation_scope(
+                    scope,
+                    authorize_enumeration=(
+                        (lambda title, description: True)
+                        if self.select_patch_enumeration is not None
+                        else self.authorize_patch_enumeration
+                    ),
+                )
+            except (OSError, ValueError) as error:
+                expansion_checks.append(PatchOpCheckResult(
+                    identifier, operation["op"], operation["path"],
+                    False, str(error), make_op_locator(operation),
+                ))
+        if expansion_checks:
+            return expansion_checks
+
+        scopes = tuple(self._scopes[operation["id"]] for operation in operations)
+        self.scope_report = format_package_scope(scopes, self.root)
+        if self._enumeration_skipped:
+            self.scope_report += "\n\n【先行枚举选择跳过的OP】\n" + "\n".join(
+                f'id="{operation["id"]}"：未枚举、不读取正文、不保护、不执行'
+                for operation in operations
+                if operation["id"] in self._enumeration_skipped
+            )
+        if self.authorize_patch_scope is None:
+            if any(scope.requires_authorization and not scope.fixed_skip for scope in scopes):
+                return [make_result_for_global_error(
+                    "本包链接实际范围尚未取得本地统一决定，禁止读取正文或执行。\n"
+                    + self.scope_report
+                )]
+            decisions = tuple(
+                "skip" if scope.fixed_skip else "authorize" for scope in scopes
+            )
+        else:
+            decisions = self.authorize_patch_scope(scopes, self.root)
+            if decisions is None:
+                return [make_result_for_global_error(
+                    "本包固定范围决定已取消，整包不读取正文、不执行"
+                )]
             if (
-                target.kind == "file"
-                and before.object_identity == target.object_identity
+                type(decisions) is not tuple or len(decisions) != len(scopes)
+                or any(type(value) is not str or value not in ("authorize", "skip")
+                       for value in decisions)
             ):
-                raise ValueError("复制来源和目标实际为同一对象")
+                raise ValueError("统一范围决定必须准确对应本包全部OP的不可变决定元组")
+        from services.patch_scope import apply_patch_target_decisions
+
+        decisions = apply_patch_target_decisions(scopes, decisions)
+        self._scope_decisions = {
+            scope.operation["id"]: decision
+            for scope, decision in zip(scopes, decisions)
+        }
+        self.scope_report += "\n\n【本包固定决定】\n" + "\n".join(
+            f'id="{scope.operation["id"]}"：{self._scope_decisions[scope.operation["id"]]}'
+            for scope in scopes
+        )
+        return []
+
+    def _prepare_action(self, op, primary):
+        """只消费本包统一决定；正文从实际位置一次获取，依赖单独保存。"""
+        scope = self._scopes[op["id"]]
+        decision = self._scope_decisions[op["id"]]
+        if decision == "skip":
+            return PatchAction(
+                self.op_label(op), MappingProxyType(dict(op)), False,
+                tuple(
+                    SkippedPatchPath(access.nominal_path, (), access.kind)
+                    for access in scope.accesses
+                ),
+                skip_reason=(
+                    "先行枚举范围选择跳过"
+                    if op["id"] in self._enumeration_skipped else
+                    "if_exists固定跳过" if scope.fixed_skip else
+                    "本包统一范围决定选择跳过"
+                ),
+            )
+
+        recheck_scope_accesses(scope.accesses)
+        expectations = []
+        for metadata in scope.observations:
+            key = identity(metadata.path)
+            previous = self._observations.get(key)
+            if isinstance(previous, (OSError, ValueError)):
+                raise previous
+            if previous is None:
+                try:
+                    previous = materialize_scope_observation(metadata)
+                except (OSError, ValueError) as error:
+                    self._observations[key] = error
+                    raise
+                self._observations[key] = previous
+            expectations.append(previous)
+        recheck_scope_accesses(scope.accesses)
+        expectations = tuple(expectations)
+        kind = op["op"]
+        move = None
+        if kind in ("move_file", "rename_file", "move_dir", "rename_dir"):
+            move = prepare_observed_name_move(*expectations)
+        if kind == "copy_file":
+            source, target = expectations
+            if (
+                target.kind != "absent"
+                and source.object_identity == target.object_identity
+            ):
+                raise ValueError("复制来源和目标实际为同一入口对象")
         return PatchAction(
-            self.op_label(op), MappingProxyType(dict(op)),
-            execute, expectations, move,
+            self.op_label(op), MappingProxyType(dict(op)), True,
+            expectations, move, accesses=scope.accesses,
         )
 
     def check_one_op(self, op):
@@ -406,7 +564,7 @@ class PatchExecutor:
             self._actions.append(action)
             return PatchOpCheckResult(
                 identifier, kind, normalize_rel_path(path),
-                True, "校验通过", make_op_locator(op),
+                True, action.skip_reason or "校验通过", make_op_locator(op),
             )
         except (OSError, ValueError) as error:
             return PatchOpCheckResult(
@@ -436,12 +594,40 @@ class PatchExecutor:
             ):
                 raise ValueError("仅支持具有非空operations的V3修改包")
             operations = patch["operations"]
-            checks = [self.check_one_op(op) for op in operations]
-            valid = [op for op, check in zip(operations, checks) if check.ok]
+            identifiers = [operation.get("id") for operation in operations]
+            if len(set(identifiers)) != len(identifiers):
+                raise ValueError("整包OP id重复")
+            checks = self._prepare_scopes(operations)
+            if checks:
+                rejected = {
+                    check.op_id for check in checks
+                    if check.op_type != "global_contract"
+                }
+                checks = [
+                    PatchOpCheckResult(
+                        operation["id"], operation["op"], operation["path"],
+                        operation["id"] not in rejected,
+                        "参数及范围阶段通过；整包未取得正文获取或执行资格",
+                        make_op_locator(operation),
+                    )
+                    for operation in operations
+                    if operation["id"] not in rejected
+                ] + checks
+                valid = []
+            else:
+                checks = [self.check_one_op(op) for op in operations]
+                valid = [
+                    op for op, check in zip(operations, checks) if check.ok
+                ]
             errors = [
+                check.message for check in checks
+                if not check.ok and check.op_type == "global_contract"
+            ]
+            path_errors = [
                 "路径互斥：" + message
                 for message in collect_path_contract_errors(valid)
             ]
+            errors.extend(path_errors)
             errors.extend(
                 "内容互斥：" + message
                 for message in collect_content_contract_errors(self.located_operations)
@@ -449,7 +635,14 @@ class PatchExecutor:
             identifiers = [op["id"] for op in valid]
             if len(set(identifiers)) != len(identifiers):
                 errors.append("整包OP id重复")
-            checks.extend(make_result_for_global_error(message) for message in errors)
+            existing_messages = {
+                check.message for check in checks
+                if check.op_type == "global_contract"
+            }
+            checks.extend(
+                make_result_for_global_error(message)
+                for message in errors if message not in existing_messages
+            )
             if not any(not check.ok for check in checks):
                 phase = "全部文件成果准备"
                 try:
@@ -461,12 +654,21 @@ class PatchExecutor:
                             for action in self.plan.actions
                             if action.execute and action.payload["op"] in TEXT_WRITE_OPS
                         )
-                        newlines = {
-                            path: "\r\n" if self.output_rules.matches(
-                                path.relative_to(self.root).parts,
+                        newlines = {}
+                        for action in self.plan.actions:
+                            if not action.execute or action.payload["op"] not in TEXT_WRITE_OPS:
+                                continue
+                            path = action.expectations[0].path
+                            nominal = action.accesses[0].nominal_path
+                            newline = "\r\n" if self.output_rules.matches(
+                                nominal.relative_to(self.root).parts,
                             ) else "\n"
-                            for path in targets
-                        }
+                            previous = newlines.setdefault(path, newline)
+                            if previous != newline:
+                                raise ValueError(
+                                    "同一实际正文的不同名义入口要求不同换行成果，"
+                                    "无法形成唯一文件成果；请统一名单或入口"
+                                )
                     self.execution_units = build_execution_units(
                         self.plan, self.source_snapshots,
                         self.located_operations, text_newlines=newlines,
@@ -477,6 +679,7 @@ class PatchExecutor:
                         (unit.fixed for unit in self.execution_units if unit.execute),
                         forbidden_roots=(self.root,),
                     )
+                    self._validate_joint_ranges()
                     self._validate_shared_outcomes()
                     if self.projection.units:
                         task_id = uuid.uuid4().hex
@@ -499,7 +702,10 @@ class PatchExecutor:
                     checks.append(make_result_for_global_error(message))
                     self._clear_plan()
             failed = sum(not check.ok for check in checks)
-            success = len(operations) if not failed else 0
+            success = (
+                sum(action.execute for action in self.plan.actions)
+                if not failed and self.plan is not None else 0
+            )
             if failed:
                 self._clear_plan()
             report = format_patch_preview(
@@ -532,9 +738,16 @@ class PatchExecutor:
                 for unit in self.execution_units:
                     if unit.text_file is not None:
                         report += (
-                            f"\n- {unit.text_file.target.relative_to(self.root)}："
+                            f"\n- 名义入口={unit.members[0].payload['path']}；"
+                            f"实际正文={unit.text_file.target}："
                             + "；".join(unit.labels)
                         )
+            if self.scope_report:
+                report += "\n\n" + self.scope_report
+                report += (
+                    "\n跳过范围不读取正文、不参与保护或执行依赖。"
+                    "\n访问依赖与实际工作对象分开；不追加为恢复对象。"
+                )
             self.preview_text = report
             returned = True
             return (
@@ -546,9 +759,94 @@ class PatchExecutor:
             self.located_operations.clear()
             self._observations.clear()
             self._actions.clear()
+            self._scopes.clear()
+            self._scope_decisions.clear()
             if not returned:
                 self._clear_plan()
                 self.preview_text = ""
+
+    def _validate_joint_ranges(self):
+        """裁剪后的名义动作、实际对象、来源与访问依赖联合检查。"""
+        from core.recovery_paths import contains
+
+        retained = tuple(action for action in self.plan.actions if action.execute)
+        for index, left in enumerate(retained):
+            for right in retained[index + 1:]:
+                for left_observed in left.expectations:
+                    for right_observed in right.expectations:
+                        if not overlaps(left_observed.path, right_observed.path):
+                            continue
+                        same_content = (
+                            left.payload["op"] in CONTENT_OPS
+                            and right.payload["op"] in CONTENT_OPS
+                            and identity(left_observed.path) == identity(right_observed.path)
+                        )
+                        if not same_content:
+                            raise ValueError(
+                                "名义入口对应的实际范围冲突："
+                                f"{left.label} / {right.label}；"
+                                f"{left_observed.path} / {right_observed.path}"
+                            )
+
+        effects = tuple(
+            (unit, effect)
+            for unit in self.execution_units if unit.execute
+            for effect in unit.fixed.effects
+        )
+        for unit in self.execution_units:
+            if not unit.execute:
+                continue
+            for source in unit.fixed.reads:
+                for changed_unit, effect in effects:
+                    if overlaps(source.path, effect.before.path):
+                        raise ValueError(
+                            "固定复制来源与工作改变范围冲突："
+                            f"{'; '.join(unit.labels)} / "
+                            f"{'; '.join(changed_unit.labels)}；"
+                            f"{source.path} / {effect.before.path}"
+                        )
+            for action in unit.members:
+                for access in action.accesses:
+                    dependencies = tuple(
+                        definition.entry_path for definition in access.followed_links
+                    ) + tuple(
+                        directory.path for directory in access.directories
+                        if not contains(access.actual_path, directory.path)
+                    )
+                    for dependency in dependencies:
+                        for changed_unit, effect in effects:
+                            # 普通父目录仅依赖其自身身份，不占有整个后代范围。
+                            # 工作覆盖该目录才冲突；修改其下文件不改变目录身份。
+                            # 链接入口还承担解析路径，继续保持双向范围冲突约束。
+                            link_dependency = any(
+                                identity(dependency) == identity(definition.entry_path)
+                                for definition in access.followed_links
+                            )
+                            if (
+                                contains(effect.before.path, dependency)
+                                or link_dependency
+                                and contains(dependency, effect.before.path)
+                            ):
+                                raise ValueError(
+                                    "名义访问依赖与工作改变范围冲突："
+                                    f"{action.label} / {'; '.join(changed_unit.labels)}；"
+                                    f"依赖={dependency}；工作范围={effect.before.path}"
+                                )
+
+    def _recheck_access_dependencies(self):
+        """执行和回滚共用原保留依赖；不追加或重新授权新指向。"""
+        if self.plan is None:
+            raise ValueError("固定访问依赖缺少本任务正式计划")
+        seen = set()
+        for action in self.plan.actions:
+            if not action.execute:
+                continue
+            for access in action.accesses:
+                key = (identity(access.nominal_path), access.follow_final_link)
+                if key in seen:
+                    continue
+                seen.add(key)
+                recheck_scope_accesses((access,))
 
     def _validate_shared_outcomes(self):
         """提前拒绝共享对象互相矛盾的内容和名称承诺，不搜索其他名称。"""
@@ -556,10 +854,7 @@ class PatchExecutor:
         for unit in self.execution_units:
             if not unit.execute:
                 continue
-            content_unit = (
-                unit.text_file is not None
-                or unit.members[0].payload["op"] == "copy_file"
-            )
+            content_unit = unit.text_file is not None
             if not content_unit:
                 continue
             for effect in unit.fixed.effects:
@@ -579,10 +874,7 @@ class PatchExecutor:
         for unit in self.execution_units:
             if not unit.execute:
                 continue
-            content_unit = (
-                unit.text_file is not None
-                or unit.members[0].payload["op"] == "copy_file"
-            )
+            content_unit = unit.text_file is not None
             if not content_unit:
                 for effect in unit.fixed.effects:
                     if any(
@@ -602,6 +894,7 @@ class PatchExecutor:
     def recheck(self):
         """联合业务范围比较；共同状态负责创建目录身份和父链。"""
         checked_root(self.root)
+        self._recheck_access_dependencies()
         self.task_execution.state.recheck_created_directories()
         results = self.results
         self.observation_state.consume_results(results)
@@ -610,6 +903,8 @@ class PatchExecutor:
             if unit is self._active_unit:
                 continue
             for action in unit.members:
+                if action.skip_reason:
+                    continue
                 for observed in action.expectations:
                     key = identity(observed.path)
                     if key in seen:
@@ -624,11 +919,13 @@ class PatchExecutor:
 
     def _publish(
         self, expected, content=None, *, source=None,
-        auxiliary=False, desired_digest=None,
+        auxiliary=False, desired_digest=None, replace_target_name=False,
     ):
         """输入和辅助归属归业务；工作现场及步骤由共同状态拥有。"""
         execution = FixedContentExecution(
             expected, content, source=source, desired_digest=desired_digest,
+            replace_target_name=replace_target_name,
+            preserve_target_mode=not replace_target_name,
         )
         stage = lambda target, phase: self._stage(self.role, target, phase)
         if auxiliary:
@@ -667,14 +964,41 @@ class PatchExecutor:
                     source, prepared_bytes,
                     desired_digest=unit.fixed.effects[0].after.records[0][2],
                 ),)
+            if kind in ("copy_file", "copy_dir") and isinstance(source, LinkPathObservation):
+                target = fixed[1]
+                specification = specification_from_link(source.entry_link)
+                missing = _absent(target)
+                self._stage("工作目标", target.path, "固定链接复制覆盖前来源复核")
+                recheck_link_path(source)
+                self._remove_entry_target(target)
+                self.recheck()
+                recheck_link_path(source)
+                self._stage("工作目标", target.path, "固定原定义链接入口复制")
+                self.task_execution.state.execute_step(
+                    prepare_link_creation(missing, specification),
+                    stage=lambda target, phase:
+                    self._stage("工作目标", target, phase),
+                )
+                actual = self.results[-1].created_link
+                recheck_link_path(source)
+                return (actual,)
             if kind == "copy_file":
-                self._stage("工作目标", fixed[1].path, "固定来源内容复制")
+                target = fixed[1]
+                if isinstance(target, LinkPathObservation):
+                    missing = _absent(target)
+                    self._remove_entry_target(target)
+                    target = missing
+                self._stage("工作目标", target.path, "固定来源指定名称复制")
                 return (self._publish(
-                    fixed[1], source=source,
+                    target, source=source, replace_target_name=True,
                     desired_digest=unit.fixed.effects[0].after.records[0][2],
                 ),)
             if kind == "copy_dir":
                 target = fixed[1]
+                if isinstance(target, LinkPathObservation):
+                    missing = _absent(target)
+                    self._remove_entry_target(target)
+                    target = missing
                 if isinstance(target, TreeObservation):
                     self.task_execution.state.execute_active(
                         prepare_tree_removal(target), execute_tree_removal,
@@ -710,6 +1034,15 @@ class PatchExecutor:
                 if len(move.final_observations) != 2:
                     raise RuntimeError("正常名称核心缺少完整最终两端约束")
                 return move.final_observations
+            if kind in ("delete_file", "delete_dir") and isinstance(source, LinkPathObservation):
+                self.task_execution.state.execute_step(
+                    prepare_link_removal(source),
+                    stage=lambda target, phase:
+                    self._stage("工作目标", target, phase),
+                )
+                result = _absent(source)
+                recheck_file(result)
+                return (result,)
             if kind == "delete_file":
                 self.task_execution.state.execute_step(
                     prepare_file_removal(source),
@@ -747,6 +1080,23 @@ class PatchExecutor:
             raise RuntimeError("活动单元包含未知正式动作")
         finally:
             self._active_unit = None
+
+    def _remove_entry_target(self, before):
+        """复制覆盖只移除原固定入口，不从后来现场取得删除资格。"""
+        self.recheck()
+        state = self.task_execution.state
+        stage = lambda target, phase: self._stage("工作目标", target, phase)
+        if isinstance(before, TreeObservation):
+            state.execute_active(
+                prepare_tree_removal(before), execute_tree_removal,
+                stage=stage, before_step=self.recheck,
+            )
+        elif isinstance(before, LinkPathObservation):
+            state.execute_step(prepare_link_removal(before), stage=stage)
+        elif before.kind == "file":
+            state.execute_step(prepare_file_removal(before), stage=stage)
+        elif before.kind != "absent":
+            raise ValueError("复制覆盖遇到未知固定入口类型")
 
     def _accept_unit_results(self, unit, actuals):
         """只登记共用内核已核验的成果及正常共享状态。"""
@@ -912,8 +1262,10 @@ class PatchExecutor:
         try:
             # 自动恢复建立新观察，消费同一个恢复计划及核心；
             # 不进入人类主动恢复的强制二次备份服务。
+            self._recheck_access_dependencies()
             evidence = read_protection_evidence(self.protection)
             restore_plan = plan_restore(evidence)
+            self._recheck_access_dependencies()
             from core.automatic_rollback_scope import validate_automatic_rollback_scope
             validate_automatic_rollback_scope(
                 self.protection.projection, restore_plan.actions,
@@ -921,6 +1273,7 @@ class PatchExecutor:
             )
             recovery = RecoveryExecution(
                 evidence, restore_plan.actions,
+                recheck_context=self._recheck_access_dependencies,
             )
             result = recovery.execute()
         except (OSError, ValueError) as rollback_error:

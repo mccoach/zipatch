@@ -8,15 +8,16 @@ import tkinter as tk
 from pathlib import Path
 
 from core.path_validation import strip_outer_quotes
-from core.recovery_paths import checked_chain, checked_root
-from services.patch_backup import resolve_backup_base_dir
+from core.recovery_paths import checked_chain
 from panels.base_panel import publication_failure_title
 
 from services.patch_service import (
     apply_backup_restore, invalidate_preview, preview_backup_restore,
 )
 from ui.dialogs import create_managed_text_box
-from ui.message_dialogs import safe_show_error, safe_show_info
+from ui.message_dialogs import (
+    safe_ask_risk_confirm, safe_show_error, safe_show_info,
+)
 from ui.operation_lock import locked_page
 from ui.recovery_selection import select_backup_restore
 from ui.theme import styled_button, styled_frame
@@ -37,25 +38,6 @@ def resolve_restore_source(config):
     target, chain = checked_chain(path, include_observation=True)
     if chain[-1][1] != "directory":
         raise ValueError(f"备份来源不是既有普通任务目录：{target}")
-    return target
-
-
-def resolve_restore_project_root(config):
-    """独立的还原前保护基准，不借用另一模式的定位输入。"""
-    selected = strip_outer_quotes(config["restore_project_root"])
-    if not selected or not Path(selected).is_absolute():
-        raise ValueError("请填写明确的绝对保护项目根目录")
-    return checked_root(selected)
-
-
-def resolve_restore_backup_dir(config):
-    """相对二次备份基于明确保护根，恢复目标仍由原清单决定。"""
-    target = resolve_backup_base_dir(
-        resolve_restore_project_root(config), config["backup_dir"],
-    )
-    target, chain = checked_chain(target, include_observation=True)
-    if chain[-1][1] not in ("absent", "directory"):
-        raise ValueError(f"还原前保护位置不是普通目录或可创建的缺失目录：{target}")
     return target
 
 
@@ -104,7 +86,7 @@ def show_restore_preview(panel, preview):
             body, "正式依据预检（关闭后任务作废）",
             preview.preview_text, height=28, mono=True, readonly=True,
             commits=panel.commits, enable_favorites=False, enable_clear=False,
-            enable_wrap_toggle=False,
+            enable_wrap_toggle=False, enable_copy=True,
         )
         register_popup(dialog, close, exit_blocker=True)
         panel.root.wait_window(dialog)
@@ -115,14 +97,18 @@ def show_restore_preview(panel, preview):
             dialog.destroy()
 
 
-def _prepare_preview(config):
+def _prepare_preview(config, *, select_restore_scope):
     source = resolve_restore_source(config)
-    # 位置解析及检查由正式恢复服务完成一次；
-    # UI只传递已接受设置，不另行推导一次相同位置。
+    protection_directory = strip_outer_quotes(config["backup_dir"])
+    if not protection_directory or not Path(protection_directory).is_absolute():
+        raise ValueError("还原保护目录必须是明确绝对路径")
+    # 用户只选择保护保存位置；材料布局基准自动使用来源上一级。
+    # 内部基准不解释或改变清单目标，也不作为用户授权范围。
     return preview_backup_restore(
         restore_source_dir=str(source),
-        backup_dir=config["backup_dir"],
-        backup_project_root=strip_outer_quotes(config["restore_project_root"]),
+        backup_dir=protection_directory,
+        backup_project_root=str(source.parent),
+        select_restore_scope=select_restore_scope,
     )
 
 
@@ -148,7 +134,14 @@ def run_backup_restore(panel, config, *, execute):
                 panel.set_status("正在预检正式备份...")
                 panel.log("用户启动：备份恢复并执行" if execute else "用户启动：备份恢复独立预检")
                 panel.commits.metrics["business_starts"] += 1
-                preview = _prepare_preview(config)
+                from ui.restore_scope import make_recovery_selector
+
+                preview = _prepare_preview(
+                    config,
+                    select_restore_scope=make_recovery_selector(
+                        panel.root, panel.commits,
+                    ),
+                )
                 if not execute:
                     show_restore_preview(panel, preview)
                     panel.record_backup_restore_result(
@@ -197,7 +190,10 @@ def run_backup_restore(panel, config, *, execute):
                 and not config["keep_restore_source_path"]
             ):
                 updates["restore_source_dir"] = ""
-            outcome = "全部对象原状态恢复完成"
+            outcome = (
+                "全部对象原状态恢复完成" if result.complete_original_state else
+                "所选对象原状态恢复完成，本次不是整份备份全部恢复"
+            )
             saved = panel.record_backup_restore_result(
                 preview.preview_text + "\n\n" + result.log_text,
                 updates, outcome,

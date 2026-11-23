@@ -32,6 +32,11 @@ from core.file_observation import (
     observe_tree, recheck_file, recheck_tree,
 )
 from core.recovery_paths import checked_chain
+from core.link_paths import (
+    LinkPathObservation, LinkSpecification, inspect_link_path,
+    link_definition_digest, recheck_link_path,
+    specification_from_link, validate_link_specification,
+)
 
 
 @dataclass(frozen=True, init=False)
@@ -39,8 +44,10 @@ class PreparedFilesystemChange:
     """正式准备过程拥有固定前提；生命周期只表达执行资格。"""
 
     kind: str
-    expected: FileObservation | TreeObservation
+    expected: FileObservation | TreeObservation | LinkPathObservation
     _lifecycle: str
+    specification: LinkSpecification | None
+    creation_path: LinkPathObservation | None
 
     def __init__(self, *arguments, **keywords):
         raise TypeError("文件系统步骤必须通过正式准备过程创建")
@@ -57,6 +64,8 @@ class FilesystemChangeResult:
     phase: str
     created_directory: DirectoryObservation | None = None
     error: OSError | ValueError | None = None
+    # 仅正常创建并核验后交付；失败现场不能补认本次所有权。
+    created_link: LinkPathObservation | None = None
 
     @property
     def succeeded(self):
@@ -91,6 +100,8 @@ def _new_change(kind, expected):
     object.__setattr__(change, "kind", kind)
     object.__setattr__(change, "expected", expected)
     object.__setattr__(change, "_lifecycle", "prepared")
+    object.__setattr__(change, "specification", None)
+    object.__setattr__(change, "creation_path", None)
     return change
 
 
@@ -127,6 +138,160 @@ def prepare_file_removal(expected):
     return _new_change("remove_file", expected)
 
 
+def prepare_link_removal(expected):
+    """只授权移除固定末级链接入口，不取得直接目标的改变资格。
+
+    观察不跟随末级链接，因此失效链接也可作为入口处理。
+    所属业务须在预演完成入口授权、原定义保护及失败恢复安排。
+    """
+    if not isinstance(expected, LinkPathObservation):
+        raise TypeError("链接入口移除必须消费LinkPathObservation")
+    _validate_path(expected.actual_path)
+    if (
+        expected.follow_final_link
+        or expected.entry_link is None
+        or expected.kind not in (
+            "file_symlink", "directory_symlink", "junction",
+        )
+        or expected.entry_link.entry_path != expected.actual_path
+        or expected.entry_link.object_identity != expected.object_identity
+    ):
+        raise ValueError("链接入口移除缺少固定且不跟随的末级链接事实")
+    return _new_change("remove_link", expected)
+
+
+def prepare_link_creation(expected, specification):
+    """固定不存在入口及原定义，正常准备不创建链接或查询其目标。
+
+    本原子步骤要求实际父目录已经存在；必要父目录由所属固定任务
+    先行组织。它不创建未计划父目录，也不覆盖普通对象或失效链接。
+    调用方须在预演确定定义、作用范围和恢复政策。
+    """
+    prepare_directory_creation(expected)
+    if expected.access is not None:
+        raise ValueError(
+            "链接入口创建必须使用实际位置的不存在观察；"
+            "名义访问依赖由所属任务单独保留并复核"
+        )
+    validate_link_specification(specification, expected.path)
+    recheck_file(expected)
+    _check_creation_parent(expected.path)
+    observed_path = inspect_link_path(
+        expected.path, follow_final_link=False,
+    )
+    if (
+        observed_path.kind != "absent"
+        or observed_path.actual_path != expected.path
+        or observed_path.has_links
+        or observed_path.first_missing != expected.path
+    ):
+        raise ValueError("链接创建位置或必要父目录偏离固定不存在前提")
+    change = _new_change("create_link", expected)
+    object.__setattr__(change, "specification", specification)
+    object.__setattr__(change, "creation_path", observed_path)
+    return change
+
+
+def _create_junction_entry(target, direct_target, raw_target):
+    """原生设置目录联接；失败保留实际残余，不切换CMD或自动清理。
+
+    mkdir与重解析点设置是两个调用，不能声称它们构成原子事务。
+    所属正式步骤在进入本函数前记录改变已发起。
+    """
+    import ctypes
+    import struct
+    from ctypes import wintypes
+
+    if os.name != "nt":
+        raise OSError("目录联接创建只支持Windows")
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    device_control = kernel.DeviceIoControl
+    device_control.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+    )
+    device_control.restype = wintypes.BOOL
+    close_handle = kernel.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    # 替代名称消费保存的实际原定义，不用解析后的直接位置重造定义。
+    # readlink的Win32扩展命名空间只转换为原生接口所需NT表示；
+    # 保存值及正式成果比较仍使用完整raw_target，不删除前缀、
+    # 折叠导航、改变大小写或放宽比较。PrintName不作为定义权威。
+    display = str(direct_target)
+    if raw_target.startswith("\\\\?\\"):
+        substitute = "\\??\\" + raw_target[len("\\\\?\\"):]
+    elif raw_target.startswith("\\??\\"):
+        substitute = raw_target
+    elif raw_target.startswith("\\\\"):
+        substitute = "\\??\\UNC\\" + raw_target[2:]
+    else:
+        substitute = "\\??\\" + raw_target
+    substitute_bytes = substitute.encode("utf-16-le")
+    display_bytes = display.encode("utf-16-le")
+    path_buffer = substitute_bytes + b"\x00\x00" + display_bytes + b"\x00\x00"
+    mount_header_size = 8
+    reparse_data_length = mount_header_size + len(path_buffer)
+    maximum_reparse_bytes = 16 * 1024
+    reparse_header_size = 8
+    if (
+        reparse_data_length + reparse_header_size > maximum_reparse_bytes
+        or len(substitute_bytes) > 65535
+        or len(display_bytes) > 65535
+    ):
+        raise ValueError("目录联接定义超过Windows重解析数据长度限制")
+    raw = struct.pack(
+        "<IHHHHHH",
+        0xA0000003, reparse_data_length, 0,
+        0, len(substitute_bytes),
+        len(substitute_bytes) + 2, len(display_bytes),
+    ) + path_buffer
+    buffer = ctypes.create_string_buffer(raw, len(raw))
+
+    target.mkdir(exist_ok=False)
+    generic_write = 0x40000000
+    share_read_write_delete = 0x7
+    open_existing = 3
+    open_reparse_with_backup_semantics = 0x00200000 | 0x02000000
+    handle = create_file(
+        str(target), generic_write, share_read_write_delete, None,
+        open_existing, open_reparse_with_backup_semantics, None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    call_error = None
+    try:
+        returned = wintypes.DWORD()
+        fsctl_set_reparse_point = 0x000900A4
+        if not device_control(
+            handle, fsctl_set_reparse_point, buffer, len(raw),
+            None, 0, ctypes.byref(returned), None,
+        ):
+            call_error = ctypes.get_last_error()
+    finally:
+        if not close_handle(handle):
+            close_error = ctypes.get_last_error()
+            if call_error is not None:
+                raise OSError(
+                    f"目录联接设置失败，Windows错误码={call_error}；"
+                    f"句柄关闭也失败，Windows错误码={close_error}"
+                )
+            raise ctypes.WinError(close_error)
+    if call_error is not None:
+        raise ctypes.WinError(call_error)
+
+
 def prepare_empty_directory_removal(expected):
     """完整空树观察只授权根自身rmdir，不授权后代删除。"""
     if not isinstance(expected, TreeObservation):
@@ -137,6 +302,7 @@ def prepare_empty_directory_removal(expected):
         or expected.directories[0][0] != ""
         or expected.directories[0][1].path != expected.path
         or expected.files
+        or expected.links
         or expected.content_records != (("", "directory", ""),)
         or expected.file_times
     ):
@@ -179,12 +345,52 @@ def execute_filesystem_change(change):
     object.__setattr__(change, "_lifecycle", "attempted")
 
     expected = change.expected
-    target = expected.path
+    target = (
+        expected.actual_path
+        if isinstance(expected, LinkPathObservation) else expected.path
+    )
     phase = "固定前提复核"
     attempted = False
     created_directory = None
+    created_link = None
     try:
-        if change.kind == "create_directory":
+        if change.kind == "create_link":
+            recheck_file(expected)
+            recheck_link_path(change.creation_path)
+            direct_target = validate_link_specification(
+                change.specification, target,
+            )
+            phase = "链接创建实际父目录复核"
+            _check_creation_parent(target)
+            phase = "固定链接入口创建"
+            attempted = True
+            specification = change.specification
+            if specification.kind == "junction":
+                _create_junction_entry(
+                    target, direct_target, specification.raw_target,
+                )
+            else:
+                os.symlink(
+                    specification.raw_target, target,
+                    target_is_directory=(
+                        specification.kind == "directory_symlink"
+                    ),
+                )
+            phase = "链接创建结果定义及身份核验"
+            actual = inspect_link_path(target, follow_final_link=False)
+            if (
+                actual.actual_path != target
+                or actual.followed_links
+                or actual.entry_link is None
+                or specification_from_link(actual.entry_link) != specification
+                or actual.entry_link.direct_target != direct_target
+            ):
+                raise OSError(
+                    "链接创建结果没有准确保持固定原定义；"
+                    "保留现场，不自动修改定义或清理"
+                )
+            created_link = actual
+        elif change.kind == "create_directory":
             recheck_file(expected)
             phase = "必要父目录复核"
             _check_creation_parent(target)
@@ -196,6 +402,18 @@ def execute_filesystem_change(change):
             if created.content_records != (("", "directory", ""),):
                 raise OSError(f"新建目录结果不再是空普通目录：{target}")
             created_directory = created.directories[0][1]
+        elif change.kind == "remove_link":
+            recheck_link_path(expected)
+            phase = "链接入口实际父目录复核"
+            _check_creation_parent(target)
+            phase = "指定链接入口名称移除"
+            attempted = True
+            if expected.kind == "file_symlink":
+                target.unlink()
+            else:
+                target.rmdir()
+            phase = "链接入口移除结果核验"
+            _confirm_absent(target)
         elif change.kind == "remove_file":
             recheck_file(expected)
             phase = "指定文件名称移除"
@@ -222,7 +440,7 @@ def execute_filesystem_change(change):
     object.__setattr__(change, "_lifecycle", "completed")
     return FilesystemChangeResult(
         target, change.kind, True, True, "completed",
-        created_directory,
+        created_directory, created_link=created_link,
     )
 
 
@@ -294,8 +512,14 @@ def _validate_tree_observation(expected):
     if not isinstance(expected, TreeObservation):
         raise TypeError("完整树移除必须消费TreeObservation")
     _validate_path(expected.path)
+    if any(
+        type(members) is not tuple
+        for members in (expected.directories, expected.files, expected.links)
+    ):
+        raise TypeError("完整树成员必须是不可变元组")
     directories = {}
     files = {}
+    links = {}
     records = []
 
     for relative, directory in expected.directories:
@@ -336,7 +560,35 @@ def _validate_tree_observation(expected):
         files[relative] = observed
         records.append((relative, "file", observed.digest))
 
-    for relative in (*directories, *files):
+    for relative, observed in expected.links:
+        if (
+            type(relative) is not str
+            or not relative
+            or relative in directories
+            or relative in files
+            or relative in links
+            or not isinstance(observed, LinkPathObservation)
+        ):
+            raise ValueError("完整树链接位置非法、重复或缺少正式观察")
+        _validate_tree_member_path(
+            expected.path, relative, observed.actual_path,
+        )
+        prepare_link_removal(observed)
+        if (
+            observed.nominal_path != observed.actual_path
+            or observed.followed_links
+        ):
+            raise ValueError("结构树链接成员不得通过其他目录链接定位")
+        links[relative] = observed
+        records.append((
+            relative, observed.kind,
+            link_definition_digest(observed.entry_link),
+        ))
+
+    positions = (*directories, *files, *links)
+    if len({relative.casefold() for relative in positions}) != len(positions):
+        raise ValueError("完整树包含Windows同名成员")
+    for relative in positions:
         if relative:
             parent = Path(relative).parent.as_posix()
             parent = "" if parent == "." else parent
@@ -387,15 +639,19 @@ def prepare_tree_removal(expected):
     """完整观察明确作为移除范围；业务授权、保护和started归协调层。
 
     准备不观察磁盘、不创建目录、不删除内容。
-    文件按UTF-8位置顺序移除，再自底向上移除空目录。
+    普通文件名称和链接入口按UTF-8位置顺序移除，
+    再自底向上移除空普通目录。目录链接目标不属于移除树。
     """
     _validate_tree_observation(expected)
-    file_steps = tuple(
-        ("remove_file", relative, observed.path)
-        for relative, observed in sorted(
-            expected.files, key=lambda member: member[0].encode("utf-8"),
-        )
-    )
+    file_steps = tuple(sorted(
+        (
+            *(("remove_file", relative, observed.path)
+              for relative, observed in expected.files),
+            *(("remove_link", relative, observed.actual_path)
+              for relative, observed in expected.links),
+        ),
+        key=lambda member: member[1].encode("utf-8"),
+    ))
     directory_steps = tuple(
         ("remove_empty_directory", relative, directory.path)
         for relative, directory in sorted(
@@ -465,6 +721,10 @@ def _remaining_removal_tree(removal):
             member for member in expected.files
             if member[0] not in removed
         ),
+        links=tuple(
+            member for member in expected.links
+            if member[0] not in removed
+        ),
         content_records=records,
         integrity=content_integrity("directory", records) if records else None,
         file_times=tuple(
@@ -492,6 +752,11 @@ def _prepare_remaining_removal_step(remaining, kind, relative):
     if kind == "remove_file":
         observed = dict(remaining.files)[relative]
         return prepare_file_removal(observed)
+    if kind == "remove_link":
+        observed = dict(remaining.links)[relative]
+        return prepare_link_removal(observed)
+    if kind != "remove_empty_directory":
+        raise ValueError("剩余树步骤包含未知固定动作")
 
     directory = dict(remaining.directories)[relative]
     prefix = relative + "/" if relative else ""
@@ -797,6 +1062,13 @@ def prepare_tree_copy(
     不追认来源后来属性，不改变来源一致性检查。
     """
     _validate_tree_observation(source)
+    # 链接是结构叶子；目标位置必须能解释同一保存原定义。
+    # 不查询或展开引用目标，也不把相对定义改写为绝对定义。
+    for relative, observed in source.links:
+        validate_link_specification(
+            specification_from_link(observed.entry_link),
+            expected.path / relative,
+        )
     prepare_directory_creation(expected)
     if overlaps(source.path, expected.path):
         raise ValueError("复制来源树与目标不得相同或父子重叠")
@@ -869,7 +1141,7 @@ def _recheck_tree_copy_source(copy):
 
 def _tree_copy_target_constraints(copy):
     """目标状态只由实际成功前缀及当前完整自有暂存投影。"""
-    directories, files, modes, times = {}, {}, {}, {}
+    directories, files, modes, times, links = {}, {}, {}, {}, {}
     source_directories = dict(copy.source.directories)
     source_files = dict(copy.source.files)
     target_times = dict(copy.file_times)
@@ -888,6 +1160,20 @@ def _tree_copy_target_constraints(copy):
             directory = receipt.change.created_directory
             directories[relative] = receipt.object_identity
             modes[relative] = stat.S_IMODE(directory.attributes.st_mode)
+        elif receipt.kind == "create_link":
+            actual = receipt.change.created_link
+            original = dict(copy.source.links).get(relative)
+            if (
+                not isinstance(actual, LinkPathObservation)
+                or original is None
+                or actual.actual_path != receipt.target
+                or actual.followed_links
+                or actual.object_identity != receipt.object_identity
+                or specification_from_link(actual.entry_link)
+                != specification_from_link(original.entry_link)
+            ):
+                raise ValueError("复制链接结果缺少对应身份或保存原定义")
+            links[relative] = actual
         elif receipt.kind == "set_directory_attributes":
             source = source_directories[relative]
             modes[relative] = stat.S_IMODE(source.attributes.st_mode)
@@ -898,14 +1184,14 @@ def _tree_copy_target_constraints(copy):
     artifact = copy._artifact
     if artifact is not None and artifact._lifecycle == "prepared":
         relative = artifact.path.relative_to(copy.expected.path).as_posix()
-        if relative in files or relative in directories:
+        if relative in files or relative in directories or relative in links:
             raise ValueError("复制暂存位置与正式成功前缀冲突")
         files[relative] = (
             ObjectIdentity(*artifact.identity),
             artifact.digest, artifact.options.mtime_ns,
             artifact.options.file_mode,
         )
-    return directories, files, modes, times
+    return directories, files, modes, times, links
 
 
 def _recheck_tree_copy_target(copy):
@@ -914,16 +1200,24 @@ def _recheck_tree_copy_target(copy):
     完整自有暂存明确参与约束，不能被当作外部新增对象，
     也不能按文件名模式忽略其他临时文件。
     """
-    directories, files, modes, times = _tree_copy_target_constraints(copy)
+    directories, files, modes, times, links = _tree_copy_target_constraints(copy)
     if not directories:
         recheck_file(copy.expected)
         return None
-    current = observe_tree(copy.expected.path, include_mtime=True)
+    current = observe_tree(
+        copy.expected.path, include_mtime=True, include_links=True,
+    )
     if (
         set(dict(current.directories)) != set(directories)
         or set(dict(current.files)) != set(files)
+        or set(dict(current.links)) != set(links)
     ):
         raise ValueError("复制目标结构偏离实际成功前缀")
+    for relative, observed in current.links:
+        if observed != links[relative]:
+            raise ValueError(
+                f"复制链接入口身份、原定义或父目录前提变化：{observed.path}"
+            )
     for relative, directory in current.directories:
         if (
             directory.object_identity != directories[relative]
@@ -1045,6 +1339,33 @@ def execute_tree_copy(copy, *, recheck_context=None):
             _append_tree_copy_result(copy, result, prepared_identity)
             object.__setattr__(copy, "_artifact", None)
             object.__setattr__(copy, "_phase", "文件发布后来源及成功前缀复核")
+            check_source_context()
+            _recheck_tree_copy_target(copy)
+
+        for relative, source_link in copy.source.links:
+            target = copy.expected.path / relative
+            object.__setattr__(copy, "_current", target)
+            object.__setattr__(copy, "_phase", "链接准备前来源及成功前缀复核")
+            check_source_context()
+            _recheck_tree_copy_target(copy)
+            expected = observe_file(target)
+            if expected.kind != "absent":
+                raise ValueError(f"固定复制链接位置不再不存在：{target}")
+            specification = specification_from_link(source_link.entry_link)
+            step = prepare_link_creation(expected, specification)
+            object.__setattr__(copy, "_phase", "链接创建前来源及成功前缀复核")
+            check_source_context()
+            _recheck_tree_copy_target(copy)
+            object.__setattr__(copy, "_phase", "固定链接叶子创建")
+            try:
+                result = execute_filesystem_change(step)
+            except FilesystemChangeError as error:
+                _append_tree_copy_result(copy, error.result)
+                raise
+            _append_tree_copy_result(
+                copy, result, result.created_link.object_identity,
+            )
+            object.__setattr__(copy, "_phase", "链接创建后成功前缀复核")
             check_source_context()
             _recheck_tree_copy_target(copy)
 

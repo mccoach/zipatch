@@ -32,7 +32,7 @@ _UNIT_ID = re.compile(r"u[0-9]{6,}")
 _FACT_STATES = frozenset(("prepared", "started", "completed", "uncertain"))
 _CHANGE_KINDS = frozenset((
     "content", "create_directory", "remove_file", "remove_empty_directory",
-    "move_name", "set_directory_attributes",
+    "move_name", "set_directory_attributes", "create_link", "remove_link",
 ))
 _CONTENT_PHASES = frozenset((
     "completed",
@@ -121,26 +121,77 @@ def _strings(value, description, *, nonempty=False):
 
 
 def _state_value(state):
-    return {
+    validate_content_state(state)
+    value = {
         "kind": state.kind,
         "records": _plain(state.records),
         "integrity": _plain(state.integrity),
     }
+    if state.link_definitions:
+        value["link_definitions"] = [
+            {
+                "position": relative,
+                "kind": specification.kind,
+                "raw_target": specification.raw_target,
+                "relative": specification.relative,
+            }
+            for relative, specification in state.link_definitions
+        ]
+    return value
 
 
-def _validate_state(value):
-    _fields(value, ("kind", "records", "integrity"), "内容状态")
-    if type(value["records"]) is not list or any(
-        type(record) is not list for record in value["records"]
+def content_state_from_value(value, *, target=None):
+    """严格状态到领域对象；定义字段由实际链接记录决定，不能选填。
+
+    普通状态的字段集合保持原契约；含链接状态必须提供完整定义。
+    不探测旧布局，不从摘要、材料正文或现场补猜定义。
+    """
+    from core.link_paths import LinkSpecification
+
+    value = _plain(value)
+    if type(value) is not dict or "records" not in value:
+        raise ValueError("内容状态缺少准确字段")
+    records = value["records"]
+    if type(records) is not list or any(
+        type(record) is not list or len(record) != 3
+        for record in records
     ):
-        raise ValueError("内容记录必须是数组")
+        raise ValueError("内容记录必须是三元数组")
+    has_links = any(
+        record[1] in ("file_symlink", "directory_symlink", "junction")
+        for record in records
+    )
+    names = ("kind", "records", "integrity")
+    if has_links:
+        names = (*names, "link_definitions")
+    _fields(value, names, "内容状态")
     if value["integrity"] is not None:
         _fields(value["integrity"], ("algorithm", "digest"), "内容完整性")
+    definitions = []
+    if has_links:
+        members = value["link_definitions"]
+        if type(members) is not list or not members:
+            raise ValueError("链接状态必须具有完整定义数组")
+        for member in members:
+            _fields(member, (
+                "position", "kind", "raw_target", "relative",
+            ), "链接定义")
+            definitions.append((
+                member["position"],
+                LinkSpecification(
+                    member["kind"], member["raw_target"], member["relative"],
+                ),
+            ))
     state = ContentState(
-        value["kind"], tuple(tuple(record) for record in value["records"]),
-        value["integrity"],
+        value["kind"], tuple(tuple(record) for record in records),
+        value["integrity"], tuple(definitions),
     )
-    validate_content_state(state)
+    validate_content_state(state, target=target)
+    return state
+
+
+def _validate_state(value, *, target=None):
+    return content_state_from_value(value, target=target)
 
 
 def _positions(target, state):
@@ -253,7 +304,8 @@ def _validate_changes(
                 change["source"] is not None
                 or key not in desired
                 or desired[key][1] != "file"
-                or current.get(key, (None, "absent", ""))[1] == "directory"
+                or current.get(key, (None, "absent", ""))[1]
+                not in ("absent", "file")
             ):
                 raise ValueError("内容步骤不对应当前可发布的具体预期文件")
             _validate_content(change)
@@ -310,6 +362,29 @@ def _validate_changes(
                         or actual_kind != "absent" or key in created
                     ):
                         raise ValueError("目录创建越出固定计划、目标已存在或重复登记")
+                elif kind == "create_link":
+                    if (
+                        actual_kind != "absent"
+                        or key not in desired
+                        or desired[key][1] not in (
+                            "file_symlink", "directory_symlink", "junction",
+                        )
+                    ):
+                        raise ValueError("链接创建不对应固定缺失入口及具体定义")
+                    required_parents = {
+                        parent for parent in parent_keys
+                        if contains(Path(parent), target)
+                    }
+                    if not required_parents.issubset(created):
+                        raise ValueError("链接创建缺少必要父目录正常创建事实")
+                elif kind == "remove_link":
+                    if (
+                        key not in initial
+                        or actual_kind not in (
+                            "file_symlink", "directory_symlink", "junction",
+                        )
+                    ):
+                        raise ValueError("链接入口移除越出最初具体范围")
                 elif kind == "set_directory_attributes":
                     if key not in tree_keys or actual_kind != "directory":
                         raise ValueError("目录属性不对应已存在成果目录")
@@ -329,12 +404,12 @@ def _validate_changes(
         if failed:
             continue
         changed_positions.add(key)
-        if kind == "content":
+        if kind in ("content", "create_link"):
             current[key] = desired[key]
         elif kind == "create_directory":
             current[key] = (target, "directory", "")
             created[key] = target
-        elif kind in ("remove_file", "remove_empty_directory"):
+        elif kind in ("remove_file", "remove_empty_directory", "remove_link"):
             del current[key]
         elif kind == "move_name":
             for position in tuple(current):
@@ -402,7 +477,7 @@ def validate_document(value):
         if any(overlaps(target, root) for root in roots):
             raise ValueError("原状态对象重复或父子重叠")
         roots.append(target)
-        _validate_state(member["original"])
+        _validate_state(member["original"], target=target)
         material = member["material"]
         if member["original"]["kind"] == "absent":
             if material is not None:
@@ -481,7 +556,7 @@ def validate_document(value):
             if not matching:
                 raise ValueError("具体预期越出关联保护对象")
             related.update(matching)
-            _validate_state(expected["state"])
+            _validate_state(expected["state"], target=target)
             desired.update(_positions(target, expected["state"]))
             if expected["state"]["kind"] != "absent":
                 generated.append(target)

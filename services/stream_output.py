@@ -97,7 +97,7 @@ class StreamOutputPostError(OSError):
         super().__init__(message)
 
 
-def publish_stream_output(expected, chunks):
+def publish_stream_output(expected, chunks, *, recheck_context=None):
     """来源名单形成后调用；完整生成并关闭后才发布。
 
     生成、编码、安全拒绝及程序缺陷保留原异常类型和上下文。
@@ -108,6 +108,10 @@ def publish_stream_output(expected, chunks):
     if expected.kind not in ("absent", "file"):
         raise ValueError("成果输出目标必须是不存在或普通文件")
 
+    if recheck_context is not None and not callable(recheck_context):
+        raise TypeError("成果所属来源复核必须是可调用对象")
+    if recheck_context is not None:
+        recheck_context()
     directories = []
     directory_state = DirectoryCreationState()
     try:
@@ -126,6 +130,8 @@ def publish_stream_output(expected, chunks):
     try:
         artifact = prepare_stream_content_artifact(expected, chunks)
         directory_state.recheck_parents(expected)
+        if recheck_context is not None:
+            recheck_context()
         try:
             publication = publish_content(artifact)
         except ContentPublicationError as error:

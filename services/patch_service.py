@@ -15,6 +15,8 @@ def preview_patch(
     allow_multi_replace_exact=False,
     backup_dir="99_归档/AI文件修改备份",
     normalize_text_newlines=True,
+    authorize_patch_scope=None, authorize_patch_enumeration=None,
+    select_patch_enumeration=None,
 ):
     if not patch_text.strip():
         raise ValueError("请先粘贴 Zipatch V3 修改包")
@@ -25,6 +27,9 @@ def preview_patch(
         backup_dir=backup_dir,
         patch_text=patch_text,
         normalize_text_newlines=normalize_text_newlines,
+        authorize_patch_scope=authorize_patch_scope,
+        authorize_patch_enumeration=authorize_patch_enumeration,
+        select_patch_enumeration=select_patch_enumeration,
     )
     report, checked_patch, errors, success, failed, global_errors, checks = executor.preview(patch)
     return PatchPreviewResult(
@@ -55,12 +60,15 @@ def apply_patch(preview):
 
 def preview_backup_restore(
     restore_source_dir, backup_dir="", *,
-    backup_project_root="",
+    backup_project_root="", authorize_restore_scope=None,
+    select_restore_scope=None,
 ):
     executor = BackupRestoreExecutor(
         read_recovery_evidence(restore_source_dir),
         backup_dir=backup_dir,
         backup_project_root=backup_project_root,
+        authorize_restore_scope=authorize_restore_scope,
+        select_restore_scope=select_restore_scope,
     )
     return BackupRestorePreviewResult(
         preview_text=executor.preview_text,

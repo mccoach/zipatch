@@ -20,8 +20,12 @@ from core.recovery_paths import checked_chain, identity
 
 def fixed_directory_observations(observed, *, include_target=False):
     """只投影固定原链中的缺失位置；不查询磁盘或创建目录。"""
-    if not isinstance(observed, (FileObservation, TreeObservation)):
-        raise TypeError("必要目录计划必须消费正式文件或完整树观察")
+    from core.link_paths import LinkPathObservation
+
+    if not isinstance(observed, (
+        FileObservation, TreeObservation, LinkPathObservation,
+    )):
+        raise TypeError("必要目录计划必须消费正式文件、结构入口或完整树观察")
     if type(include_target) is not bool:
         raise TypeError("包含目标目录开关必须是布尔值")
     chain = observed.chain if include_target else observed.chain[:-1]

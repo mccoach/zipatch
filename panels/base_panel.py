@@ -51,6 +51,10 @@ def publication_failure_title(error):
                 return "修改包文件已替换，后续核验或确认失败"
         return "修改包执行流程未完整结束"
     if isinstance(error, BackupRestoreExecutionError):
+        if error.executor.rollback_status == "completed":
+            return "恢复失败，已回滚到还原前状态"
+        if error.executor.rollback_status == "failed":
+            return "恢复失败，回滚未完成，备份保留"
         if error.executor.execution.backup_cleanup_report:
             return "还原前备份失败，未执行恢复"
         if error.role == "最终核验":
@@ -101,13 +105,10 @@ def publication_failure_title(error):
                 return "拆分辅助日志替换结果未知"
             return "拆分辅助日志已替换，后续核验或确认失败"
 
-        # 文件完成来自所属协调的最终核验事实；
-        # 正常步骤前缀、正文确认和日志成功都不是整任务成功证明。
-        if (
-            error.task.plan.files
-            and len(result.completed_files) == len(error.task.plan.files)
-        ):
-            return "拆分文件已完成，后续流程失败"
+        # 整体工作完成由共同任务的结束关口拥有；
+        # 普通文件数量不能证明链接及目录要求已经完成。
+        if result.work_completed:
+            return "拆分工作已完成，后续流程失败"
 
         if result.results:
             current = result.results[-1]
@@ -124,6 +125,7 @@ def publication_failure_title(error):
                     if current.replacement == "unknown":
                         return "拆分文件替换结果未知"
                     return "拆分文件已替换，后续核验或确认失败"
+
                 return "拆分目录步骤未完整结束"
         return "拆分流程未完整结束"
     if isinstance(error, StreamOutputError):

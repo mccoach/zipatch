@@ -24,6 +24,9 @@ class ContentState:
     kind: str
     records: tuple
     integrity: object
+    # 相对入口位置及完整可重建定义；不包含目标正文或访问授权。
+    # records中的链接摘要只从这些定义派生，不能代替定义保存。
+    link_definitions: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -123,31 +126,49 @@ def _valid_digest(digest):
     )
 
 
-def validate_content_state(state):
+def validate_content_state(state, *, target=None):
+    """纯结构核验；提供目标时同时检查定义在该位置的解释。
+
+    没有具体位置时只核验字段、对应关系及摘要；
+    不能把这种核验解释为可重建或可执行资格。
+    """
+    from core.link_paths import (
+        LinkSpecification, link_specification_digest,
+        validate_link_specification,
+    )
+
+    link_kinds = ("file_symlink", "directory_symlink", "junction")
     if not isinstance(state, ContentState):
         raise TypeError("内容状态必须是ContentState")
     if type(state.kind) is not str or state.kind not in (
-        "absent", "file", "directory",
+        "absent", "file", "directory", *link_kinds,
     ):
         raise ValueError("内容状态类型非法")
     if type(state.records) is not tuple:
         raise TypeError("内容记录必须是不可变元组")
+    if type(state.link_definitions) is not tuple:
+        raise TypeError("链接定义必须是不可变元组")
+    if target is not None:
+        validate_absolute_path(target)
     if state.kind == "absent":
-        if state.records or state.integrity is not None:
-            raise ValueError("不存在状态不得携带内容")
+        if state.records or state.integrity is not None or state.link_definitions:
+            raise ValueError("不存在状态不得携带内容或链接定义")
         return
 
     known = {}
+    link_records = {}
     previous = None
     for record in state.records:
         if type(record) is not tuple or len(record) != 3:
             raise ValueError("内容记录非法")
         relative, kind, digest = record
         validate_relative_position(relative)
-        if type(kind) is not str or kind not in ("file", "directory"):
+        if type(kind) is not str or kind not in (
+            "file", "directory", *link_kinds,
+        ):
             raise ValueError("内容成员类型非法")
         if (
-            kind == "file" and not _valid_digest(digest)
+            kind != "directory" and not _valid_digest(digest)
             or kind == "directory" and digest != ""
         ):
             raise ValueError("内容成员摘要非法")
@@ -163,12 +184,45 @@ def validate_content_state(state):
         ) != "directory":
             raise ValueError("内容记录缺少普通父目录")
         known[key] = kind
+        if kind in link_kinds:
+            link_records[relative] = (kind, digest)
+
+    definitions = {}
+    previous = None
+    for member in state.link_definitions:
+        if type(member) is not tuple or len(member) != 2:
+            raise ValueError("链接定义成员必须是位置和定义二元组")
+        relative, specification = member
+        validate_relative_position(relative)
+        position = relative.encode("utf-8")
+        if previous is not None and position <= previous:
+            raise ValueError("链接定义位置必须唯一且按UTF-8排序")
+        previous = position
+        if not isinstance(specification, LinkSpecification):
+            raise TypeError("内容状态缺少正式LinkSpecification")
+        expected = link_records.get(relative)
+        if expected is None or expected != (
+            specification.kind, link_specification_digest(specification),
+        ):
+            raise ValueError("链接定义与对应结构记录、类型或摘要矛盾")
+        if target is not None:
+            validate_link_specification(specification, target / relative)
+        definitions[relative] = specification
+    if set(definitions) != set(link_records):
+        raise ValueError("结构记录中的链接入口没有完整定义")
 
     if not state.records or state.records[0][:2] != ("", state.kind):
         raise ValueError("内容状态缺少匹配根")
-    if state.kind == "file" and len(state.records) != 1:
-        raise ValueError("文件状态不得携带后代")
-    if state.integrity != content_integrity(state.kind, state.records):
+    if state.kind != "directory" and len(state.records) != 1:
+        raise ValueError("文件或链接入口状态不得携带后代")
+    if state.kind in link_kinds:
+        required_integrity = {
+            "algorithm": "sha256-link-definition-json-v1",
+            "digest": state.records[0][2],
+        }
+    else:
+        required_integrity = content_integrity(state.kind, state.records)
+    if state.integrity != required_integrity:
         raise ValueError("内容记录与完整性矛盾")
 
 
@@ -263,13 +317,39 @@ def _file_state(observed):
 
 def observation_state(observed):
     """完整输入校验和状态形成一次；结果供保护及清单直接复用。"""
+    from core.link_paths import (
+        LinkPathObservation, specification_from_link,
+    )
+
     if isinstance(observed, FileObservation):
         return _file_state(observed)
+    if isinstance(observed, LinkPathObservation):
+        if (
+            observed.follow_final_link
+            or observed.entry_link is None
+            or observed.entry_link.entry_path != observed.actual_path
+            or observed.entry_link.object_identity != observed.object_identity
+            or observed.entry_link.kind != observed.kind
+        ):
+            raise ValueError("入口结构状态要求不跟随末级链接的固定事实")
+        validate_absolute_path(observed.actual_path)
+        # 恢复结构入口只使用普通父链；经过目录链接的名义入口
+        # 不能借状态形成取得实际位置的备份、移除或重建资格。
+        _validate_chain(observed, observed.kind)
+        specification = specification_from_link(observed.entry_link)
+        state = state_from_link_specification(
+            specification, target=observed.actual_path,
+        )
+        # 入口时间与目标普通文件正式时间不是同一事实。
+        return state, ()
     if not isinstance(observed, TreeObservation):
-        raise TypeError("最初状态必须是正式文件或完整树观察")
+        raise TypeError("最初状态必须是正式文件、链接入口或完整树观察")
     validate_absolute_path(observed.path)
     _validate_chain(observed, "directory")
-    if type(observed.directories) is not tuple or type(observed.files) is not tuple:
+    if any(
+        type(members) is not tuple
+        for members in (observed.directories, observed.files, observed.links)
+    ):
         raise TypeError("最初树成员必须是不可变元组")
 
     directories = {}
@@ -306,14 +386,39 @@ def observation_state(observed):
         file_positions.add(relative)
         records.append((relative, "file", state.records[0][2]))
         times.append((relative, file_times[0][1]))
+    link_definitions = []
+    link_positions = set()
+    for relative, member in observed.links:
+        validate_relative_position(relative)
+        if (
+            not relative
+            or relative in directories
+            or relative in file_positions
+            or relative in link_positions
+            or not isinstance(member, LinkPathObservation)
+            or member.nominal_path != observed.path / relative
+            or member.actual_path != observed.path / relative
+            or member.followed_links
+        ):
+            raise ValueError("最初树链接入口位置非法、重复或经过其他链接")
+        member_state, _ = observation_state(member)
+        specification = member_state.link_definitions[0][1]
+        link_positions.add(relative)
+        link_definitions.append((relative, specification))
+        records.append((
+            relative, member_state.kind, member_state.records[0][2],
+        ))
     canonical = tuple(sorted(
         records, key=lambda record: record[0].encode("utf-8"),
     ))
     state = ContentState(
         "directory", canonical,
         MappingProxyType(content_integrity("directory", canonical)),
+        tuple(sorted(
+            link_definitions, key=lambda member: member[0].encode("utf-8"),
+        )),
     )
-    validate_content_state(state)
+    validate_content_state(state, target=observed.path)
     if (
         observed.content_records != canonical
         or observed.integrity != state.integrity
@@ -399,9 +504,12 @@ def build_protection_projection(units, *, forbidden_roots):
         for effect in unit.effects:
             if not isinstance(effect, FixedEffect):
                 raise TypeError("具体改变必须是FixedEffect")
+            # 投影只表达固定恢复对象，不承担业务入口的链接访问授权。
+            # 正式材料保存及共同恢复均消费完整原定义；
+            # 尚未接通本地授权的修改包入口仍由其原路径检查拒绝。
             original, times = fixed_state(effect.before)
-            validate_content_state(effect.after)
             target = effect.before.path
+            validate_content_state(effect.after, target=target)
             if any(
                 contains(target, previous) or contains(previous, target)
                 for previous in changed_targets
@@ -481,3 +589,27 @@ def build_protection_projection(units, *, forbidden_roots):
     object.__setattr__(projection, "units", projected)
     object.__setattr__(projection, "forbidden_roots", forbidden)
     return projection
+
+
+def state_from_link_specification(specification, *, target):
+    """在明确入口位置形成完整定义状态；不读取目标或创建链接。
+
+    定义是权威源，记录摘要和integrity只作派生完整性视图。
+    形成状态不授予备份、恢复、删除或创建资格。
+    """
+    from core.link_paths import (
+        link_specification_digest, validate_link_specification,
+    )
+
+    validate_absolute_path(target)
+    validate_link_specification(specification, target)
+    digest = link_specification_digest(specification)
+    return ContentState(
+        specification.kind,
+        (("", specification.kind, digest),),
+        MappingProxyType({
+            "algorithm": "sha256-link-definition-json-v1",
+            "digest": digest,
+        }),
+        (("", specification),),
+    )

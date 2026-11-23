@@ -16,7 +16,7 @@ class EditorBinding:
 
     def __init__(
         self, controller, widget, config, field, page,
-        variable=None, normalizer=None, history_key=None,
+        variable=None, normalizer=None, history_key=None, on_accepted=None,
     ):
         self.controller = controller
         self.widget = widget
@@ -26,6 +26,9 @@ class EditorBinding:
         self.variable = variable
         self.normalizer = normalizer or (lambda value: value)
         self.history_key = history_key
+        if on_accepted is not None and not callable(on_accepted):
+            raise TypeError("配置接受回调必须可调用")
+        self.on_accepted = on_accepted
         self.dirty = False
         self.destroyed = False
         self._suspend_depth = 0
@@ -96,7 +99,10 @@ class EditorBinding:
         if self.variable is not None:
             if self.variable.get() != value:
                 self.variable.set(value)
-        changed = self.controller.manager.accept(self.config, {self.field: value})
+        field_changed = self.controller.manager.accept(
+            self.config, {self.field: value},
+        )
+        changed = field_changed
         if history is not None:
             changed |= self.controller.manager.accept(
                 self.controller.manager.config_data["entry_history"],
@@ -105,8 +111,12 @@ class EditorBinding:
         if self.variable is None:
             self.widget.edit_modified(False)
         self.dirty = False
+        if field_changed and self.on_accepted is not None:
+            # 配置联动直接消费接受事实，不依赖控件映射或Tk事件送达。
+            # 派生字段在外层保存前接受；回调不重新提交当前字段。
+            self.on_accepted()
         if changed:
-            # 只通知已接受事实；不把连续输入当成基准变化。
+            # 展示消费者仍可监听既有事件；业务联动不依赖该事件。
             self.widget.event_generate("<<ConfigAccepted>>")
         return changed
 
@@ -116,7 +126,7 @@ class EditorBinding:
                 self.controller.select(
                     self.page, {"code_header_line", "code_footer_line"},
                 )
-                if self.page in ("merge", "restore")
+                if self.page == "merge"
                 and self.field in ("code_header_line", "code_footer_line")
                 else [self]
             )
@@ -127,7 +137,7 @@ class EditorBinding:
             self.controller.select(
                 self.page, {"code_header_line", "code_footer_line"},
             )
-            if self.page in ("merge", "restore")
+            if self.page == "merge"
             and self.field in ("code_header_line", "code_footer_line")
             else [self]
         )
@@ -219,7 +229,7 @@ class ConfigCommitController:
         ordinary = []
         for editor in editors:
             if (
-                editor.page in ("merge", "restore")
+                editor.page == "merge"
                 and editor.field in ("code_header_line", "code_footer_line")
             ):
                 marker_groups.setdefault(

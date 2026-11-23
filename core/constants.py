@@ -94,10 +94,6 @@ CODE_HEADER_LINE = "---以下是源代码---"
 CODE_FOOTER_LINE = "---源代码结束---"
 FILE_SECTION_START_TEMPLATE = "---第{index}个文件---"
 
-MESSAGE_FILE_EXCLUDED = "文件命中排除名单，内容略"
-MESSAGE_FILE_FAILED = "文件读取或解码失败，内容未提供"
-MESSAGE_CANNOT_READ = "无法读取或为非文本文件"
-MESSAGE_READ_ERROR = "*** 读取文件时发生错误"
 
 SKIPPED_LOG_FILENAME = "_RESTORE_SKIPPED_FILES_.log"
 
@@ -176,15 +172,12 @@ TEXT_WRAP_DEFAULTS = {
     "settings.crlf_file_list": True,
     "merge.code_header_line": True,
     "merge.code_footer_line": True,
-    "restore.code_header_line": True,
-    "restore.code_footer_line": True,
-    "merge.ignore_text": True,
-    "restore.ignore_text": True,
-    "merge.failure_text": True,
-    "restore.failure_text": True,
+
+
     "restore.source_text": True,
     "restore.preview_text": True,
     "restore.result_text": False,
+    "backup_restore.result_text": False,
 }
 
 # --- 主题配色 ---
@@ -228,6 +221,7 @@ DEFAULT_CONFIG = {
         "crlf_file_list": "*.bat\n*.CMD",
     },
     "entry_history": {},
+    "import_directories": {},
     "ui": {
         "feature_order": ["scan", "merge", "patch", "restore"],
     },
@@ -261,8 +255,6 @@ DEFAULT_CONFIG = {
         "demand_file_list_text": "",
         "normalize_text_newlines": False,
         "record_file_mtime": True,
-        "ignore_text": MESSAGE_FILE_EXCLUDED,
-        "failure_text": MESSAGE_FILE_FAILED,
     },
     "restore": {
         "source_text": "",
@@ -271,36 +263,31 @@ DEFAULT_CONFIG = {
 
         "backup_dir": "",
         "target_mode": "directory",
-        "execution_mode": "split",
-        "restore_project_root": "",
-        "restore_source_dir": "",
-        "keep_restore_source_path": False,
 
-        "open_backup_after_done": False,
-        "code_header_line": CODE_HEADER_LINE,
-        "code_footer_line": CODE_FOOTER_LINE,
         "existing_file_policy": "overwrite",
         "open_after_done": True,
         "normalize_text_newlines": False,
-        "ignore_text": MESSAGE_FILE_EXCLUDED,
-        "failure_text": MESSAGE_FILE_FAILED,
     },
     "patch": {
         "project_root": "",
-        "restore_project_root": "",
-        "patch_mode": "apply",
+
         "allow_delete": False,
         "allow_multi_replace_exact": False,
         "normalize_text_newlines": True,
 
         "backup_dir": "99_归档/AI文件修改备份",
-        "restore_source_dir": "",
-        "keep_restore_source_path": False,
 
         "patch_text": "",
         "last_result_text": "",
         "open_backup_after_done": False,
         "protocol_doc_source_path": "",
+    },
+    "backup_restore": {
+        "restore_source_dir": "",
+        "backup_dir": "",
+        "keep_restore_source_path": True,
+        "open_backup_after_done": False,
+        "last_result_text": "",
     },
     "favorites": {
         "scan_preamble": [],
@@ -315,12 +302,7 @@ DEFAULT_CONFIG = {
 
         "merge_code_header_line": [],
         "merge_code_footer_line": [],
-        "merge_ignore_text": [],
-        "merge_failure_text": [],
-        "restore_code_header_line": [],
-        "restore_code_footer_line": [],
-        "restore_ignore_text": [],
-        "restore_failure_text": [],
+
 
         "demand_file_list": [],
         "demand_preamble": [],

@@ -13,6 +13,7 @@ def get_feature_registry():
     from panels.merge_panel import MergePanel
     from panels.restore_panel import RestorePanel
     from panels.patch_panel import PatchPanel
+    from panels.backup_restore_panel import BackupRestorePanel
 
     return {
         "scan": {
@@ -34,5 +35,10 @@ def get_feature_registry():
             "title": "修改包执行器",
             "panel_class": PatchPanel,
             "default_order": 40,
+        },
+        "backup_restore": {
+            "title": "备份还原",
+            "panel_class": BackupRestorePanel,
+            "default_order": 50,
         },
     }

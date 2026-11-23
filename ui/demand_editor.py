@@ -193,6 +193,35 @@ a**b
 不支持正则表达式、花括号扩展或取反。
 [ab].txt 表示字面名称 [ab].txt，不表示 a.txt 或 b.txt。
 
+【Windows链接】
+明确填写文件软链接、目录软链接或junction入口时，
+合并保存入口的实际原定义，不读取引用目标正文。
+普通目录仍不能直接合并，选择其文件须使用通配符。
+
+linked\*.py、linked\**\*.py这样的固定目录前缀经过链接时，
+后台只定位名义前缀、实际目录和链接定义，显示“待本次合并授权”，
+不枚举链接目标、不弹授权窗口，不把待授权当成永久非法。
+应用、保存只保存规则表达，不保存文件选择或业务授权。
+主页面合并时先定位全部固定前缀和目录来源根，
+在首次进入链接实际目录前，集中勾选本次实际枚举范围；
+未选范围不进入，相应通配符规则不取得来源文件。
+随后还会选择具体成果块，枚举许可不直接授予正文读取权限。
+确认的是该固定实际普通目录及普通子树的元信息枚举，
+实际选择仍按各规则执行，不读取普通文件正文。
+同一任务、同一名义前缀及完整观察一致时只确认一次，
+目录来源与列表来源共用；不同入口、新任务或变化后的定义不复用。
+后续具体来源勾选仍决定正文获取与输出，不被枚举授权替代。
+取消不发布成果、不保存业务授权。
+
+递归搜索途中遇到其他目录链接仍按叶子处理，
+不会因**自动进入其引用目标。
+经链接的通配符范围不能用后续..离开已经展示的子树；
+需要另一范围时，另写一条明确固定目录前缀规则。
+
+不同名义入口选择同一实际普通文件时只获取一次正文，
+保留首次出现位置；明显结构冲突或别名要求不同换行成果时拒绝。
+去重不会删除仍被使用的访问依赖，发布前继续核对原链接定义。
+
 
 七、顺序和重复选择
 ────────────────────────────────────────
@@ -213,7 +242,8 @@ a**b
 
 灰：该行已主动停用。
 
-无高亮：尚未得到确定结果；空行也不高亮。
+无高亮：尚未检查、重复关系待确定，或实际目录枚举待本次合并授权；
+        待授权不是红色错误，也不是已经选取文件；空行也不高亮。
 
 结果区显示对应行的命中、重复和新增数量，
 以及当前选中的文件清单，便于核对选择范围。
@@ -568,6 +598,18 @@ class DemandDraftSession(TextDraftSession):
             elif match.disabled:
                 tag = "demand_disabled"
                 lines.append(f"第 {number} 行：停用，不检查、不去重")
+            elif match.requires_authorization:
+                lines.append(
+                    f"第 {number} 行：待本次合并的实际目录枚举授权；"
+                    "后台未进入链接目标目录。\n"
+                    "  规则可以保存；主页面执行时重新定位、展示并授权，"
+                    "当前没有可执行文件清单。"
+                )
+                for access in match.enumeration_accesses:
+                    lines.append(
+                        f"  名义前缀：{access.nominal_path}\n"
+                        f"  实际目录：{access.actual_path}"
+                    )
             elif match.issue:
                 tag = "demand_error"
                 lines.append(
@@ -591,7 +633,7 @@ class DemandDraftSession(TextDraftSession):
         lines.extend((
             "",
             "最终有序去重文件清单"
-            if selection.complete and not selection.has_errors
+            if selection.complete and not selection.has_errors and not selection.requires_authorization
             else "当前有效匹配文件清单（非可执行结论）",
             "-" * 48,
         ))
@@ -744,6 +786,8 @@ class DemandDraftSession(TextDraftSession):
             self.status.set(
                 "列表已保存；仍有选择错误，使用列表合并前需要修正"
                 if selection.has_errors else
+                "列表已保存；实际目录枚举待主页面本次合并授权，未保存业务授权"
+                if selection.requires_authorization else
                 "合并列表已保存；请在主页面点击仅列表合并或目录+列表合并"
             )
             if selection.has_errors:

@@ -75,8 +75,19 @@ def get_initial_dir_from_path(path):
 
 
 def build_output_path(output_folder, output_filename):
-    """交互和正式输出共用原链检查，不先resolve隐藏链接入口。"""
-    return str(checked_chain(Path(output_folder) / output_filename))
+    """先补默认扩展名，再进行实际输出的路径及覆盖检查。"""
+    from core.recovery_paths import validate_component
+
+    if type(output_filename) is not str or not output_filename:
+        raise ValueError("输出文件名不能为空")
+    name = Path(output_filename)
+    # 名称校验先于补扩展名，不能把非法尾随句点改造成可接受名称。
+    for component in name.parts:
+        if component != name.anchor:
+            validate_component(component)
+    if not name.suffix:
+        name = name.with_name(name.name + ".txt")
+    return str(checked_chain(Path(output_folder) / name))
 
 
 def get_available_renamed_path(file_path):

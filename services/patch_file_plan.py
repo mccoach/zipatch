@@ -34,6 +34,11 @@ class PatchAction:
     execute: bool
     expectations: tuple
     name_move: object = None
+    # 本地范围决定的跳过不保留正文读取或访问依赖。
+    # 与if_exists固定跳过分开；它不是校验失败的替代执行路径。
+    skip_reason: str = ""
+    # 名义访问依赖不成为工作观察或保护对象；跳过动作始终为空。
+    accesses: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -45,9 +50,13 @@ class PatchPlan:
 
 
 def patch_observation_kind(observed):
+    from core.link_paths import LinkPathObservation
+
     if isinstance(observed, TreeObservation):
         return "directory"
-    if isinstance(observed, (FileObservation, SkippedPatchPath)):
+    if isinstance(observed, (
+        FileObservation, SkippedPatchPath, LinkPathObservation,
+    )):
         return observed.kind
     raise TypeError("修改包必须消费正式观察或固定跳过路径")
 

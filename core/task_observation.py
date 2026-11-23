@@ -106,8 +106,12 @@ class TaskObservationState:
     def accept(self, actuals, results):
         """调用方已完成具体成果核验；一次登记全部位置和共享对象。"""
         self.consume_results(results)
+        from core.link_paths import LinkPathObservation
+
         if type(actuals) is not tuple or any(
-            not isinstance(actual, (FileObservation, TreeObservation))
+            not isinstance(actual, (
+                FileObservation, TreeObservation, LinkPathObservation,
+            ))
             for actual in actuals
         ):
             raise TypeError("正常成果必须是正式观察元组")
@@ -165,6 +169,11 @@ def project_task_observation(
             attributes=actual.attributes,
         )
 
+    from core.link_paths import LinkPathObservation
+
+    if isinstance(observed, LinkPathObservation):
+        # 普通硬链接正文和名称计数不改变链接入口原定义。
+        return observed
     if isinstance(observed, FileObservation):
         return project_file(observed)
     if not isinstance(observed, TreeObservation):
@@ -177,6 +186,12 @@ def project_task_observation(
             *((relative, "directory", "")
               for relative, _ in observed.directories),
             *((relative, "file", file.digest) for relative, file in files),
+            # 正常共享文件内容变化不改变链接定义。
+            # 链接记录直接消费原结构观察，不从现场补造。
+            *(record for record in observed.content_records
+              if record[1] in (
+                  "file_symlink", "directory_symlink", "junction",
+              )),
         ],
         key=lambda record: record[0].encode("utf-8"),
     ))

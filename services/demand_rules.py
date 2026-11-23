@@ -37,6 +37,9 @@ class DemandMatch:
     disabled: bool = False
     empty: bool = False
     issue: str = ""
+    requires_authorization: bool = False
+    accesses: tuple = ()
+    enumeration_accesses: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,9 @@ class DemandSelection:
     duplicates: tuple[DemandDuplicate, ...]
     complete: bool
     has_errors: bool
+    requires_authorization: bool = False
+    accesses: tuple = ()
+    enumeration_accesses: tuple = ()
 
 
 _INVALID_BODY = re.compile(r'[<>:"|\x00-\x1f]')
@@ -192,57 +198,130 @@ def _checked_stat(path, cancel):
 
 
 def _source_directory(source_folder, cancel):
+    """源基准只定位元信息，保留名义路径；不枚举链接实际目录。"""
+    from core.link_paths import inspect_link_path
+
     if not source_folder:
         raise ValueError("相对路径需要有效的源文件夹：尚未设置源文件夹。")
     if not os.path.isabs(source_folder):
         raise ValueError("相对路径需要有效的源文件夹：源文件夹必须是绝对路径。")
+    check_cancel(cancel)
     try:
-        attributes = _checked_stat(source_folder, cancel)
-    except FileNotFoundError as error:
-        raise ValueError(
-            "相对路径需要有效的源文件夹：源文件夹不存在。"
-        ) from error
+        access = inspect_link_path(source_folder, follow_final_link=True)
     except OSError as error:
         raise ValueError(f"无法访问源文件夹：{error}") from error
     check_cancel(cancel)
-    if not stat.S_ISDIR(attributes.st_mode):
-        raise ValueError("相对路径需要有效的源文件夹：指定基准不是文件夹。")
-    return Path(os.path.abspath(source_folder))
+    if access.kind != "directory":
+        raise ValueError("相对路径需要有效的源文件夹：基准未定位到既有普通目录。")
+    return access.nominal_path
 
 
 def _exact_file(rule, base, cancel):
+    """明确路径只探查入口元信息；正文和实际访问授权归正式合并。"""
+    from core.link_paths import inspect_link_path
+
     target = base.joinpath(*rule.segments)
-    try:
-        attributes = _checked_stat(target, cancel)
-    except FileNotFoundError:
-        return DemandMatch(issue="指定文件不存在。")
-    except UnsafePathError as error:
-        return DemandMatch(issue=f"指定文件路径不受支持：{error}")
-    except OSError as error:
-        return DemandMatch(issue=f"无法检查指定文件：{error}")
     check_cancel(cancel)
-    if stat.S_ISDIR(attributes.st_mode):
-        return DemandMatch(
-            issue="指定路径是文件夹，请填写具体文件或显式通配符规则。"
-        )
     if rule.segments and rule.segments[-1] == ".":
         return DemandMatch(
-            issue="指定路径要求文件夹，不能将末尾分隔符或目录路径段当作文件选择。"
+            issue="末尾分隔符表示目录要求，不能作为明确文件／链接入口选择。"
         )
-    if not stat.S_ISREG(attributes.st_mode):
-        return DemandMatch(issue="指定路径不是可合并的普通文件。")
-    return DemandMatch((os.path.abspath(target),), completed=True)
+    try:
+        observed = inspect_link_path(target, follow_final_link=False)
+    except UnsafePathError as error:
+        return DemandMatch(issue=f"指定入口路径不受支持：{error}")
+    except OSError as error:
+        return DemandMatch(issue=f"无法检查指定入口：{error}")
+    check_cancel(cancel)
+    if observed.kind == "absent":
+        return DemandMatch(issue="指定入口不存在。")
+    if observed.kind == "directory":
+        return DemandMatch(
+            issue="普通目录不能直接合并，请明确使用通配符选择文件。"
+        )
+    if observed.kind not in (
+        "file", "file_symlink", "directory_symlink", "junction",
+    ):
+        return DemandMatch(issue="指定入口类型不支持。")
+    return DemandMatch(
+        (str(observed.nominal_path),), completed=True,
+        accesses=(observed,),
+    )
 
 
-def _wildcard_files(rule, base, cancel):
-    """固定前缀直接定位；每个目录枚举器在本条规则中最多打开一次。"""
+def _wildcard_scope(rule, base, cancel):
+    """只定位固定前缀，不枚举；供整次任务集中选择实际访问范围。"""
     segments = rule.segments
     first_wildcard = next(
         index for index, segment in enumerate(segments)
         if "*" in segment or "?" in segment
     )
-    # 固定前缀保留原路径；检查之前不能消除链接及导航段。
-    scope = base.joinpath(*segments[:first_wildcard])
+    # 固定前缀先定位元信息；正文和目录枚举不是路径探查的副作用。
+    nominal_scope = base.joinpath(*segments[:first_wildcard])
+    from core.link_paths import inspect_link_path, recheck_link_path
+    from services.scan_scope import describe_scan_access
+
+    check_cancel(cancel)
+    try:
+        scope_access = inspect_link_path(
+            nominal_scope, follow_final_link=True,
+        )
+    except (OSError, ValueError) as error:
+        return DemandMatch(issue=f"无法定位通配符固定前缀：{error}")
+    check_cancel(cancel)
+    if scope_access.kind != "directory":
+        return DemandMatch(issue="通配符固定前缀未定位到既有实际普通目录。")
+    if scope_access.has_links and ".." in segments[first_wildcard:]:
+        return DemandMatch(
+            issue="经目录链接的通配符范围不能用后续..离开已授权子树；"
+            "请把所需实际范围写成另一条明确固定前缀规则。"
+        )
+    return scope_access
+
+
+def _wildcard_files(
+    rule, scope_access, cancel, *, request_enumeration=None,
+    source_enumeration=None,
+):
+    """消费已经固定的前缀；先决定权限，再进行本规则的一次枚举。"""
+    from core.link_paths import inspect_link_path, recheck_link_path
+    from services.scan_scope import describe_scan_access
+
+    segments = rule.segments
+    first_wildcard = next(
+        index for index, segment in enumerate(segments)
+        if "*" in segment or "?" in segment
+    )
+    recheck_link_path(scope_access)
+    if scope_access.has_links:
+        description = (
+            f"列表规则：{rule.expression}\n"
+            + describe_scan_access(scope_access)
+            + "\n\n允许本次任务枚举上述实际普通目录及其普通子树的元信息。"
+            "\n实际选择仍由每条规则决定；同一固定入口的枚举权限本次只确认一次。"
+            "\n目录链接后代仍为叶子，不进入途中其他链接目标。"
+            "\n本阶段不读取普通文件正文、不改变来源。"
+            "\n文件选取完成后仍须核对固定来源、实际别名和输出隔离。"
+            "\n授权只属于本次合并，不保存到名单或用户配置。"
+        )
+        if request_enumeration is None:
+            return DemandMatch(
+                requires_authorization=True,
+                enumeration_accesses=(scope_access,),
+            )
+        if not callable(request_enumeration):
+            raise TypeError("列表实际目录枚举请求必须可调用")
+        check_cancel(cancel)
+        decision = request_enumeration(
+            scope_access, "合并列表实际目录枚举授权", description,
+        )
+        if type(decision) is not bool:
+            raise TypeError("列表枚举授权必须返回明确布尔值")
+        if not decision:
+            raise DemandCheckCancelled("本次列表实际目录枚举授权已取消")
+        check_cancel(cancel)
+        recheck_link_path(scope_access)
+    scope = scope_access.actual_path
     patterns = {
         index: _segment_pattern(segment)
         for index, segment in enumerate(segments)
@@ -251,9 +330,14 @@ def _wildcard_files(rule, base, cancel):
     files = {}
     matched_directory = False
 
-    # 多个 ** 和父目录路径段可能从不同分支到达同一目录。
-    # 目录项缓存只属于本次检查，用于消费新增模式状态，不再次枚举。
-    directory_entries = {}
+    from services.source_enumeration import SourceEnumeration
+
+    if source_enumeration is None:
+        source_enumeration = SourceEnumeration()
+    if not isinstance(source_enumeration, SourceEnumeration):
+        raise TypeError("列表来源必须使用正式任务枚举状态")
+    # 模式推进属于本规则；目录名称和懒属性属于本次来源准备，
+    # 多规则及组合模式共用，不把模式状态混入共享名称快照。
     directory_attributes = {}
     processed_positions = {}
 
@@ -333,9 +417,15 @@ def _wildcard_files(rule, base, cancel):
                     return
                 check_cancel(cancel)
                 validate_component(name)
-                entry_kind = entity_type_from_attributes(path, entry_attributes)
+                from core.link_paths import _entry_kind
+
+                entry_kind = _entry_kind(path, entry_attributes)
                 is_directory = entry_kind == "directory"
-                is_file = entry_kind == "file"
+                is_file = entry_kind in (
+                    "file", "file_symlink", "directory_symlink", "junction",
+                )
+                # 三类链接仅在末级命中时选入，不递归进入目标。
+                # scope已是先授权的实际普通位置，名义前缀另行保留。
                 if is_directory:
                     next_positions = {
                         position if segments[position] == "**" else position + 1
@@ -357,52 +447,23 @@ def _wildcard_files(rule, base, cancel):
                     absolute = os.path.abspath(path)
                     files.setdefault(windows_path_key(absolute), absolute)
 
-            cached = directory_entries.get(key)
-            if cached is not None:
-                for entry_index, (name, path, entry_attributes) in enumerate(cached):
-                    check_cancel(cancel)
-                    # 首次枚举时未匹配的条目没有查询属性。
-                    # 新模式状态再次到达时，只有实际命中才补查一次，
-                    # 并归入本次目录缓存；不能把 None 当成有效属性。
-                    if entry_attributes is None:
-                        matched = any(
-                            segments[position] == "**"
-                            or patterns[position].fullmatch(name) is not None
-                            for position in active
-                        )
-                        if not matched:
-                            continue
-                        entry_attributes = _checked_stat(path, cancel)
-                        cached[entry_index] = (name, path, entry_attributes)
-                    consume_entry(name, path, entry_attributes)
-                continue
-
-            cached = []
-            check_cancel(cancel)
-            with os.scandir(folder) as entries:
-                while True:
-                    check_cancel(cancel)
-                    try:
-                        entry = next(entries)
-                    except StopIteration:
-                        break
-                    check_cancel(cancel)
-                    # 缓存当前枚举的名称；不预先整体读取目录再处理。
-                    # 未匹配项不查询属性，避免无关文件的属性错误。
-                    matched = any(
-                        segments[position] == "**"
-                        or patterns[position].fullmatch(entry.name) is not None
-                        for position in active
-                    )
-                    entry_attributes = None
-                    if matched:
-                        check_cancel(cancel)
-                        entry_attributes = entry.stat(follow_symlinks=False)
-                        check_cancel(cancel)
-                    cached.append((entry.name, entry.path, entry_attributes))
-                    if entry_attributes is not None:
-                        consume_entry(entry.name, entry.path, entry_attributes)
-            directory_entries[key] = cached
+            cached = source_enumeration.entries(
+                folder, check_cancel=lambda: check_cancel(cancel),
+            )
+            for entry_index, (name, path, entry_attributes) in enumerate(cached):
+                check_cancel(cancel)
+                matched = any(
+                    segments[position] == "**"
+                    or patterns[position].fullmatch(name) is not None
+                    for position in active
+                )
+                if not matched:
+                    continue
+                validate_component(name)
+                entry_attributes = source_enumeration.attributes(
+                    cached, entry_index,
+                )
+                consume_entry(name, path, entry_attributes)
 
     except FileNotFoundError as error:
         return DemandMatch(
@@ -421,16 +482,45 @@ def _wildcard_files(rule, base, cancel):
     ))
     check_cancel(cancel)
     if ordered:
-        return DemandMatch(ordered, completed=True)
+        accesses = []
+        try:
+            recheck_link_path(scope_access)
+            for actual in ordered:
+                check_cancel(cancel)
+                actual_path = Path(actual)
+                nominal = scope_access.nominal_path / actual_path.relative_to(scope)
+                access = inspect_link_path(nominal, follow_final_link=False)
+                if access.actual_path != actual_path or access.kind not in (
+                    "file", "file_symlink", "directory_symlink", "junction",
+                ):
+                    raise ValueError("列表枚举结果偏离固定名义／实际入口")
+                accesses.append(access)
+            # 晚入口探查可能跨越早访问依赖变化。
+            recheck_link_path(scope_access)
+            for access in accesses:
+                recheck_link_path(access)
+        except (OSError, ValueError) as error:
+            return DemandMatch(issue=f"列表固定结果观察失败：{error}")
+        check_cancel(cancel)
+        return DemandMatch(
+            tuple(str(access.nominal_path) for access in accesses),
+            completed=True, accesses=tuple(accesses),
+            enumeration_accesses=(scope_access,),
+        )
+    recheck_link_path(scope_access)
     if matched_directory:
         return DemandMatch(issue="匹配结果只有文件夹，没有可合并文件。")
     return DemandMatch(issue="通配符未命中任何文件。")
 
 
 
-def inspect_demand_rules(jobs, source_folder, cancel):
-    """规则解析一次，源基准每任务检查一次；取消不交付部分结果。"""
-    results = {}
+def prepare_demand_inspection(jobs, source_folder, cancel):
+    """全部规则先解析、定位固定前缀；不枚举通配符实际目录。
+
+    明确入口只查元信息。错误仍保留为正式规则结果，
+    不因后续范围选择而变成合法跳过。
+    """
+    prepared = []
     source_checked = False
     source_base = None
     source_issue = ""
@@ -439,13 +529,13 @@ def inspect_demand_rules(jobs, source_folder, cancel):
         try:
             rule = parse_demand_rule(expression)
         except ValueError as error:
-            results[identifier] = DemandMatch(issue=str(error))
+            prepared.append((identifier, None, None, DemandMatch(issue=str(error))))
             continue
         if is_exclusion_layout_line(rule.expression):
-            results[identifier] = DemandMatch(completed=True, empty=True)
+            prepared.append((identifier, rule, None, DemandMatch(completed=True, empty=True)))
             continue
         if rule.disabled:
-            results[identifier] = DemandMatch(completed=True, disabled=True)
+            prepared.append((identifier, rule, None, DemandMatch(completed=True, disabled=True)))
             continue
         if rule.relative:
             if not source_checked:
@@ -455,28 +545,79 @@ def inspect_demand_rules(jobs, source_folder, cancel):
                     source_issue = str(error)
                 source_checked = True
             if source_issue:
-                results[identifier] = DemandMatch(issue=source_issue)
+                prepared.append((identifier, rule, None, DemandMatch(issue=source_issue)))
                 continue
             base = source_base
         else:
             base = Path(rule.root)
         check_cancel(cancel)
-        results[identifier] = (
-            _wildcard_files(rule, base, cancel)
-            if rule.wildcard else _exact_file(rule, base, cancel)
-        )
+        if rule.wildcard:
+            scope = _wildcard_scope(rule, base, cancel)
+            if isinstance(scope, DemandMatch):
+                prepared.append((identifier, rule, None, scope))
+            else:
+                prepared.append((identifier, rule, scope, None))
+        else:
+            prepared.append((identifier, rule, None, _exact_file(rule, base, cancel)))
+    check_cancel(cancel)
+    return tuple(prepared)
+
+
+def inspect_prepared_demand_rules(
+    prepared, cancel, *, request_enumeration=None, skipped_prefixes=(),
+    source_enumeration=None,
+):
+    """消费同次固定前缀和范围决定；未选范围不开始枚举。
+
+    skipped_prefixes仅由所属任务的明确范围选择形成，
+    不是错误规则的继续执行通道。
+    """
+    if request_enumeration is not None and not callable(request_enumeration):
+        raise TypeError("列表枚举请求必须可调用")
+    from services.source_enumeration import SourceEnumeration
+
+    if source_enumeration is None:
+        source_enumeration = SourceEnumeration()
+    if not isinstance(source_enumeration, SourceEnumeration):
+        raise TypeError("列表准备必须消费正式任务枚举状态")
+    skipped = set(skipped_prefixes)
+    results = {}
+    for identifier, rule, scope, result in prepared:
+        check_cancel(cancel)
+        if result is not None:
+            results[identifier] = result
+        elif windows_path_key(scope.nominal_path) in skipped:
+            results[identifier] = DemandMatch(completed=True, disabled=True)
+        else:
+            results[identifier] = _wildcard_files(
+                rule, scope, cancel, request_enumeration=request_enumeration,
+                source_enumeration=source_enumeration,
+            )
     check_cancel(cancel)
     return results
 
 
+def inspect_demand_rules(
+    jobs, source_folder, cancel, *, request_enumeration=None,
+):
+    """后台无授权返回待授权事实；正式调用也消费同一准备和枚举链。"""
+    return inspect_prepared_demand_rules(
+        prepare_demand_inspection(jobs, source_folder, cancel),
+        cancel, request_enumeration=request_enumeration,
+    )
+
+
 def build_demand_selection(matches):
-    """完成检查与检查成功是不同事实；仅在内存中计算重复关系。"""
+    """规则结果、待授权、路径顺序及固定依赖均消费本次结果。"""
     selected = []
     seen = set()
     duplicates = []
     prefix_known = True
     complete = True
     has_errors = False
+    requires_authorization = False
+    accesses = {}
+    enumeration_accesses = {}
     for match in matches:
         if match is None:
             prefix_known = False
@@ -486,12 +627,29 @@ def build_demand_selection(matches):
         if match.empty or match.disabled:
             duplicates.append(DemandDuplicate(0, 0, 0, True))
             continue
+        if match.requires_authorization:
+            # 元信息检查已经得出“需要当次授权”的完整结论，
+            # 不是非法规则，也不是已经形成可执行文件选择。
+            requires_authorization = True
+            prefix_known = False
+            duplicates.append(DemandDuplicate(0, 0, 0, False))
+            continue
         if not match.completed:
             has_errors |= bool(match.issue)
             complete &= bool(match.issue)
             prefix_known = False
             duplicates.append(DemandDuplicate(0, 0, 0, False))
             continue
+        for access in match.accesses:
+            key = windows_path_key(access.nominal_path)
+            previous = accesses.setdefault(key, access)
+            if previous != access:
+                raise ValueError("同一列表入口具有矛盾的固定选择观察")
+        for access in match.enumeration_accesses:
+            key = windows_path_key(access.nominal_path)
+            previous = enumeration_accesses.setdefault(key, access)
+            if previous != access:
+                raise ValueError("同一列表枚举前缀在本次选择期间变化")
         duplicate_count = 0
         addition_count = 0
         for path in match.files:
@@ -507,4 +665,6 @@ def build_demand_selection(matches):
         ))
     return DemandSelection(
         tuple(selected), tuple(duplicates), complete, has_errors,
+        requires_authorization, tuple(accesses.values()),
+        tuple(enumeration_accesses.values()),
     )
