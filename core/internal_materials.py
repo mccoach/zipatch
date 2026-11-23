@@ -32,7 +32,6 @@ from core.filesystem_changes import (
     prepare_directory_creation, prepare_empty_directory_removal,
     prepare_tree_copy, prepare_tree_removal,
     _validate_tree_observation,
-    execute_directory_attributes, prepare_directory_attributes,
 )
 from core.recovery_paths import (
     checked_chain, entity_type_from_attributes, overlaps,
@@ -660,167 +659,47 @@ def _recheck_structure_material_source(source):
 
 
 def _prepare_structure_material_tree(material):
-    """现有内部材料流程的结构树生成部分，不提交正式名称。
-
-    普通正文使用唯一文件执行核心，链接定义使用同一正文发布。
-    每个材料位置只能来自固定普通目录、普通文件或链接入口。
-    目标范围只接受正式成功结果及当前自有完整暂存，不忽略外部成员。
-    """
-    from core.fixed_content_execution import FixedContentExecution
+    """链接转普通定义材料的固定政策；树生成只消费共同核心。"""
+    from core.fixed_tree_generation import FixedTreeGeneration, FixedTreeMember
 
     source = material.source
     root = material.container_path / "material"
     expected = observe_file(root)
     if expected.kind != "absent":
         raise ValueError("结构材料树固定目标必须不存在")
-    directories = {}
-    files = {}
-    execution = None
-
-    def record(receipt):
-        _append_results(material, (receipt,))
-
-    def stage(position, phase):
-        _stage(material, position, phase)
-
-    def check():
-        _recheck_structure_material_source(source)
-        if not directories:
-            recheck_file(expected)
-            return None
-        expected_files = dict(files)
-        artifact = None if execution is None else execution.artifact
-        if artifact is not None and artifact._lifecycle == "prepared":
-            relative = artifact.path.relative_to(root).as_posix()
-            if relative in directories or relative in expected_files:
-                raise ValueError("结构材料暂存与正式成员冲突")
-            expected_files[relative] = (
-                ObjectIdentity(*artifact.identity), artifact.digest,
-            )
-        current = observe_tree(root, include_mtime=True)
-        if (
-            set(dict(current.directories)) != set(directories)
-            or set(dict(current.files)) != set(expected_files)
-            or current.links
-        ):
-            raise ValueError("结构材料树偏离本次实际成功前缀")
-        for relative, directory in current.directories:
-            if directory.object_identity != directories[relative]:
-                raise ValueError("结构材料目录身份变化")
-        for relative, observed in current.files:
-            identifier, digest = expected_files[relative]
-            if (
-                observed.object_identity != identifier
-                or observed.link_count != 1
-                or observed.digest != digest
-            ):
-                raise ValueError("结构材料文件身份、独立性或正文变化")
-        return current
-
-    ordered_directories = sorted(
-        source.directories,
-        key=lambda member: (
-            len(Path(member[0]).parts), member[0].encode("utf-8"),
-        ),
+    members = (
+        *(FixedTreeMember(
+            relative, "directory", directory=directory,
+        ) for relative, directory in source.directories),
+        *(FixedTreeMember(
+            relative, "file", source=observed,
+            options=ContentPublicationOptions(
+                durable_publication=material.durable_publication,
+            ),
+        ) for relative, observed in source.files),
+        *(FixedTreeMember(
+            relative, "file",
+            content=encode_link_specification(
+                specification_from_link(observed.entry_link),
+                entry_path=source.path / relative,
+            ),
+            options=ContentPublicationOptions(
+                durable_publication=material.durable_publication,
+            ),
+        ) for relative, observed in source.links),
     )
-    for relative, _ in ordered_directories:
-        target = root / relative
-        stage(target, "结构材料目录创建前固定范围复核")
-        check()
-        fixed = expected if not relative else observe_file(target)
-        if fixed.kind != "absent":
-            raise ValueError("固定结构材料目录位置已出现")
-        step = prepare_directory_creation(fixed)
-        material._execution.scene = step
-        try:
-            receipt = execute_filesystem_change(step)
-        except FilesystemChangeError as error:
-            record(error.result)
-            raise
-        record(receipt)
-        directories[relative] = receipt.created_directory.object_identity
-        material._execution.scene = None
-        check()
-
-    ordinary_files = dict(source.files)
-    definitions = dict(
-        (relative, specification_from_link(observed.entry_link))
-        for relative, observed in source.links
+    generation = FixedTreeGeneration(
+        expected, members,
+        recheck_context=lambda: _recheck_structure_material_source(source),
+        record_step=lambda receipt: _append_results(material, (receipt,)),
+        stage=lambda target, phase: _stage(material, target, phase),
+        durable_publication=material.durable_publication,
     )
-    positions = sorted(
-        (*ordinary_files, *definitions),
-        key=lambda relative: relative.encode("utf-8"),
-    )
-    for relative in positions:
-        target = root / relative
-        stage(target, "结构材料文件准备前固定范围复核")
-        check()
-        fixed = observe_file(target)
-        if fixed.kind != "absent":
-            raise ValueError("固定结构材料文件位置已出现")
-        if relative in ordinary_files:
-            execution = FixedContentExecution(
-                fixed, source=ordinary_files[relative],
-                preserve_target_mode=False,
-                options=ContentPublicationOptions(
-                    durable_publication=material.durable_publication,
-                ),
-                desired_digest=ordinary_files[relative].digest,
-            )
-        else:
-            execution = FixedContentExecution(
-                fixed,
-                encode_link_specification(
-                    definitions[relative], entry_path=source.path / relative,
-                ),
-                options=ContentPublicationOptions(
-                    durable_publication=material.durable_publication,
-                ),
-            )
-        material._execution.scene = execution
-        actual = execution.execute(
-            recheck_context=check, record_step=record, stage=stage,
-        )
-        files[relative] = (actual.object_identity, actual.digest)
-        material._execution.scene = None
-        execution = None
-        check()
-
-    for relative, original in reversed(ordered_directories):
-        stage(root / relative, "结构材料目录属性前固定范围复核")
-        current = check()
-        directory = dict(current.directories)[relative]
-        attributes = original.attributes
-        step = prepare_directory_attributes(
-            directory,
-            file_mode=stat.S_IMODE(attributes.st_mode),
-            atime_ns=attributes.st_atime_ns,
-            mtime_ns=attributes.st_mtime_ns,
-            durable_publication=material.durable_publication,
-        )
-        material._execution.scene = step
-        try:
-            receipt = execute_directory_attributes(step)
-        except FilesystemChangeError as error:
-            record(error.result)
-            raise
-        record(receipt)
-        material._execution.scene = None
-
-    stage(root, "完整结构普通材料树最终核验")
-    actual = check()
-    expected_records = tuple(sorted(
-        (
-            *((relative, "directory", "") for relative in directories),
-            *((relative, "file", digest)
-              for relative, (_, digest) in files.items()),
-        ),
-        key=lambda record: record[0].encode("utf-8"),
-    ))
-    if actual.content_records != expected_records:
-        raise OSError("结构普通材料树未完整覆盖固定来源")
-    if material.durable_publication:
-        sync_directory(material.container_path)
+    # 内部材料账本只交付原步骤；生成核心拥有自己的工作现场。
+    # 不把它登记为活动组合，避免同一步骤被回调和视图重复归档。
+    material._execution.scene = generation
+    actual = generation.execute()
+    material._execution.scene = None
     return actual
 
 

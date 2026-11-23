@@ -24,17 +24,18 @@ def merge_completion_message(result, mode):
     incomplete = result.read_failure_count or result.mtime_failures
     title = "合并完成，存在缺失信息" if incomplete else "合并完成"
     counts = dict(result.entry_counts)
+    links = dict(result.link_counts)
     message = (
         f"{mode}成果已发布：成功正文文件 {counts.get('file', 0)} 个。\n"
-        f"共输出 {result.total_files} 个入口块；"
-        f"普通目录：{counts.get('directory', 0)}。\n"
-        f"文件软链接：{counts.get('file_symlink', 0)}；"
-        f"目录软链接：{counts.get('directory_symlink', 0)}；"
-        f"Junction：{counts.get('junction', 0)}。\n\n"
+        f"共输出 {result.total_files} 个文件正文块，不单列目录。\n"
+        f"已授权链接节点：文件软链接 {links.get('file_symlink', 0)}；"
+        f"目录软链接 {links.get('directory_symlink', 0)}；"
+        f"Junction {links.get('junction', 0)}。\n"
+        "节点数与正文块数分别统计，同一节点不按后代文件重复计数。\n\n"
         f"主动忽略：{result.excluded_count}；"
         f"正文失败：{result.read_failure_count}；"
         f"时间缺失：{len(result.mtime_failures)}。\n"
-        "链接块保存原定义，不包含引用目标正文。\n\n"
+        "普通与链接来源一视同仁；实际路径按显示开关附加，拆分只使用名义主路径。\n\n"
         f"保存位置：\n{result.output_file}"
     )
     if result.excluded_count or result.read_failure_count:
@@ -92,6 +93,7 @@ class MergePanel(BasePanel):
             ("open_after_done", "完成后立即打开成果文件"),
             ("force_overwrite", "成果文件已存在时强制覆盖"),
             ("normalize_text_newlines", "标准化文本换行"),
+            ("show_actual_path", "显示实际路径"),
             ("record_file_mtime", "记录文件修改时间"),
         ):
             variable = tk.BooleanVar(value=self.cfg[field])
@@ -188,7 +190,7 @@ class MergePanel(BasePanel):
             "merge_mode", "output_folder", "output_filename",
             "preamble_text", "ending_text", "code_header_line",
             "code_footer_line", "open_after_done", "force_overwrite",
-            "normalize_text_newlines", "record_file_mtime",
+            "normalize_text_newlines", "record_file_mtime", "show_actual_path",
         }
         if mode in ("directory", "combined"):
             fields |= {"source_folder", "exclude_folders", "exclude_files"}
@@ -233,13 +235,12 @@ class MergePanel(BasePanel):
             self.commits.metrics["business_starts"] += 1
             from ui.message_dialogs import safe_ask_risk_confirm
 
-            from ui.source_scope import make_enumeration_selector, make_merge_selector
+            from ui.source_scope import make_source_node_selector
 
             result = merge_files(
-                select_merge_enumeration=make_enumeration_selector(
+                select_source_links=make_source_node_selector(
                     self.root, self.commits,
                 ),
-                select_merge_scope=make_merge_selector(self.root, self.commits),
                 authorize_merge_scope=lambda title, description:
                 safe_ask_risk_confirm(
                     title, description, self.root, danger=True,
@@ -254,7 +255,7 @@ class MergePanel(BasePanel):
                 log_func=self.log,
                 normalize_text_newlines=cfg["normalize_text_newlines"],
                 record_file_mtime=cfg["record_file_mtime"],
-
+                show_actual_path=cfg["show_actual_path"],
                 output_rules=output_rules,
             )
         except (OSError, ValueError) as error:

@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 
 from core.file_observation import (
-    FileObservation, TreeObservation, observe_file, observe_tree,
+    FileObservation, TreeObservation, observe_file,
     _check_directory, _directory, _assert_file_attributes,
 )
 from core.link_paths import (

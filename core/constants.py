@@ -236,6 +236,7 @@ DEFAULT_CONFIG = {
         "ending_text": SCAN_ENDING_TEXT,
         "include_size": False,
         "include_date": False,
+        "show_actual_path": True,
         "open_after_done": True,
         "force_overwrite": True,
     },
@@ -255,6 +256,7 @@ DEFAULT_CONFIG = {
         "demand_file_list_text": "",
         "normalize_text_newlines": False,
         "record_file_mtime": True,
+        "show_actual_path": True,
     },
     "restore": {
         "source_text": "",

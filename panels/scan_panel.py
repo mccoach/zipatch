@@ -47,10 +47,11 @@ class ScanPanel(BasePanel):
         options = styled_frame(body, bg=THEME["bg_panel"])
         options.pack(fill="x", pady=(10, 0))
         for field, label in (
-            ("include_size", "输出文件大小"),
-            ("include_date", "输出文件日期"),
             ("open_after_done", "完成后立即打开成果文件"),
             ("force_overwrite", "成果文件已存在时强制覆盖"),
+            ("show_actual_path", "显示实际路径"),
+            ("include_size", "输出文件大小"),
+            ("include_date", "输出文件日期"),
         ):
             variable = tk.BooleanVar(value=self.cfg[field])
             setattr(self, field, variable)
@@ -91,7 +92,7 @@ class ScanPanel(BasePanel):
             "source_folder", "output_folder", "output_filename",
             "exclude_folders", "exclude_files",
             "preamble_text", "ending_text", "include_size", "include_date",
-            "open_after_done", "force_overwrite",
+            "open_after_done", "force_overwrite", "show_actual_path",
         })
         if cfg is None:
             return
@@ -118,21 +119,17 @@ class ScanPanel(BasePanel):
             self.set_status("正在执行全景扫描...")
             self.log("用户启动：路径全景扫描")
             self.commits.metrics["business_starts"] += 1
-            from ui.scan_authorization import make_scan_authorizer
-            from ui.source_scope import make_enumeration_selector, make_scan_selector
+            from ui.source_scope import make_source_node_selector
 
             result = panoramic_scan(
-                select_scan_enumeration=make_enumeration_selector(
-                    self.root, self.commits,
-                ),
-                select_scan_scope=make_scan_selector(self.root, self.commits),
-                authorize_scan_scope=make_scan_authorizer(
+                select_source_links=make_source_node_selector(
                     self.root, self.commits,
                 ),
                 source_folder=source, output_file=output,
                 exclusions=exclusions,
                 preamble_text=cfg["preamble_text"], ending_text=cfg["ending_text"],
                 include_size=cfg["include_size"], include_date=cfg["include_date"],
+                show_actual_path=cfg["show_actual_path"],
                 log_func=self.log,
             )
         except (OSError, ValueError) as error:
@@ -147,7 +144,7 @@ class ScanPanel(BasePanel):
             f"文件软链接 {result.file_symlink_count}，"
             f"目录软链接 {result.directory_symlink_count}，"
             f"Junction {result.junction_count}。\n"
-            "链接按叶子记录，不读取正文；所选大小／日期只查询经授权的目标元信息。\n"
+            "链接全链授权后按普通实体展开；未选在断点收口，不重复只读确认。\n"
             f"已保存到：\n{result.output_file}",
             self.root,
         )

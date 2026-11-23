@@ -39,7 +39,7 @@ from services.patch_service import (
 from ui.dialogs import create_managed_text_box
 from ui.newline_settings import edit_newline_settings
 from ui.theme import styled_button, styled_frame
-from ui.widgets import browse_folder, create_entry_row, make_checkbutton, make_radiobutton
+from ui.widgets import browse_folder, create_entry_row, make_checkbutton
 from ui.window_manager import center_window, register_popup, unregister_popup
 
 
@@ -83,10 +83,10 @@ class PatchPanel(BasePanel):
         options = styled_frame(body, bg=THEME["bg_panel"])
         options.pack(fill="x", pady=(10, 0))
         for field, label in (
-            ("allow_delete", "允许删除文件/文件夹（危险）"),
-            ("allow_multi_replace_exact", "允许多处精确替换"),
-            ("normalize_text_newlines", "标准化文本换行"),
             ("open_backup_after_done", "完成后打开本次备份"),
+            ("normalize_text_newlines", "标准化文本换行"),
+            ("allow_multi_replace_exact", "允许多处精确替换"),
+            ("allow_delete", "允许删除文件/文件夹（危险）"),
         ):
             variable = tk.BooleanVar(value=self.cfg[field])
             setattr(self, field, variable)

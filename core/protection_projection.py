@@ -505,8 +505,8 @@ def build_protection_projection(units, *, forbidden_roots):
             if not isinstance(effect, FixedEffect):
                 raise TypeError("具体改变必须是FixedEffect")
             # 投影只表达固定恢复对象，不承担业务入口的链接访问授权。
-            # 正式材料保存及共同恢复均消费完整原定义；
-            # 尚未接通本地授权的修改包入口仍由其原路径检查拒绝。
+            # 业务先完成适用授权并提供实际工作观察；
+            # 正式材料保存及共同恢复均消费完整原定义。
             original, times = fixed_state(effect.before)
             target = effect.before.path
             validate_content_state(effect.after, target=target)

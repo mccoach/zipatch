@@ -5,9 +5,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.content_publication import (
-    ContentPublicationOptions, ContentPublicationResult,
-)
+from core.content_publication import ContentPublicationOptions
 from core.fixed_content_execution import FixedContentExecution
 from core.directory_file_replacement import (
     execute_directory_file_replacement, prepare_directory_file_replacement,
@@ -31,9 +29,7 @@ from core.link_paths import (
     LinkPathObservation, link_definition_digest, recheck_link_path,
     specification_from_link,
 )
-from core.filesystem_changes import (
-    prepare_directory_creation, prepare_link_creation, prepare_link_removal,
-)
+from core.filesystem_changes import prepare_link_removal
 from core.recovery_protection import (
     RecoveryEvidence, RecoveryProtectionSession, recheck_recovery_evidence,
 )
@@ -174,7 +170,7 @@ class RecoveryExecution:
                 or overlaps(action.target, evidence.task_root)
             ):
                 raise ValueError("恢复实际位置不对应固定名义访问或与源备份重叠")
-            state, _ = observation_state(action.current)
+            observation_state(action.current)
             original = action.original["original"]
             expected_execute = not matches_original_content(action.current, original)
             if action.execute != expected_execute:
@@ -528,15 +524,9 @@ def _rebuild_structure(
     source, expected, desired, file_times, *,
     state, recheck_context, stage,
 ):
-    """恢复任务内部的固定结构重建，不取得新业务授权。
-
-    普通材料不伪装成活动源链接。链接定义直接消费已校验状态；
-    文件正文消费首次材料bytes。现场范围只来自固定清单，
-    允许存在的对象身份只来自本次正式正常结果及自有暂存。
-    """
-    from core.atomic_file import sync_directory
+    """固定普通材料及保存定义投影到共同结构生成，不另写恢复循环。"""
     from core.execution_state import ExecutionState
-    from core.file_observation import observe_tree
+    from core.fixed_tree_generation import FixedTreeGeneration, FixedTreeMember
 
     if not isinstance(state, ExecutionState):
         raise TypeError("结构恢复必须使用所属正式工作账本")
@@ -560,169 +550,46 @@ def _rebuild_structure(
         dict(source.files) if isinstance(source, TreeObservation)
         else {"": source}
     )
-    for relative, kind, digest in desired.records:
-        if kind == "file":
-            member = ordinary[relative]
-            if (
-                not isinstance(member.source_bytes, bytes)
-                or member.digest != digest
-                or type(member.mtime_ns) is not int
-            ):
-                raise ValueError("恢复普通材料缺少固定完整正文及正式来源时间")
     definitions = dict(desired.link_definitions)
-    start = len(state.results)
-    content_execution = None
+    time_map = dict(times)
+    members = []
+    for relative, kind, digest in desired.records:
+        if kind == "directory":
+            # 维持原链接结构恢复政策：普通目录创建后不追加元数据恢复。
+            members.append(FixedTreeMember(relative, "directory"))
+        elif relative in definitions:
+            members.append(FixedTreeMember(
+                relative, kind, specification=definitions[relative],
+            ))
+        else:
+            observed = ordinary[relative]
+            if (
+                not isinstance(observed.source_bytes, bytes)
+                or observed.digest != digest
+                or type(observed.mtime_ns) is not int
+            ):
+                raise ValueError("恢复普通材料缺少固定完整正文及来源时间")
+            members.append(FixedTreeMember(
+                relative, "file", source=observed,
+                options=ContentPublicationOptions(
+                    durable_publication=True, mtime_ns=time_map[relative],
+                ),
+            ))
 
-    def check():
+    def check_source_context():
         recheck_context()
         if isinstance(source, TreeObservation):
             recheck_tree(source, check_mtime=True)
         else:
             recheck_file(source, check_mtime=True)
-        directories, files, links = {}, {}, {}
-        for receipt in state.results[start:]:
-            if not receipt.succeeded:
-                raise ValueError("结构重建只接受本次真实正常前缀")
-            if isinstance(receipt, ContentPublicationResult):
-                actual = receipt.observation
-                if not isinstance(actual, FileObservation):
-                    raise RuntimeError("正常文件步骤缺少可靠成果")
-                files[actual.path.relative_to(expected.path).as_posix()] = actual
-            elif receipt.kind == "create_directory":
-                actual = receipt.created_directory
-                relative = receipt.target.relative_to(expected.path).as_posix()
-                directories["" if relative == "." else relative] = actual
-            elif receipt.kind == "create_link":
-                actual = receipt.created_link
-                if not isinstance(actual, LinkPathObservation):
-                    raise RuntimeError("正常链接步骤缺少可靠成果")
-                relative = receipt.target.relative_to(expected.path).as_posix()
-                links["" if relative == "." else relative] = actual
-            else:
-                raise ValueError("结构重建遇到不属于本次固定生成的步骤")
 
-        if desired.kind != "directory":
-            if not links:
-                recheck_file(expected)
-                return None
-            if set(links) != {""} or directories or files:
-                raise ValueError("单入口恢复成果范围非法")
-            return recheck_link_path(links[""])
-
-        if not directories:
-            recheck_file(expected)
-            return None
-        artifact = (
-            None if content_execution is None else content_execution.artifact
-        )
-        staged = None
-        if artifact is not None and artifact._lifecycle == "prepared":
-            relative = artifact.path.relative_to(expected.path).as_posix()
-            if relative in files or relative in directories or relative in links:
-                raise ValueError("恢复暂存位置与固定正常成果冲突")
-            staged = (relative, artifact)
-        actual = observe_tree(
-            expected.path, include_mtime=True, include_links=True,
-        )
-        required_files = set(files)
-        if staged is not None:
-            required_files.add(staged[0])
-        if (
-            set(dict(actual.directories)) != set(directories)
-            or set(dict(actual.files)) != required_files
-            or set(dict(actual.links)) != set(links)
-        ):
-            raise ValueError("结构恢复现场偏离实际成功前缀")
-        for relative, member in actual.directories:
-            if member.object_identity != directories[relative].object_identity:
-                raise ValueError("结构恢复目录身份变化")
-        for relative, member in actual.files:
-            if staged is not None and relative == staged[0]:
-                artifact = staged[1]
-                if (
-                    (member.object_identity.device, member.object_identity.inode)
-                    != artifact.identity
-                    or member.digest != artifact.digest
-                    or member.link_count != 1
-                ):
-                    raise ValueError("结构恢复完整自有暂存变化")
-            else:
-                fixed = files[relative]
-                if (
-                    member.object_identity != fixed.object_identity
-                    or member.digest != fixed.digest
-                    or member.link_count != fixed.link_count
-                    or member.mtime_ns != fixed.mtime_ns
-                ):
-                    raise ValueError("结构恢复普通文件成果变化")
-        for relative, member in actual.links:
-            if member != links[relative]:
-                raise ValueError("结构恢复链接定义或入口身份变化")
-        return actual
-
-    check()
-    if desired.kind == "directory":
-        directories = [
-            relative for relative, kind, _ in desired.records
-            if kind == "directory"
-        ]
-        for relative in sorted(
-            directories,
-            key=lambda position: (
-                len(Path(position).parts), position.encode("utf-8"),
-            ),
-        ):
-            stage(expected.path / relative, "固定恢复普通目录创建")
-            check()
-            fixed = expected if not relative else observe_file(
-                expected.path / relative,
-            )
-            if fixed.kind != "absent":
-                raise ValueError("固定恢复目录位置已经出现")
-            state.execute_step(
-                prepare_directory_creation(fixed), stage=stage,
-            )
-            check()
-
-    time_map = dict(times)
-    for relative, kind, digest in desired.records:
-        if kind == "directory":
-            continue
-        target = expected.path / relative
-        stage(target, "固定恢复入口或正文准备")
-        check()
-        fixed = expected if not relative else observe_file(target)
-        if fixed.kind != "absent":
-            raise ValueError("固定恢复成员位置已经出现")
-        if relative in definitions:
-            step = prepare_link_creation(fixed, definitions[relative])
-            check()
-            state.execute_step(step, stage=stage)
-        else:
-            content_execution = FixedContentExecution(
-                fixed, source=ordinary[relative],
-                preserve_target_mode=False, desired_digest=digest,
-                options=ContentPublicationOptions(
-                    durable_publication=True, mtime_ns=time_map[relative],
-                ),
-            )
-            state.execute_active(
-                content_execution,
-                lambda prepared: prepared.execute(
-                    recheck_context=check,
-                    record_step=state.record_step, stage=stage,
-                ),
-                stage=stage,
-            )
-            content_execution = None
-        check()
-
-    stage(expected.path, "固定原结构完整恢复核验")
-    actual = check()
-    effect = FixedEffect(expected, desired)
-    from core.fixed_unit_execution import verify_fixed_effects
-    verify_fixed_effects((effect,), (actual,))
+    generation = FixedTreeGeneration(
+        expected, tuple(members), state=state,
+        recheck_context=check_source_context,
+        record_step=lambda receipt: None,
+        stage=stage, durable_publication=True,
+    )
+    actual = generation.execute()
     if isinstance(actual, TreeObservation) and actual.file_times != times:
         raise OSError("结构恢复普通文件正式时间不符")
-    sync_directory(expected.path.parent)
     return actual

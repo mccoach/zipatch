@@ -30,7 +30,7 @@ from core.name_moves import (
     NativeNameMoveResult,
     execute_observed_name_move, prepare_observed_name_move,
 )
-from core.path_validation import normalize_rel_path, safe_join
+from core.path_validation import normalize_rel_path
 from core.protection_projection import build_protection_projection
 from core.recovery_paths import checked_chain, checked_root, identity, overlaps
 from core.recovery_protection import RecoveryProtectionSession
@@ -55,12 +55,9 @@ from services.patch_ops import (
 )
 from services.patch_reporter import format_patch_preview
 from services.text_mutations import locate_replacement
-from services.patch_link_authorization import (
-    format_link_content_access, format_link_structure_access,
-)
+
 from core.link_paths import (
-    LinkPathObservation, inspect_link_path, recheck_link_path,
-    specification_from_link,
+    LinkPathObservation, recheck_link_path, specification_from_link,
 )
 from core.filesystem_changes import prepare_link_creation, prepare_link_removal
 from services.patch_scope import (
@@ -330,37 +327,6 @@ class PatchExecutor:
             raise ValueError("名义入口越界、含控制字符或作用于项目根")
         return nominal
 
-    def _observe(self, path, kind):
-        key = identity(path)
-        if key in self._observations:
-            previous = self._observations[key]
-            if isinstance(previous, (OSError, ValueError)):
-                raise previous
-            if patch_observation_kind(previous) != kind:
-                raise ValueError(f"准备期间对象类型变化：{path}")
-            return previous
-        try:
-            if kind in ("file_symlink", "directory_symlink", "junction"):
-                observed = inspect_link_path(path, follow_final_link=False)
-                if observed.followed_links or observed.actual_path != path:
-                    raise ValueError("结构入口父链不得经过链接")
-            elif kind == "directory":
-                observed = observe_tree(
-                    path, include_bytes=True, include_mtime=True,
-                    include_links=True,
-                )
-            else:
-                observed = observe_file(
-                    path, include_bytes=True, include_digest=True,
-                    include_mtime=True,
-                )
-            if patch_observation_kind(observed) != kind:
-                raise ValueError(f"准备期间对象类型变化：{path}")
-        except (OSError, ValueError) as error:
-            self._observations[key] = error
-            raise
-        self._observations[key] = observed
-        return observed
 
     def _prepare_scopes(self, operations):
         """整包参数及无正文范围先准备，全部成立才进入一次范围决定。"""
@@ -649,11 +615,6 @@ class PatchExecutor:
                     self.plan = PatchPlan(self.root, tuple(self._actions))
                     newlines = None
                     if self.normalize_text_newlines:
-                        targets = dict.fromkeys(
-                            action.expectations[0].path
-                            for action in self.plan.actions
-                            if action.execute and action.payload["op"] in TEXT_WRITE_OPS
-                        )
                         newlines = {}
                         for action in self.plan.actions:
                             if not action.execute or action.payload["op"] not in TEXT_WRITE_OPS:

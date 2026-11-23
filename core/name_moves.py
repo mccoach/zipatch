@@ -691,9 +691,13 @@ def _execute_native_name(move, source, plan):
             os.rename(plan.source, plan.target)
         _move_stage(move, plan.target, "原生名称结果身份及内容核验")
         check_native_move_result(plan)
-        _recheck_move_object(
-            _relocated_move_source(source, plan.target),
-        )
+        # 树定位已经取得并完整核验目标观察，直接交付，
+        # 不在同一结束边界立即再次枚举和读取整棵目标树。
+        # 文件定位只是原观察的路径投影，仍需正式复核取得目标自身路径链。
+        # 单链接定位已经核验原定义，复核继续检查该固定入口元信息。
+        actual = _relocated_move_source(source, plan.target)
+        if not isinstance(actual, TreeObservation):
+            actual = _recheck_move_object(actual)
     except (OSError, ValueError) as error:
         _append_move_results(move, (NativeNameMoveResult(
             plan.source, plan.target, attempted, False, move.phase, error,
@@ -702,6 +706,7 @@ def _execute_native_name(move, source, plan):
     _append_move_results(move, (NativeNameMoveResult(
         plan.source, plan.target, True, True, "completed",
     ),))
+    return actual
 
 
 def execute_observed_name_move(move, *, removed_link_counts=None):
@@ -825,7 +830,7 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
                 )
 
             if move.mechanism == "native":
-                _execute_native_name(move, source, plan)
+                copied = _execute_native_name(move, source, plan)
             else:
                 _move_stage(move, expected.path, "跨卷固定独立目标树重建")
                 copy = prepare_tree_copy(source, expected)
@@ -848,6 +853,16 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
                 )
                 _move_stage(move, expected.path, "跨卷目录最终成果核验")
                 _recheck_move_object(copied)
+
+        _move_stage(move, move.source.path, "名称组合结束来源不存在复核")
+        final_source = recheck_file(FileObservation(
+            move.source.path,
+            (*move.source.chain[:-1], (move.source.path, "absent")),
+            "absent", None, None, None, None, None, None,
+        ))
+        object.__setattr__(
+            move, "_final_observations", (final_source, copied),
+        )
     except (OSError, ValueError) as error:
         raise FixedNameMoveError(NameMoveResult(
             move.source.path, move.expected.path, move.mechanism,
@@ -857,18 +872,6 @@ def execute_observed_name_move(move, *, removed_link_counts=None):
         if cleanup_content_artifact(move._artifact):
             object.__setattr__(move, "_artifact", None)
 
-    final_target = (
-        _relocated_move_source(source, plan.target)
-        if move.mechanism == "native" else copied
-    )
-    final_source = FileObservation(
-        move.source.path,
-        (*move.source.chain[:-1], (move.source.path, "absent")),
-        "absent", None, None, None, None, None, None,
-    )
-    object.__setattr__(
-        move, "_final_observations", (final_source, final_target),
-    )
     object.__setattr__(move, "_lifecycle", "completed")
     _move_stage(move, None, "completed")
     return NameMoveResult(

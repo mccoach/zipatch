@@ -163,8 +163,8 @@ class RestorePanel(BasePanel):
                     commits=self.commits, config=self.cfg, field=field,
                 ).pack(side="left", padx=(0, 6))
         for field, label in (
-            ("normalize_text_newlines", "标准化文本换行"),
             ("open_after_done", "完成后打开成果目录"),
+            ("normalize_text_newlines", "标准化文本换行"),
         ):
             variable = tk.BooleanVar(value=self.cfg[field])
             setattr(self, field, variable)

@@ -177,6 +177,16 @@ def validate_rule_config_source(source):
                     "不能将错误内容当成空名单或默认名单加载。"
                 )
 
+    for section_name in ("scan", "merge"):
+        section = source.get(section_name)
+        if isinstance(section, dict) and (
+            "show_actual_path" in section
+            and type(section["show_actual_path"]) is not bool
+        ):
+            raise OutputSettingsError(
+                f"{section_name}.show_actual_path 必须是布尔值；原文件未修改。"
+            )
+
     if "patch" in source:
         patch_settings = source["patch"]
         if not isinstance(patch_settings, dict):
@@ -401,11 +411,6 @@ class SaveResult:
                     "\n本次没有发起配置目标改变；"
                     "这不能证明当前磁盘仍等于旧成功快照。"
                 )
-            fact += (
-                "\n本次不算保存成功；旧快照不再提供免写资格。\n"
-                "下一次保存必须实际发布当前已接受内存配置，"
-                "即使草稿已放弃或内存值已改回旧值。"
-            )
             if publication.mechanism == "in_place":
                 fact += (
                     "\n没有名称替换不代表没有原地改变；"
@@ -413,6 +418,12 @@ class SaveResult:
                     "发布失败后的完整应急不自动删除。"
                 )
 
+        fact += (
+            "\n本次不算保存成功；旧快照不再提供免写资格。\n"
+            "下一次保存必须实际发布当前已接受内存配置，"
+            "即使草稿已放弃或内存值已改回旧值。\n"
+            "未发起目标改变不能证明当前磁盘仍等于旧成功快照。"
+        )
         if self.phase:
             fact += f"\n配置保存流程阶段：{self.phase}"
         if self.directory_results:
@@ -593,11 +604,10 @@ class ConfigSaveManager:
         except (OSError, ValueError) as error:
             self.last_save_error = error
             self._pending = True
-            if publication is not None:
-                # 零本次改变也可能来自固定目标漂移拒绝。
-                # 不增加失败现场读取去重新认证旧快照，
-                # 后续明确保存直接重新发布当前已接受配置。
-                self.required_write = True
+            # 初始观察、准备和发布中的失败都不能认证旧磁盘快照。
+            # 不在失败现场补读来恢复免写资格；下一次明确保存
+            # 必须实际发布当前已接受配置，即使内存改回旧成功值。
+            self.required_write = True
             return SaveResult(
                 SaveStatus.FAILED, error, publication,
                 tuple(directory_results), phase,

@@ -384,7 +384,16 @@ def _finish(
     return observed
 
 
-def inspect_link_path(path, *, follow_final_link):
+class LinkAccessDenied(ValueError):
+    """来源访问在明确链接节点停止；不访问该节点的引用目标。"""
+
+    def __init__(self, definition, nominal_path):
+        self.definition = definition
+        self.nominal_path = nominal_path
+        super().__init__(f"链接节点未授权：{nominal_path}")
+
+
+def inspect_link_path(path, *, follow_final_link, authorize_link=None):
     """探查授权窗口所需的最小路径事实，不取得正文读取资格。
 
     父目录链接需要解析才能定位末级对象。
@@ -398,8 +407,14 @@ def inspect_link_path(path, *, follow_final_link):
     if type(follow_final_link) is not bool:
         raise TypeError("跟随末级链接开关必须是布尔值")
 
+    if authorize_link is not None and not callable(authorize_link):
+        raise TypeError("链接节点授权必须可调用")
     nominal = _nominal_path(path)
     pending = nominal
+    # 将实际解析前缀对应回用户可见的名义断点。
+    # 目标自身的父链再次遇到链接时，仍属于同一名义节点位置。
+    actual_prefix = Path(nominal.anchor)
+    nominal_prefix = actual_prefix
     followed = []
     directories = {}
     expanded_states = set()
@@ -444,9 +459,32 @@ def inspect_link_path(path, *, follow_final_link):
                         f"{MAX_LINK_EXPANSIONS}：{nominal}",
                         kind="link_expansion_limit",
                     )
+                visible = (
+                    nominal_prefix / candidate.relative_to(actual_prefix)
+                    if contains(actual_prefix, candidate) else nominal_prefix
+                )
+                if authorize_link is not None:
+                    # 先核对已经走过的路线，再交互；未授权不查询直接目标。
+                    for dependency in directories.values():
+                        _confirm_directory(dependency)
+                    for previous in followed:
+                        _confirm_link(previous)
+                    _confirm_link(definition)
+                    decision = authorize_link(definition, visible)
+                    if type(decision) is not bool:
+                        raise TypeError("链接节点授权必须返回明确布尔值")
+                    for dependency in directories.values():
+                        _confirm_directory(dependency)
+                    for previous in followed:
+                        _confirm_link(previous)
+                    _confirm_link(definition)
+                    if not decision:
+                        raise LinkAccessDenied(definition, visible)
                 expanded_states.add(state)
                 followed.append(definition)
                 pending = definition.direct_target.joinpath(*suffix)
+                actual_prefix = definition.direct_target
+                nominal_prefix = visible
                 break
 
             if kind == "directory":
@@ -467,69 +505,28 @@ def inspect_link_path(path, *, follow_final_link):
 
 
 def recheck_link_path(expected):
-    """新边界重探查并比较固定事实，不接受新指向替换原计划。
+    """新边界比较全部原固定事实，不重新解析或读取变化后的定义。
 
-    内容版本由正式文件观察负责；本复核只负责路径、链接定义、
-    目录身份、末级对象身份及最先缺失位置。
+    返回已经再次核验的原观察，不建立新的来源基线。
+    内容版本仍由正式文件观察负责。
     """
-    if not isinstance(expected, LinkPathObservation):
-        raise TypeError("链接路径复核必须消费LinkPathObservation")
-    current = inspect_link_path(
-        expected.nominal_path,
-        follow_final_link=expected.follow_final_link,
-    )
-    if current != expected:
-        raise ValueError(
-            "名义入口、链接定义、访问目录或实际对象偏离固定预演；"
-            "旧计划失效，必须重新预演。\n"
-            f"名义路径：{expected.nominal_path}\n"
-            f"原实际位置：{expected.actual_path}\n"
-            f"当前实际位置：{current.actual_path}"
-        )
-    return current
+    recheck_fixed_paths((expected,), policy="complete")
+    return expected
 
 
 def recheck_link_dependencies(expected):
-    """复核原访问依赖，不把实际末级对象身份当成链接定义。
+    """正文访问只核对原路线，末级对象由正式文件观察负责。
 
-    文件发布可以正常替换实际末级文件，必要目录也可能由本任务创建。
-    因此本能力只比较原链接定义、原目录身份及解析位置。
-    末级文件的存在性、身份、链接数和内容由FileObservation约束。
-
-    不接受新链接、原链接消失、指向改变或原目录被替换。
-    新出现的普通必要目录不在这里取得创建所有权；
-    所属目录状态仍须消费正式创建结果检查它们。
+    原链接和原目录身份不得改变。必要普通父目录可以出现，
+    但创建所有权仍由所属正式目录状态检查，不在这里补认。
+    不解析后来出现的链接，也不读取它的引用目标。
     """
     if not isinstance(expected, LinkPathObservation):
         raise TypeError("访问依赖复核必须消费LinkPathObservation")
     if not expected.follow_final_link or expected.entry_link is not None:
         raise ValueError("文件内容访问依赖必须使用跟随末级链接的观察")
-    current = inspect_link_path(
-        expected.nominal_path, follow_final_link=True,
-    )
-    original_directories = {
-        identity(member.path): member for member in expected.directories
-    }
-    current_directories = {
-        identity(member.path): member for member in current.directories
-    }
-    if (
-        current.actual_path != expected.actual_path
-        or current.followed_links != expected.followed_links
-        or current.entry_link is not None
-        or any(
-            current_directories.get(key) != member
-            for key, member in original_directories.items()
-        )
-    ):
-        raise ValueError(
-            "链接定义、原访问目录身份或实际访问位置偏离固定预演；"
-            "必须停止并重新预演。\n"
-            f"名义路径：{expected.nominal_path}\n"
-            f"原实际位置：{expected.actual_path}\n"
-            f"当前实际位置：{current.actual_path}"
-        )
-    return current
+    recheck_fixed_paths((expected,), policy="content")
+    return expected
 
 
 def link_definition_digest(definition):
@@ -700,38 +697,136 @@ def link_specification_digest(specification):
 
 
 def recheck_path_dependencies(expected):
-    """正文或结构的名义访问依赖，不约束已由工作核心消费的末级对象。
+    """工作入口只复核原父路线，不约束允许改变的末级或后代。
 
-    正文保留末级文件链接为访问依赖；结构不跟随末级入口。
-    实际对象及其后代由固定工作观察负责，不在这里认证或授权。
-    必要新普通目录可以出现，其所有权仍由目录创建结果负责。
+    正文经过的末级链接属于followed_links，仍严格保留；
+    结构入口的entry_link由对应工作观察核验，允许正式移除或重建。
+    返回已核验的原事实，不观察并认证变化后的新路线。
     """
-    if not isinstance(expected, LinkPathObservation):
-        raise TypeError("路径依赖复核必须消费LinkPathObservation")
-    current = inspect_link_path(
-        expected.nominal_path,
-        follow_final_link=expected.follow_final_link,
-    )
-    required_directories = tuple(
-        member for member in expected.directories
-        if not contains(expected.actual_path, member.path)
-    )
-    current_directories = {
-        identity(member.path): member for member in current.directories
-    }
-    if (
-        current.actual_path != expected.actual_path
-        or current.followed_links != expected.followed_links
-        or any(
-            current_directories.get(identity(member.path)) != member
-            for member in required_directories
-        )
+    recheck_fixed_paths((expected,), policy="structure")
+    return expected
+
+
+def recheck_fixed_paths(accesses, *, policy="complete", omitted_targets=()):
+    """同一新边界的唯一固定路径检查，不重新解析名义入口。
+
+    complete约束全部原目录、原链接、末级身份及最先缺失位置。
+    content保留全部原访问目录及经过的链接，末级由文件核心负责。
+    structure仅保留实际工作范围外的原目录及经过的链接，
+    允许工作核心改变末级入口或其后代。
+
+    omitted_targets只用于complete模式的普通正文遗漏：
+    只撤销对应末级文件约束，原访问依赖仍严格参与比较。
+    必要新普通父目录不取得所有权；所属创建账本另行检查。
+    检查不是文件锁，不承诺跨系统调用的原子快照。
+    """
+    if type(policy) is not str or policy not in (
+        "complete", "content", "structure",
     ):
-        raise ValueError(
-            "固定名义访问的链接定义、实际位置或原父目录身份变化；"
-            "停止执行或回滚，不访问新指向。\n"
-            f"名义位置：{expected.nominal_path}\n"
-            f"原实际位置：{expected.actual_path}\n"
-            f"当前实际位置：{current.actual_path}"
-        )
-    return current
+        raise ValueError("固定路径复核政策必须是complete、content或structure")
+    accesses = tuple(accesses)
+    omitted = {identity(path) for path in omitted_targets}
+    if omitted and policy != "complete":
+        raise ValueError("正文遗漏只能用于完整来源复核")
+    directories, definitions, targets, missing = {}, {}, {}, {}
+    growing_parents = {}
+
+    def accept(mapping, key, member, description):
+        previous = mapping.setdefault(key, member)
+        if previous != member:
+            raise ValueError(description)
+
+    for access in accesses:
+        if not isinstance(access, LinkPathObservation):
+            raise TypeError("固定路径复核必须消费正式LinkPathObservation")
+        if policy == "content" and (
+            not access.follow_final_link or access.entry_link is not None
+        ):
+            raise ValueError("正文依赖必须使用跟随末级链接的观察")
+        for directory in access.directories:
+            if policy == "structure" and contains(
+                access.actual_path, directory.path,
+            ):
+                continue
+            accept(
+                directories, identity(directory.path), directory,
+                "共同访问目录具有矛盾的固定身份",
+            )
+        for definition in (
+            *access.followed_links,
+            *((access.entry_link,) if policy == "complete"
+              and access.entry_link is not None else ()),
+        ):
+            accept(
+                definitions, identity(definition.entry_path), definition,
+                "共同访问链接具有矛盾的固定原定义",
+            )
+
+        if policy != "complete":
+            if access.first_missing is not None:
+                positions = (*reversed(access.actual_path.parents),)
+                try:
+                    first = positions.index(access.first_missing)
+                except ValueError:
+                    # 缺失的是末级自身，没有新增父目录需要检查。
+                    if access.first_missing != access.actual_path:
+                        raise ValueError("固定最先缺失位置不属于实际路径")
+                else:
+                    sequence = positions[first:]
+                    growing_parents.setdefault(sequence, sequence)
+            continue
+
+        if identity(access.actual_path) in omitted:
+            if access.kind != "file" or access.entry_link is not None:
+                raise ValueError("正文遗漏只能移除普通文件的末级成果约束")
+            continue
+        if access.first_missing is not None:
+            missing.setdefault(identity(access.first_missing), access.first_missing)
+        else:
+            accept(
+                targets, identity(access.actual_path),
+                (access.actual_path, access.kind, access.object_identity),
+                "共同实际入口具有矛盾的固定身份或类别",
+            )
+
+    # 普通目录先按深度检查。祖先被替换或变为链接时停止，
+    # 不沿变化后的父链查询其后代，更不重新读取链接定义。
+    for directory in sorted(
+        directories.values(), key=lambda member: len(member.path.parts),
+    ):
+        _confirm_directory(directory)
+    for definition in definitions.values():
+        _confirm_link(definition)
+    for path in missing.values():
+        if _attributes_or_absent(path) is not None:
+            raise ValueError(f"固定来源缺失位置已经出现：{path}")
+
+    # 工作允许原缺失普通父目录出现，但不允许出现新的链接路线。
+    # 遇到仍缺失的父目录立即结束这条链，不查询不可达的后代。
+    checked_parents = set()
+    for sequence in growing_parents.values():
+        for path in sequence:
+            key = identity(path)
+            if key in checked_parents:
+                continue
+            attributes = _attributes_or_absent(path)
+            if attributes is None:
+                break
+            if _entry_kind(path, attributes) != "directory":
+                raise ValueError(f"必要父目录出现非普通目录或新链接：{path}")
+            _object_identity(attributes, path)
+            checked_parents.add(key)
+
+    for key, (path, kind, identifier) in targets.items():
+        if kind == "directory" and key in directories:
+            continue
+        if key in definitions:
+            continue
+        attributes = _attributes_or_absent(path)
+        if (
+            attributes is None
+            or _entry_kind(path, attributes) != kind
+            or _object_identity(attributes, path) != identifier
+        ):
+            raise ValueError(f"固定来源实际入口存在性、类别或身份变化：{path}")
+    return accesses

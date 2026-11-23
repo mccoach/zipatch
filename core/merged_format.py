@@ -10,6 +10,7 @@ from core.constants import CODE_FOOTER_LINE, CODE_HEADER_LINE, MERGE_MODES
 
 STRUCTURAL_NEWLINE = "\r\n"
 MTIME_PREFIX = "最后修改时间："
+SOURCE_PREFIX = "实际路径："
 MTIME_UNAVAILABLE = "未取得"
 MTIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -37,6 +38,8 @@ def validate_markers(start_marker, end_marker):
         raise OutputSettingsError("开始标记不能使用“最后修改时间：”结构前缀")
     if start_marker.startswith(STRUCTURE_PREFIX):
         raise OutputSettingsError("开始标记不能使用ZIPATCH_ENTRY:结构前缀")
+    if start_marker.startswith(SOURCE_PREFIX):
+        raise OutputSettingsError("开始标记不能使用“实际路径：”说明前缀")
 
 
 
@@ -256,6 +259,23 @@ def decode_structure_line(line, *, entry_path):
     return kind, specification
 
 
+def encode_source_line(path):
+    """直接显示实际路径；说明不参与拆分位置映射。"""
+    if (
+        type(path) is not str or not path
+        or any(ord(character) < 32 for character in path)
+    ):
+        raise ValueError("实际路径说明必须是有效单行字符串")
+    return SOURCE_PREFIX + path
+
+
+def validate_source_line(line):
+    """只检查独立说明行，不解析JSON、不访问路径、不交付写入位置。"""
+    if type(line) is not str or not line.startswith(SOURCE_PREFIX):
+        raise ValueError("实际路径说明缺少正式前缀")
+    encode_source_line(line[len(SOURCE_PREFIX):])
+
+
 def parse_merge_blocks(full_text):
     """第一行声明固定本层；正文不递归解析，完整包尾是必要条件。"""
     lines = iter(text_locations.iter_physical_lines(full_text))
@@ -280,6 +300,7 @@ def parse_merge_blocks(full_text):
     body_start = None
     kind = "file"
     specification = None
+    source_seen = False
 
     for number, line, line_start, next_start in lines:
         if state == "END":
@@ -311,6 +332,13 @@ def parse_merge_blocks(full_text):
                 raise ValueError("合并容器路径与本层标识冲突")
             path = line
             state = "EXPECT_TIME_OR_START"
+            continue
+
+        if state == "EXPECT_TIME_OR_START" and line.startswith(SOURCE_PREFIX):
+            if source_seen or token in line:
+                raise ValueError("附加来源说明重复或与本层标识冲突")
+            validate_source_line(line)
+            source_seen = True
             continue
 
         if state == "EXPECT_TIME_OR_START" and line.startswith(STRUCTURE_PREFIX):
@@ -348,6 +376,7 @@ def parse_merge_blocks(full_text):
             if kind != "file" and body != "":
                 raise ValueError("普通目录及链接结构块不得携带文件正文或占位")
             blocks.append(MergeBlock(path, body, kind, specification))
+            source_seen = False
             kind = "file"
             specification = None
             section_number = None

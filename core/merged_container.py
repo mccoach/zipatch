@@ -13,7 +13,7 @@ from core.constants import FILE_SECTION_START_TEMPLATE
 from core.merged_format import (
     MTIME_PREFIX, STRUCTURAL_NEWLINE,
     container_marker_lines, encode_container_declaration,
-    encode_structure_line, validate_markers,
+    encode_source_line, encode_structure_line, validate_markers,
 )
 
 
@@ -47,7 +47,10 @@ class MergedContainer:
         self._closed = True
         self._stream.close()
 
-    def add_block(self, path, body, *, kind="file", specification=None, mtime=None):
+    def add_block(
+        self, path, body, *, kind="file", specification=None, mtime=None,
+        origin_path=None,
+    ):
         if self._closed or self._token is not None:
             raise ValueError("容器已经关闭或固定标识，不能追加材料")
         if (
@@ -71,16 +74,17 @@ class MergedContainer:
         written = self._stream.write(body)
         if written != len(body):
             raise OSError("容器正文暂存没有完整写入")
-        self._records.append((path, structure, mtime, offset, len(body)))
+        source = None if origin_path is None else encode_source_line(origin_path)
+        self._records.append((path, structure, mtime, offset, len(body), source))
 
     def _contains_token(self, token):
         if any(token in text for text in (
             self.start_label, self.end_label, self.preamble, self.ending,
         )):
             return True
-        for path, structure, mtime, _, _ in self._records:
+        for path, structure, mtime, _, _, source in self._records:
             if any(token in text for text in (
-                path, structure or "", mtime or "",
+                path, structure or "", mtime or "", source or "",
             )):
                 return True
         self._stream.flush()
@@ -135,7 +139,7 @@ class MergedContainer:
             token, self.start_label, self.end_label,
         ) + STRUCTURAL_NEWLINE
         yield self.preamble
-        for number, (path, structure, mtime, offset, length) in enumerate(
+        for number, (path, structure, mtime, offset, length, source) in enumerate(
             self._records, 1,
         ):
             yield (
@@ -143,6 +147,8 @@ class MergedContainer:
                 + token + STRUCTURAL_NEWLINE
             )
             yield path + STRUCTURAL_NEWLINE
+            if source is not None:
+                yield source + STRUCTURAL_NEWLINE
             if structure is not None:
                 yield structure + STRUCTURAL_NEWLINE
             elif mtime is not None:

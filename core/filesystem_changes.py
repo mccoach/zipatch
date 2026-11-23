@@ -16,9 +16,8 @@ from pathlib import Path
 
 from core.atomic_file import sync_directory
 from core.content_publication import (
-    ContentPublicationError, ContentPublicationOptions,
-    ContentPublicationResult, cleanup_content_artifact,
-    prepare_copy_content_artifact, publish_content,
+    ContentPublicationOptions, ContentPublicationResult,
+    cleanup_content_artifact,
 )
 from core.file_observation import (
     ObjectIdentity, observe_file, project_removed_file_links,
@@ -1139,120 +1138,15 @@ def _recheck_tree_copy_source(copy):
             raise ValueError(f"固定复制来源文件权限变化：{observed.path}")
 
 
-def _tree_copy_target_constraints(copy):
-    """目标状态只由实际成功前缀及当前完整自有暂存投影。"""
-    directories, files, modes, times, links = {}, {}, {}, {}, {}
-    source_directories = dict(copy.source.directories)
-    source_files = dict(copy.source.files)
-    target_times = dict(copy.file_times)
-    for receipt in copy.results:
-        if not receipt.succeeded:
-            raise ValueError("目标前缀只接受实际成功结果")
-        relative = receipt.target.relative_to(copy.expected.path).as_posix()
-        relative = "" if relative == "." else relative
-        if receipt.kind == "content":
-            source = source_files[relative]
-            files[relative] = (
-                receipt.object_identity, source.digest, target_times[relative],
-                stat.S_IMODE(source.attributes.st_mode),
-            )
-        elif receipt.kind == "create_directory":
-            directory = receipt.change.created_directory
-            directories[relative] = receipt.object_identity
-            modes[relative] = stat.S_IMODE(directory.attributes.st_mode)
-        elif receipt.kind == "create_link":
-            actual = receipt.change.created_link
-            original = dict(copy.source.links).get(relative)
-            if (
-                not isinstance(actual, LinkPathObservation)
-                or original is None
-                or actual.actual_path != receipt.target
-                or actual.followed_links
-                or actual.object_identity != receipt.object_identity
-                or specification_from_link(actual.entry_link)
-                != specification_from_link(original.entry_link)
-            ):
-                raise ValueError("复制链接结果缺少对应身份或保存原定义")
-            links[relative] = actual
-        elif receipt.kind == "set_directory_attributes":
-            source = source_directories[relative]
-            modes[relative] = stat.S_IMODE(source.attributes.st_mode)
-            times[relative] = source.attributes.st_mtime_ns
-        else:
-            raise ValueError("复制结果包含不属于固定树重建的步骤")
-
-    artifact = copy._artifact
-    if artifact is not None and artifact._lifecycle == "prepared":
-        relative = artifact.path.relative_to(copy.expected.path).as_posix()
-        if relative in files or relative in directories or relative in links:
-            raise ValueError("复制暂存位置与正式成功前缀冲突")
-        files[relative] = (
-            ObjectIdentity(*artifact.identity),
-            artifact.digest, artifact.options.mtime_ns,
-            artifact.options.file_mode,
-        )
-    return directories, files, modes, times, links
-
-
-def _recheck_tree_copy_target(copy):
-    """完整扫描是新边界比较，不从后来树取得新创建或删除授权。
-
-    完整自有暂存明确参与约束，不能被当作外部新增对象，
-    也不能按文件名模式忽略其他临时文件。
-    """
-    directories, files, modes, times, links = _tree_copy_target_constraints(copy)
-    if not directories:
-        recheck_file(copy.expected)
-        return None
-    current = observe_tree(
-        copy.expected.path, include_mtime=True, include_links=True,
-    )
-    if (
-        set(dict(current.directories)) != set(directories)
-        or set(dict(current.files)) != set(files)
-        or set(dict(current.links)) != set(links)
-    ):
-        raise ValueError("复制目标结构偏离实际成功前缀")
-    for relative, observed in current.links:
-        if observed != links[relative]:
-            raise ValueError(
-                f"复制链接入口身份、原定义或父目录前提变化：{observed.path}"
-            )
-    for relative, directory in current.directories:
-        if (
-            directory.object_identity != directories[relative]
-            or stat.S_IMODE(directory.attributes.st_mode) != modes[relative]
-            or relative in times
-            and directory.attributes.st_mtime_ns != times[relative]
-        ):
-            raise ValueError(f"复制目标目录身份或属性变化：{directory.path}")
-    for relative, observed in current.files:
-        expected_identity, digest, modified, mode = files[relative]
-        if (
-            observed.object_identity != expected_identity
-            or observed.link_count != 1
-            or observed.digest != digest
-            or observed.mtime_ns != modified
-            or stat.S_IMODE(observed.attributes.st_mode) != mode
-        ):
-            raise ValueError(
-                f"独立复制文件或暂存的身份、内容、链接或属性变化："
-                f"{observed.path}"
-            )
-    return current
-
-
 def _append_tree_copy_result(copy, change, object_identity=None):
     receipt = TreeCopyStepResult(change, object_identity)
     object.__setattr__(copy, "_results", (*copy.results, receipt))
 
 
 def execute_tree_copy(copy, *, recheck_context=None):
-    """固定独立重建，直接组合目录步骤、文件成果及唯一内容发布。
+    """固定来源政策投影到唯一结构生成，不另写树执行或范围复核。"""
+    from core.fixed_tree_generation import FixedTreeGeneration, FixedTreeMember
 
-    来源新边界读取只服务复核，工作文件仍消费已有固定bytes。
-    程序缺陷自然传播，资格已消费，现场及实际结果继续保留。
-    """
     if not isinstance(copy, PreparedTreeCopy):
         raise TypeError("执行必须消费PreparedTreeCopy")
     if recheck_context is not None and not callable(recheck_context):
@@ -1260,171 +1154,68 @@ def execute_tree_copy(copy, *, recheck_context=None):
     if copy._lifecycle != "prepared":
         raise ValueError("独立树复制已消费或取消，必须重新准备")
     object.__setattr__(copy, "_lifecycle", "attempted")
+    generation = None
 
-    def check_source_context():
+    def stage(target, phase):
+        object.__setattr__(copy, "_current", target)
+        object.__setattr__(copy, "_phase", phase)
+        if generation is not None:
+            object.__setattr__(copy, "_artifact", generation.artifact)
+
+    def check_source():
         if recheck_context is not None:
             recheck_context()
         _recheck_tree_copy_source(copy)
-    object.__setattr__(copy, "_current", copy.expected.path)
-    object.__setattr__(copy, "_phase", "完整固定来源及不存在目标复核")
-    try:
-        check_source_context()
-        _recheck_tree_copy_target(copy)
-        _check_creation_parent(copy.expected.path)
-        directories = sorted(
-            copy.source.directories,
-            key=lambda member: (
-                len(Path(member[0]).parts), member[0].encode("utf-8"),
-            ),
-        )
-        for relative, _ in directories:
-            target = copy.expected.path / relative
-            object.__setattr__(copy, "_current", target)
-            object.__setattr__(copy, "_phase", "目录创建前来源及成功前缀复核")
-            check_source_context()
-            _recheck_tree_copy_target(copy)
-            expected = (
-                copy.expected if relative == "" else observe_file(target)
-            )
-            step = prepare_directory_creation(expected)
-            object.__setattr__(copy, "_phase", "固定目录创建")
-            try:
-                result = execute_filesystem_change(step)
-            except FilesystemChangeError as error:
-                _append_tree_copy_result(copy, error.result)
-                raise
-            _append_tree_copy_result(
-                copy, result, result.created_directory.object_identity,
-            )
-            object.__setattr__(copy, "_phase", "目录创建后成功前缀复核")
-            _recheck_tree_copy_target(copy)
 
+    def record(receipt):
+        _append_tree_copy_result(
+            copy, receipt, generation.object_identity_for(receipt),
+        )
+
+    try:
         target_times = dict(copy.file_times)
-        for relative, source in copy.source.files:
-            target = copy.expected.path / relative
-            object.__setattr__(copy, "_current", target)
-            object.__setattr__(copy, "_phase", "文件准备前来源及成功前缀复核")
-            check_source_context()
-            _recheck_tree_copy_target(copy)
-            expected = observe_file(target)
-            if expected.kind != "absent":
-                raise ValueError(f"固定复制文件位置不再不存在：{target}")
-            object.__setattr__(copy, "_phase", "固定来源完整文件成果准备")
-            artifact = prepare_copy_content_artifact(
-                source, expected, preserve_target_mode=False,
+        members = (
+            *(FixedTreeMember(
+                relative, "directory", directory=directory,
+            ) for relative, directory in copy.source.directories),
+            *(FixedTreeMember(
+                relative, "file", source=source,
                 options=ContentPublicationOptions(
                     durable_publication=copy.durable_publication,
                     mtime_ns=target_times[relative],
                 ),
-            )
-            object.__setattr__(copy, "_artifact", artifact)
-            if (
-                artifact.mechanism != "atomic_replace"
-                or artifact.digest != source.digest
-            ):
-                raise ValueError("复制文件成果不对应固定来源或独立目标机制")
-            object.__setattr__(copy, "_phase", "完整文件准备后来源及目标复核")
-            check_source_context()
-            _recheck_tree_copy_target(copy)
-            object.__setattr__(copy, "_phase", "固定文件成果发布")
-            prepared_identity = ObjectIdentity(*artifact.identity)
-            try:
-                result = publish_content(artifact)
-            except ContentPublicationError as error:
-                _append_tree_copy_result(
-                    copy, error.result, prepared_identity,
-                )
-                raise
-            # 先保留正式发布事实；随后核验失败不能抹去此前结果。
-            _append_tree_copy_result(copy, result, prepared_identity)
-            object.__setattr__(copy, "_artifact", None)
-            object.__setattr__(copy, "_phase", "文件发布后来源及成功前缀复核")
-            check_source_context()
-            _recheck_tree_copy_target(copy)
-
-        for relative, source_link in copy.source.links:
-            target = copy.expected.path / relative
-            object.__setattr__(copy, "_current", target)
-            object.__setattr__(copy, "_phase", "链接准备前来源及成功前缀复核")
-            check_source_context()
-            _recheck_tree_copy_target(copy)
-            expected = observe_file(target)
-            if expected.kind != "absent":
-                raise ValueError(f"固定复制链接位置不再不存在：{target}")
-            specification = specification_from_link(source_link.entry_link)
-            step = prepare_link_creation(expected, specification)
-            object.__setattr__(copy, "_phase", "链接创建前来源及成功前缀复核")
-            check_source_context()
-            _recheck_tree_copy_target(copy)
-            object.__setattr__(copy, "_phase", "固定链接叶子创建")
-            try:
-                result = execute_filesystem_change(step)
-            except FilesystemChangeError as error:
-                _append_tree_copy_result(copy, error.result)
-                raise
-            _append_tree_copy_result(
-                copy, result, result.created_link.object_identity,
-            )
-            object.__setattr__(copy, "_phase", "链接创建后成功前缀复核")
-            check_source_context()
-            _recheck_tree_copy_target(copy)
-
-        for relative, source in reversed(directories):
-            target = copy.expected.path / relative
-            object.__setattr__(copy, "_current", target)
-            object.__setattr__(copy, "_phase", "目录属性前来源及成功前缀复核")
-            check_source_context()
-            current = _recheck_tree_copy_target(copy)
-            expected = dict(current.directories)[relative]
-            attributes = source.attributes
-            step = prepare_directory_attributes(
-                expected,
-                file_mode=stat.S_IMODE(attributes.st_mode),
-                atime_ns=attributes.st_atime_ns,
-                mtime_ns=attributes.st_mtime_ns,
-                durable_publication=copy.durable_publication,
-            )
-            object.__setattr__(copy, "_phase", "固定目录基础属性设置")
-            try:
-                result = execute_directory_attributes(step)
-            except FilesystemChangeError as error:
-                _append_tree_copy_result(
-                    copy, error.result, expected.object_identity,
-                )
-                raise
-            _append_tree_copy_result(
-                copy, result, expected.object_identity,
-            )
-            object.__setattr__(copy, "_phase", "目录属性后成功前缀复核")
-            _recheck_tree_copy_target(copy)
-
-        object.__setattr__(copy, "_current", copy.expected.path)
-        object.__setattr__(copy, "_phase", "完整来源及独立目标最终核验")
-        _recheck_tree_copy_source(copy)
-        actual = _recheck_tree_copy_target(copy)
+            ) for relative, source in copy.source.files),
+            *(FixedTreeMember(
+                relative, source.kind,
+                specification=specification_from_link(source.entry_link),
+            ) for relative, source in copy.source.links),
+        )
+        generation = FixedTreeGeneration(
+            copy.expected, members,
+            recheck_context=check_source, record_step=record, stage=stage,
+            durable_publication=copy.durable_publication,
+        )
+        actual = generation.execute()
         if (
             actual.content_records != copy.source.content_records
             or actual.file_times != copy.file_times
         ):
+            stage(copy.expected.path, "完整独立复制内容及正式时间核验")
             raise OSError("独立复制树完整内容或正式文件时间不符")
-        if copy.durable_publication:
-            object.__setattr__(copy, "_phase", "复制树父目录持久化确认")
-            sync_directory(copy.expected.path.parent)
     except (OSError, ValueError) as error:
         raise TreeCopyError(TreeCopyResult(
             copy.source.path, copy.expected.path, copy.results, False,
             copy.phase, copy.current, error,
         )) from error
     finally:
-        # 不删除已经创建的目录或已发布文件。
-        # 清理失败保留成果引用，不能把未知对象当成本次暂存删除。
+        if generation is not None:
+            object.__setattr__(copy, "_artifact", generation.artifact)
         if cleanup_content_artifact(copy._artifact):
             object.__setattr__(copy, "_artifact", None)
 
     object.__setattr__(copy, "_final_observation", actual)
     object.__setattr__(copy, "_lifecycle", "completed")
-    object.__setattr__(copy, "_phase", "completed")
-    object.__setattr__(copy, "_current", None)
+    stage(None, "completed")
     return TreeCopyResult(
         copy.source.path, copy.expected.path, copy.results,
         True, "completed", None,

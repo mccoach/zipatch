@@ -95,8 +95,8 @@ class BackupRestorePanel(BasePanel):
         options = styled_frame(body, bg=THEME["bg_panel"])
         options.pack(fill="x", pady=(4, 6))
         for field, label in (
-            ("keep_restore_source_path", "还原成功后保留来源路径"),
             ("open_backup_after_done", "完成后打开本次保护备份"),
+            ("keep_restore_source_path", "还原成功后保留来源路径"),
         ):
             variable = tk.BooleanVar(value=self.cfg[field])
             setattr(self, field, variable)

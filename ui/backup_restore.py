@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""两页面共享恢复交互协调；不实现文件恢复或推导工作范围。"""
+"""独立备份还原页面的恢复交互协调；不实现文件恢复或推导工作范围。"""
 
 import traceback
 import tkinter as tk
@@ -15,9 +15,7 @@ from services.patch_service import (
     apply_backup_restore, invalidate_preview, preview_backup_restore,
 )
 from ui.dialogs import create_managed_text_box
-from ui.message_dialogs import (
-    safe_ask_risk_confirm, safe_show_error, safe_show_info,
-)
+from ui.message_dialogs import safe_show_error, safe_show_info
 from ui.operation_lock import locked_page
 from ui.recovery_selection import select_backup_restore
 from ui.theme import styled_button, styled_frame
@@ -28,7 +26,7 @@ from ui.window_manager import (
 
 
 def resolve_restore_source(config):
-    """两页使用明确绝对来源，不借执行模式的根或历史报告定位。"""
+    """使用明确绝对来源，不借修改包的项目根或历史报告定位。"""
     source = strip_outer_quotes(config["restore_source_dir"])
     if not source:
         raise ValueError("请填写包含 recovery.json 的备份任务目录")
@@ -122,10 +120,10 @@ def _remember_created_backup(panel, executor):
 
 
 def run_backup_restore(panel, config, *, execute):
-    """调用方已固定并保存配置、进入operation；两页面只走本正式链。
+    """调用方已固定并保存配置、进入operation；页面只走本正式链。
 
-    页面提供record_backup_restore_result，分别处理已有长期报告或
-    会话报告及配置更新。保存结果不提供再次执行恢复的入口。
+    页面提供record_backup_restore_result，接受完整结果及配置更新。
+    保存结果不提供再次执行恢复的入口。
     """
     preview = None
     with locked_page(panel):
