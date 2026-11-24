@@ -116,3 +116,20 @@ def validate_required_path(path, label):
     if not path:
         raise ValueError(f"{label}不能为空。")
     return path
+
+
+def resolve_output_path(value):
+    """完整输出输入必须明确到绝对文件位置；沿用原成果安全政策。"""
+    from core.path_validation import strip_outer_quotes
+
+    selected = strip_outer_quotes(value)
+    if not selected:
+        raise ValueError("输出路径不能为空")
+    if selected.endswith(("/", "\\")):
+        raise ValueError("输出路径必须包含文件名，不能只填写文件夹")
+    path = Path(selected)
+    if not path.is_absolute():
+        raise ValueError("输出路径必须是包含文件名的完整绝对路径")
+    if not path.name:
+        raise ValueError("输出路径必须包含文件名")
+    return build_output_path(str(path.parent), path.name)

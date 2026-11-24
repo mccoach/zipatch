@@ -181,21 +181,24 @@ def _segment_pattern(segment):
 def _source_directory(source_folder, cancel, traversal):
     """相对规则基准也经过同一节点闸门，后台不能先解析完整链接链。"""
     if not source_folder or not os.path.isabs(source_folder):
-        raise ValueError("相对路径需要明确绝对源文件夹。")
+        raise ValueError("相对规则需要填写明确的相对路径基准绝对路径。")
     check_cancel(cancel)
     access = traversal.resolve(source_folder)
     if access is None:
         return None
     if access.kind != "directory":
-        raise ValueError("相对规则的源基准不是普通目录。")
+        raise ValueError("相对路径基准没有定位到普通文件夹。")
     return access.nominal_path
 
 
-def _exact_file(rule, base, cancel, traversal):
-    """明确入口和后台检查共用同一授权前停止机制。"""
+def _exact_file(rule, base, cancel, traversal, *, object_kind="file"):
+    """明确入口共用授权前停止机制；目录规则只选择目录实体。"""
     from services.source_traversal import SourceAuthorizationRequired
 
-    if rule.segments and rule.segments[-1] == ".":
+    if (
+        object_kind == "file"
+        and rule.segments and rule.segments[-1] == "."
+    ):
         return DemandMatch(issue="末尾分隔符不能作为明确文件选择。")
     check_cancel(cancel)
     try:
@@ -207,12 +210,16 @@ def _exact_file(rule, base, cancel, traversal):
     check_cancel(cancel)
     if observed is None:
         return DemandMatch(completed=True, disabled=True)
+    if object_kind == "directory":
+        if observed.kind != "directory":
+            return DemandMatch(issue="文件夹列表只能选择文件夹，不能选择文件。")
+        return DemandMatch(
+            (str(observed.nominal_path),),
+            completed=True, accesses=(observed,),
+        )
     if observed.kind == "directory":
         from core.link_paths import inspect_link_path, recheck_link_path
 
-        # has_links只说明整条路线经过链接，不能代表末端目录入口类型。
-        # 已授权完整路线先复核；不跟随末端的分类仍复用正式解析机制，
-        # 已决定节点不再询问，也不由分类取得新的目标访问权限。
         recheck_link_path(observed)
         entry = inspect_link_path(
             observed.nominal_path, follow_final_link=False,
@@ -220,7 +227,7 @@ def _exact_file(rule, base, cancel, traversal):
         )
         recheck_link_path(observed)
         if entry.entry_link is None:
-            return DemandMatch(issue="普通目录不能直接合并，请使用通配符。")
+            return DemandMatch(issue="文件列表不能直接选择普通文件夹，请使用文件夹列表或文件通配符。")
     return DemandMatch(
         (str(observed.nominal_path),),
         completed=True, accesses=(observed,),
@@ -245,7 +252,7 @@ def _wildcard_scope(rule, base, cancel, traversal):
     if access is None:
         return DemandMatch(completed=True, disabled=True)
     if access.kind != "directory":
-        return DemandMatch(issue="通配符固定前缀不是普通目录。")
+        return DemandMatch(issue="通配符固定前缀不是普通文件夹。")
     if access.has_links and ".." in rule.segments[first:]:
         return DemandMatch(
             issue="链接通配符范围不能用后续..离开已授权子树。"
@@ -253,7 +260,9 @@ def _wildcard_scope(rule, base, cancel, traversal):
     return access
 
 
-def _wildcard_files(rule, scope_access, cancel, *, traversal):
+def _wildcard_files(
+    rule, scope_access, cancel, *, traversal, object_kind="file",
+):
     """规则自身记录本次是否遇到断点，不从去重后的报告数量推断决定。"""
     from core.link_paths import recheck_link_path
     from services.source_traversal import SourceAuthorizationRequired
@@ -301,6 +310,8 @@ def _wildcard_files(rule, scope_access, cancel, *, traversal):
             fresh = reachable - previous
             previous.update(fresh)
             directory_match |= len(segments) in fresh
+            if object_kind == "directory" and len(segments) in fresh:
+                files.setdefault(windows_path_key(access.nominal_path), access)
             active = {
                 number for number in fresh
                 if number < len(segments) and segments[number] not in (".", "..")
@@ -339,12 +350,14 @@ def _wildcard_files(rule, scope_access, cancel, *, traversal):
                     pending.append((
                         child, next_positions, ancestors | {identifier},
                     ))
-                elif any(number == len(segments) - 1 for number in matched):
+                elif object_kind == "file" and any(
+                    number == len(segments) - 1 for number in matched
+                ):
                     files.setdefault(windows_path_key(child.nominal_path), child)
     except SourceAuthorizationRequired:
         return DemandMatch(requires_authorization=True)
     except (FileNotFoundError, PermissionError, UnsafePathError) as error:
-        return DemandMatch(issue=f"无法完整检查指定目录范围：{error}")
+        return DemandMatch(issue=f"无法完整检查指定文件夹范围：{error}")
 
     ordered = tuple(sorted(
         files.values(),
@@ -360,12 +373,16 @@ def _wildcard_files(rule, scope_access, cancel, *, traversal):
         )
     if blocked:
         return DemandMatch(completed=True, disabled=True)
+    if object_kind == "directory":
+        return DemandMatch(issue="通配符未命中任何文件夹。")
     if directory_match:
         return DemandMatch(issue="匹配结果只有文件夹，没有可合并文件。")
     return DemandMatch(issue="通配符未命中任何文件。")
 
 
-def prepare_demand_inspection(jobs, source_folder, cancel, *, traversal=None):
+def prepare_demand_inspection(
+    jobs, source_folder, cancel, *, traversal=None, object_kind="file",
+):
     """后台及正式业务共用节点机制；后台没有授权能力，遇节点即返回待授权。"""
     from services.source_traversal import (
         SourceAuthorizationRequired, SourceSelectionCancelled, SourceTraversal,
@@ -375,6 +392,8 @@ def prepare_demand_inspection(jobs, source_folder, cancel, *, traversal=None):
         traversal = SourceTraversal(check_cancel=lambda: check_cancel(cancel))
     if not isinstance(traversal, SourceTraversal):
         raise TypeError("列表准备必须使用正式来源任务")
+    if object_kind not in ("file", "directory"):
+        raise ValueError("列表对象类型必须是file或directory")
     prepared = []
     source_checked = False
     source_base = None
@@ -424,13 +443,18 @@ def prepare_demand_inspection(jobs, source_folder, cancel, *, traversal=None):
                 prepared.append((identifier, rule, scope, None))
         else:
             prepared.append((
-                identifier, rule, None, _exact_file(rule, base, cancel, traversal),
+                identifier, rule, None,
+                _exact_file(
+                    rule, base, cancel, traversal, object_kind=object_kind,
+                ),
             ))
     check_cancel(cancel)
     return tuple(prepared)
 
 
-def inspect_prepared_demand_rules(prepared, cancel, *, traversal=None):
+def inspect_prepared_demand_rules(
+    prepared, cancel, *, traversal=None, object_kind="file",
+):
     """只消费原固定前缀；旧枚举回调及前缀跳过参数退出正式链。"""
     from services.source_traversal import SourceTraversal
 
@@ -443,22 +467,26 @@ def inspect_prepared_demand_rules(prepared, cancel, *, traversal=None):
         check_cancel(cancel)
         results[identifier] = (
             result if result is not None else
-            _wildcard_files(rule, scope, cancel, traversal=traversal)
+            _wildcard_files(
+                rule, scope, cancel,
+                traversal=traversal, object_kind=object_kind,
+            )
         )
     check_cancel(cancel)
     return results
 
 
-def inspect_demand_rules(jobs, source_folder, cancel):
-    """同一后台任务共用一次普通名称枚举；任何链接均在授权前停止。"""
+def inspect_demand_rules(jobs, source_folder, cancel, *, object_kind="file"):
+    """两份后台列表共用名称枚举；任何链接均在授权前停止。"""
     from services.source_traversal import SourceTraversal
 
     traversal = SourceTraversal(check_cancel=lambda: check_cancel(cancel))
     prepared = prepare_demand_inspection(
-        jobs, source_folder, cancel, traversal=traversal,
+        jobs, source_folder, cancel,
+        traversal=traversal, object_kind=object_kind,
     )
     return inspect_prepared_demand_rules(
-        prepared, cancel, traversal=traversal,
+        prepared, cancel, traversal=traversal, object_kind=object_kind,
     )
 
 

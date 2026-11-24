@@ -6,14 +6,14 @@ from ui.window_manager import center_window
 from ui.rule_list_editor import (
     RULE_DISABLED_BACKGROUND, RULE_WARNING_BACKGROUND, RuleListEditor,
 )
-from ui.dialogs import TextDraftSession, create_managed_text_box
-from ui.theme import styled_button, styled_frame, styled_text_with_scrollbars
-from ui.window_manager import register_popup, unregister_popup, take_modal_control
+from ui.dialogs import TextDraftSession, create_managed_text_box, show_rule_help
+from ui.theme import styled_button, styled_frame
+from ui.window_manager import register_popup, take_modal_control
 
 
 EXCLUSION_FIELDS = (
-    ("exclude_folders", "目录名单", "directory"),
-    ("exclude_files", "文件名单", "file"),
+    ("exclude_folders", "文件夹排除名单", "directory"),
+    ("exclude_files", "文件排除名单", "file"),
 )
 
 
@@ -22,21 +22,21 @@ EXCLUSION_RULES_TEXT = r"""排除名单填写规则
 
 一、先选对名单
 ────────────────────────────────────────
-【目录名单】
-填写目录名称或相对于源文件夹的目录路径。
-命中目录后，跳过该目录及其全部子目录和文件。
-你选择的源文件夹本身不参与目录名单匹配。
+【文件夹排除名单】
+填写文件夹名称或相对于源文件夹的文件夹路径。
+命中文件夹后，跳过该文件夹及其全部下级文件夹和文件。
+你选择的源文件夹本身不参与文件夹排除名单匹配。
 
-【文件名单】
+【文件排除名单】
 填写完整文件名、文件名通配符，
 或相对于源文件夹的文件路径。
 
 例：
 cache
-写在目录名单中，排除名为 cache 的目录及其内容。
+写在文件夹排除名单中，排除名为 cache 的文件夹及其内容。
 
 README.md
-写在文件名单中，匹配 README.md，
+写在文件排除名单中，匹配 README.md，
 不匹配 README.md.bak。
 
 名称采用完整匹配，不自动做子串匹配。
@@ -55,7 +55,7 @@ README.md
 • Tab、孤立回车及禁用控制字符不是排版，启用行仍按非法内容处理。
 • 不支持行尾注释，备注可单独写成停用行。
 • 不展开环境变量或 ~。
-• 规则不要求对应文件或目录目前真实存在。
+• 规则不要求对应文件或文件夹目前真实存在。
 • 使用普通回车换行；Tab 不是规则分隔符。
 
 例：
@@ -95,9 +95,9 @@ Ctrl+` 逐行切换行首一个 |；无选区只处理光标所在物理行。
 分号 ; 不表示停用或注释。
 
 
-四、无扩展名条件：文件名单行首 :
+四、无扩展名条件：文件排除名单行首 :
 ────────────────────────────────────────
-只适用于文件名单，不适用于目录名单。
+只适用于文件排除名单，不适用于文件夹排除名单。
 
 行首半角冒号 : 表示：
 文件没有扩展名，并且满足冒号后的名称或路径规则。
@@ -122,9 +122,9 @@ README、LICENSE、.env、.gitignore。
 有扩展名示例：
 main.py、archive.tar.gz、.config.json。
 
-只有文件名单中的单独“:”允许没有后续模式。
+只有文件排除名单中的单独“:”允许没有后续模式。
 “:\”或“:/”没有模式正文，是无效规则。
-冒号只能作为文件名单的行首条件，不允许正文冒号、
+冒号只能作为文件排除名单的行首条件，不允许正文冒号、
 盘符冒号或“::”“:|”等组合。
 
 
@@ -145,7 +145,7 @@ README.md
 匹配任意层级中的 README.md。
 
 【根限定：开头一个 \ 或 /】
-只从本次源文件夹的根开始匹配，不是磁盘根目录。
+只从本次源文件夹的根开始匹配，不是磁盘根路径。
 
 \cache
 只匹配源文件夹根下的 cache。
@@ -190,7 +190,7 @@ src\.\cache
 
 七、通配符
 ────────────────────────────────────────
-【*：零个或多个字符，不跨目录】
+【*：零个或多个字符，不跨文件夹层级】
 
 *.log
 匹配任意层级的 .log 文件。
@@ -205,7 +205,7 @@ cache*
 匹配 cache、cache_old；
 写在哪份名单，就作用于哪类对象。
 
-【?：一个字符，不跨目录】
+【?：一个字符，不跨文件夹层级】
 
 part?.txt
 匹配 part1.txt，不匹配 part.txt 或 part10.txt。
@@ -223,14 +223,14 @@ src\**\README
 匹配 src\README、src\sub\README 等。
 
 tools\**
-目录名单中，匹配 tools 本身及其后代目录，
-因此整个 tools 目录会被跳过。
-文件名单中，匹配 tools 下所有层级的文件，
-不会把 tools 目录本身当成文件。
+文件夹排除名单中，匹配 tools 本身及其下级文件夹，
+因此整个 tools 文件夹会被跳过。
+文件排除名单中，匹配 tools 下所有层级的文件，
+不会把 tools 文件夹本身当成文件。
 
 **
-目录名单中匹配全部子目录，但不包括源文件夹本身。
-文件名单中匹配全部文件，包括无扩展名文件。
+文件夹排除名单中匹配全部下级文件夹，但不包括源文件夹本身。
+文件排除名单中匹配全部文件，包括无扩展名文件。
 
 双星号必须独占路径段。以下写法无效：
 a**b
@@ -350,11 +350,11 @@ cache 与 \cache、README* 与 :README*、
 ────────────────────────────────────────
 全景扫描：
 排除文件不列出、不计入文件数量；
-排除目录及其内部内容不列出、不计入统计。
+排除文件夹及其内部内容不列出、不计入统计。
 
-按目录合并：
+“合并文件夹”：
 排除文件不读取正文，也不生成路径正文块或占位块。
-排除目录不进入；只在成果末尾主动忽略名单列该目录，
+排除文件夹不进入；只在成果末尾主动忽略名单列该文件夹，
 不展开其内部文件。
 未授权来源同样不生成块，集中列主动忽略名单。
 明确可处理的正文读取／严格解码失败集中列被动失败名单，
@@ -362,50 +362,24 @@ cache 与 \cache、README* 与 :README*、
 完成弹窗分别提示主动忽略、被动失败及时间缺失数量。
 尾部名单仅为说明，不作为拆分重建输入。
 
-本次输出文件自身自动跳过。
-仅列表模式使用独立的合并列表，不使用两份排除名单。
-目录+列表模式的排除只作用于目录选择；
-合并列表明确选中的文件会补入真实正文，
-包括被排除的文件及被排除目录中的明确选中文件。
-同一路径只合并一次，不修改排除规则本身。
-主页面右侧分别提供“仅目录合并”“仅列表合并”“目录+列表合并”按钮；
+文件夹遍历自动跳过本次输出文件；
+文件列表明确选中输出文件时，整次任务拒绝。
+“合并文件”只使用文件列表，不使用两份排除名单。
+“组合合并”的排除只作用于文件夹来源；
+文件列表明确选中的文件会补入真实正文，
+包括被排除的文件及被排除文件夹中的明确选中文件。
+同一实际文件只输出一个正文块，不修改排除规则本身。
+主页面右侧分别提供“合并文件夹”“合并文件”“组合合并”按钮；
 点击对应按钮直接执行，三个按钮共用原有合并处理流程。
 """
 
 
 def show_exclusion_rules(parent):
     """展示只读帮助，不读取草稿、不提交配置。"""
-
-    dialog = tk.Toplevel(parent)
-    dialog.title("排除名单 - 填写规则")
-    dialog.configure(bg=THEME["bg"])
-    dialog.transient(parent)
-    take_modal_control(dialog)
-    center_window(dialog, 900, 720)
-
-    frame, text = styled_text_with_scrollbars(
-        dialog, height=30, mono=False, wrap="word", readonly=True,
+    return show_rule_help(
+        parent, "排除名单 - 填写规则", EXCLUSION_RULES_TEXT,
+        width=900, height=720,
     )
-    frame.pack(fill="both", expand=True, padx=16, pady=(16, 8))
-    text.configure(state="normal")
-    text.insert("1.0", EXCLUSION_RULES_TEXT)
-    text.configure(state="disabled")
-
-    buttons = styled_frame(dialog)
-    buttons.pack(fill="x", padx=16, pady=(0, 14))
-
-    def close():
-        unregister_popup(dialog)
-        dialog.destroy()
-        return True
-
-    styled_button(buttons, "关闭", close, width=10).pack(side="right")
-    register_popup(dialog, close)
-    try:
-        parent.wait_window(dialog)
-    finally:
-        unregister_popup(dialog)
-
 
 
 class ExclusionDraftSession(TextDraftSession):
@@ -504,9 +478,9 @@ def create_exclusion_dialog(parent, title, config, commits, page):
     widgets = {}
     for field, name, _ in EXCLUSION_FIELDS:
         label = (
-            "排除目录名称／相对路径"
+            "排除文件夹名称 / 相对路径"
             if field == "exclude_folders" else
-            "排除完整文件名／相对路径"
+            "排除完整文件名 / 相对路径"
         )
         widgets[field] = create_managed_text_box(
             body, label, config[field], height=11, mono=True, commits=commits,

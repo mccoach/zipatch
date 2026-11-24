@@ -6,12 +6,12 @@ import tkinter as tk
 
 from core.constants import THEME
 from ui.window_manager import center_window
-from ui.dialogs import TextDraftSession, create_managed_text_box
+from ui.dialogs import TextDraftSession, create_managed_text_box, show_rule_help
 from ui.rule_list_editor import (
     RULE_DISABLED_BACKGROUND, RULE_WARNING_BACKGROUND, RuleListEditor,
 )
-from ui.theme import styled_button, styled_frame, styled_text_with_scrollbars
-from ui.window_manager import register_popup, unregister_popup, take_modal_control
+from ui.theme import styled_button, styled_frame
+from ui.window_manager import register_popup, take_modal_control
 
 
 NEWLINE_HELP = r"""CRLF 文件名单填写规则
@@ -20,7 +20,7 @@ LF、CRLF 都表示换行。
 LF 常用于跨平台文本，CRLF 常用于 Windows 批处理。
 初始名单为 *.bat 和 *.CMD，大小写不影响匹配。
 
-修改包“标准化文本换行”默认打开：
+修改包“标准化换行”默认打开：
 打开时，命中任意启用规则使用 CRLF；未命中使用 LF。
 空名单或全部停用时，修改包实际写入的文本使用 LF。
 关闭时，保留最终正文原有换行，不使用或校验本名单。
@@ -33,7 +33,7 @@ LF 常用于跨平台文本，CRLF 常用于 Windows 批处理。
 修改包的开关不控制代码拆分还原，也不控制合并。
 合并逐正文转换，容器结构保持 CRLF；不补源码末尾换行。
 
-本设置不影响备份恢复、路径全景扫描或文件复制移动。
+本设置不影响备份还原、路径全景扫描或文件复制移动。
 
 一、每行一条文件规则
 填写完整名称、通配符或相对路径，不用逗号、分号分隔规则。
@@ -53,25 +53,25 @@ scripts\*.cmd
 tools\**\*.bat
 
 二、路径和根限定
-修改包以本次项目根目录为基准。
-代码拆分的指定目录模式以指定目录为基准，保留根限定。
-原位模式按实际绝对目标路径尾部匹配，忽略开头根限定。
-拆分只有覆盖或跳过，不自动改名；按实际目标决定换行。
-按目录合并相对于本次源文件夹匹配，开头斜杠限定该根。
-按名单合并从来源绝对路径尾部向前匹配，开头斜杠不限定盘符根：
+修改包以本次项目根文件夹为基准。
+代码拆分的“指定文件夹”模式以目标文件夹为基准，保留根限定。
+“原位还原”模式按实际绝对目标路径尾部匹配，忽略开头根限定。
+拆分只有覆盖或跳过，不自动改名；具体匹配位置按各模式处理。
+“合并文件夹”相对于每个名义源文件夹匹配，开头斜杠限定该根。
+“合并文件”从名义来源绝对路径尾部向前匹配，开头斜杠不限定盘符根：
 \scripts\*.cmd 和 scripts\*.cmd 都能匹配
 E:\scripts\a.cmd 与 E:\Project\scripts\a.cmd。
 普通路径段必须连续；跨层级使用 scripts\**\*.cmd。
-此区别只作用于合并换行选择，不改变文件选择名单或排除规则。
-主页面直接点击“仅目录合并”“仅列表合并”或“目录+列表合并”按钮执行；
+此区别只作用于合并换行选择，不改变来源列表或排除规则。
+主页面直接点击“合并文件夹”“合并文件”或“组合合并”按钮执行；
 三个按钮共用原有合并处理流程，换行选择规则不变。
-仅列表全部按绝对路径尾部匹配。
-目录+列表在源文件夹范围内保留目录根语义，
-补充的外部文件按绝对路径尾部匹配。
+“合并文件”全部按名义绝对路径尾部匹配。
+“组合合并”中，归属源文件夹的文件保留该源根语义；
+其他补充文件按名义绝对路径尾部匹配。
 
 不加开头斜杠，可以从任意层级开始匹配。
-开头一个 \ 或 /，在指定目录模式只从指定目录根开始匹配；
-原位模式忽略此根限定，从实际绝对目标路径尾部匹配。
+开头一个 \ 或 /，在“指定文件夹”模式只从目标文件夹根开始匹配；
+“原位还原”模式忽略此根限定，从实际绝对目标路径尾部匹配。
 scripts\*.cmd 匹配 scripts 当前层级的 CMD 文件。
 \*.cmd 只匹配根层文件，不匹配 scripts\start.cmd。
 
@@ -79,10 +79,10 @@ scripts\*.cmd 匹配 scripts 当前层级的 CMD 文件。
 不允许盘符、UNC、独立 . 或 ..、内部连续分隔符。
 
 三、通配符
-* 匹配一个路径段内零个或多个字符，不跨目录。
+* 匹配一个路径段内零个或多个字符，不跨文件夹层级。
 ? 匹配一个路径段内一个字符。
-** 必须独占路径段，支持零层或多层目录。
-tools\**\*.bat 匹配 tools 及其子目录的 BAT 文件。
+** 必须独占路径段，支持零层或多层文件夹。
+tools\**\*.bat 匹配 tools 及其下级文件夹中的 BAT 文件。
 不支持 a**b、**.bat、***、正则、花括号扩展或取反。
 [ab].cmd 匹配字面文件名 [ab].cmd。
 
@@ -133,35 +133,10 @@ Ctrl+` 逐行切换行首一个 |；无选区处理光标行，有选区各行�
 
 
 def show_newline_help(parent):
-
-    dialog = tk.Toplevel(parent)
-    dialog.title("换行设置 - 填写规则")
-    dialog.configure(bg=THEME["bg"])
-    dialog.transient(parent)
-    take_modal_control(dialog)
-    center_window(dialog, 860, 720)
-    frame, text = styled_text_with_scrollbars(
-        dialog, height=30, wrap="word", readonly=True,
+    return show_rule_help(
+        parent, "换行设置 - 填写规则", NEWLINE_HELP,
+        width=860, height=720,
     )
-    frame.pack(fill="both", expand=True, padx=16, pady=(16, 8))
-    text.configure(state="normal")
-    text.insert("1.0", NEWLINE_HELP)
-    text.configure(state="disabled")
-    row = styled_frame(dialog)
-    row.pack(fill="x", padx=16, pady=(0, 14))
-
-    def close():
-        unregister_popup(dialog)
-        dialog.destroy()
-        return True
-
-    styled_button(row, "关闭", close, width=10).pack(side="right")
-    register_popup(dialog, close)
-    try:
-        parent.wait_window(dialog)
-    finally:
-        unregister_popup(dialog)
-
 
 
 class NewlineDraftSession(TextDraftSession):
@@ -211,8 +186,8 @@ def edit_newline_settings(parent, commits):
              "修改包标准化默认打开；打开时命中使用 CRLF，未命中使用 LF。\n"
              "修改包关闭标准化时保留原换行，不使用或校验本名单。\n"
              "合并与拆分各有独立开关，默认关闭；开启时才使用本名单。\n"
-             "按目录相对于源目录；按名单从绝对路径尾部匹配。\n"
-             "备份恢复、路径扫描及复制移动不受影响。\n"
+             "文件夹来源相对于名义源文件夹匹配；文件列表来源从名义绝对路径尾部匹配。\n"
+             "备份还原、路径全景扫描及复制移动不受影响。\n"
              "快捷键：Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做，Ctrl+` 逐行停用／启用。",
         bg=THEME["bg"], fg=THEME["fg_label"], font=THEME["font_main"],
         anchor="w", justify="left", wraplength=740,

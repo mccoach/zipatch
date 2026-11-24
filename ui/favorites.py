@@ -67,30 +67,22 @@ FAVORITE_ACTION_BITMAPS = {
 
 
 def title_bar_button(parent, text, command, width=6, danger=False, accent=False, bold=False):
-    foreground = THEME["danger"] if danger else ("#168a16" if accent else THEME["fg"])
-    background = THEME["bg_input"] if danger or accent else THEME["bg_btn"]
-    button = tk.Button(
-        parent, text=text, command=command, width=width,
-        bg=background, fg=foreground, activebackground=THEME["bg_btn_hover"],
-        activeforeground=THEME["fg_on_dark"], relief="flat", bd=0,
-        padx=4, pady=1, cursor="hand2",
-        font=THEME["font_title"] if bold else THEME["font_main"],
+    from ui.theme import styled_button
+
+    return styled_button(
+        parent, text, command, width=width,
+        danger=danger, accent=accent, compact=True, bold=bold,
     )
-    button.bind("<Enter>", lambda event: button.configure(
-        bg=THEME["bg_btn_hover"], fg=THEME["fg_on_dark"],
-    ))
-    button.bind("<Leave>", lambda event: button.configure(bg=background, fg=foreground))
-    return button
 
 
 def favorite_action_button(parent, action, command, *, pinned=False):
     """绘制有明确语义与悬停提示的收藏操作图标。"""
     foreground = (
         THEME["danger"] if action == "delete"
-        else "#168a16" if action == "pin" and pinned
+        else THEME["accent"] if action == "pin" and pinned
         else THEME["fg"]
     )
-    background = "#cde8cf" if action == "pin" and pinned else THEME["bg_input"]
+    background = "#d6ddcd" if action == "pin" and pinned else THEME["bg_input"]
     image = tk.PhotoImage(master=parent, width=12, height=12)
     for y, row in enumerate(FAVORITE_ACTION_BITMAPS[action]):
         for x, pixel in enumerate(row):
@@ -99,8 +91,9 @@ def favorite_action_button(parent, action, command, *, pinned=False):
     button = tk.Button(
         parent, image=image, command=command,
         width=FAVORITE_ACTION_WIDTH, height=FAVORITE_ROW_HEIGHT,
-        padx=0, pady=0, bd=0, highlightthickness=0, relief="flat",
-        bg=background, activebackground=THEME["bg_btn_hover"],
+        padx=0, pady=0, bd=1, highlightthickness=0,
+        relief="sunken" if action == "pin" and pinned else "raised",
+        bg=background, activebackground="#e0dbd2",
         cursor="hand2", takefocus=True,
     )
     button._favorite_action = action

@@ -22,6 +22,7 @@ from ui.text_editor import (
     replace_text_preserve_view, set_text_value,
 )
 from ui.operation_lock import locked_page
+from ui.page_settings import create_page_settings
 from ui.patch_op_selection import PatchOpSelection
 from core.time_utils import current_timestamp_text
 from panels.base_panel import BasePanel, publication_failure_title
@@ -39,7 +40,7 @@ from services.patch_service import (
 from ui.dialogs import create_managed_text_box
 from ui.newline_settings import edit_newline_settings
 from ui.theme import styled_button, styled_frame
-from ui.widgets import browse_folder, create_entry_row, make_checkbutton
+from ui.widgets import browse_folder, create_entry_row
 from ui.window_manager import center_window, register_popup, unregister_popup
 
 
@@ -58,42 +59,44 @@ class PatchPanel(BasePanel):
         self.backup_dir = tk.StringVar(value=self.cfg["backup_dir"])
         self.last_backup_root = ""
         self.project_root_entry = create_entry_row(
-            body, "项目根目录", self.project_root,
+            body, "项目根文件夹", self.project_root,
             commits=self.commits, config=self.cfg, field="project_root", page="patch",
             history_key="patch.project_root",
             value_normalizer=normalize_windows_display_path,
             browse_command=lambda: browse_folder(
-                self.project_root, "选择项目根目录", parent=self.root,
+                self.project_root, "选择项目根文件夹", parent=self.root,
+                commits=self.commits, history_key="patch.project_root",
             ),
             open_command=lambda: open_path_with_default_app(
                 self.project_root.get(), self.root,
             ),
         )
         self.backup_dir_entry = create_entry_row(
-            body, "备份目录", self.backup_dir,
+            body, "备份保存位置", self.backup_dir,
             commits=self.commits, config=self.cfg, field="backup_dir", page="patch",
             history_key="patch.backup_dir",
             value_normalizer=normalize_windows_display_path,
             browse_command=lambda: self.browse_project_relative_folder(
-                self.backup_dir, "选择备份保存目录",
+                self.backup_dir, "选择备份保存位置",
             ),
             open_command=self.open_configured_backup_dir,
-            tooltip_text="相对备份目录基于项目根目录；绝对目录直接定位。",
+            tooltip_text="相对路径基于项目根文件夹，绝对路径直接定位；执行时在此新建备份任务文件夹。",
         )
-        options = styled_frame(body, bg=THEME["bg_panel"])
-        options.pack(fill="x", pady=(10, 0))
-        for field, label in (
-            ("open_backup_after_done", "完成后打开本次备份"),
-            ("normalize_text_newlines", "标准化文本换行"),
-            ("allow_multi_replace_exact", "允许多处精确替换"),
-            ("allow_delete", "允许删除文件/文件夹（危险）"),
-        ):
-            variable = tk.BooleanVar(value=self.cfg[field])
+        _, _, variables = create_page_settings(
+            body, self.commits, self.cfg,
+            (
+                ("open_backup_after_done", "完成后打开备份", "完成后打开本次修改备份"),
+                ("normalize_text_newlines", "标准化换行", "按换行设置转换修改成果"),
+                ("allow_multi_replace_exact", "允许多处精确替换", "允许 count 大于 1 的精确替换"),
+                ("allow_delete", "允许删除（危险）", "允许删除文件或文件夹的修改包操作"),
+            ),
+            (
+
+                ("newline", "换行设置", self.open_newline_settings),
+            ),
+        )
+        for field, variable in variables.items():
             setattr(self, field, variable)
-            make_checkbutton(
-                options, label, variable, commits=self.commits,
-                config=self.cfg, field=field,
-            ).pack(side="left", padx=(0, 12))
         area = styled_frame(body, bg=THEME["bg_panel"])
         area.pack(fill="both", expand=True, pady=(10, 0))
         area.grid_columnconfigure(0, weight=1, uniform="patch_text_columns")
@@ -103,7 +106,7 @@ class PatchPanel(BasePanel):
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         self.patch_text = create_managed_text_box(
-            left, "修改包源码", self.cfg["patch_text"],
+            left, "修改包内容", self.cfg["patch_text"],
             height=22, mono=True, show_statistics=True,
             commits=self.commits, config=self.cfg,
             field="patch_text", page="patch", favorite_key="patch_text",
@@ -122,15 +125,13 @@ class PatchPanel(BasePanel):
         )
         row = styled_frame(body, bg=THEME["bg_panel"])
         row.pack(fill="x", pady=(12, 0))
-        styled_button(row, "一键清空", self.clear_all, width=10).pack(
+        styled_button(row, "清空输入和结果", self.clear_all, width=16).pack(
             side="left", padx=(0, 8),
         )
         styled_button(row, "打开本次备份", self.open_last_backup_dir, width=12).pack(
             side="left",
         )
-        styled_button(row, "换行设置", self.open_newline_settings, width=10).pack(
-            side="left", padx=(8, 0),
-        )
+
         self.apply_button = styled_button(
             row, "预演并执行", self.apply, width=12, danger=True,
         )
@@ -139,9 +140,10 @@ class PatchPanel(BasePanel):
             row, "仅预演", self.preview, width=14, accent=True,
         )
         self.preview_button.pack(side="right")
-        styled_button(row, "修改包协议规范", self.show_protocol_doc, width=16).pack(
-            side="right", padx=(0, 8),
-        )
+        styled_button(
+            row, "修改包协议", self.show_protocol_doc, width=12,
+        ).pack(side="right", padx=(0, 8))
+
 
     def resolve_project_relative_initial_dir(self, value):
         root_text = normalize_windows_display_path(self.project_root.get())
@@ -164,7 +166,8 @@ class PatchPanel(BasePanel):
         return browse_folder(
             variable, title,
             initial_dir=self.resolve_project_relative_initial_dir(variable.get()),
-            parent=self.root,
+            parent=self.root, commits=self.commits,
+            history_key="patch.backup_dir",
         )
 
     def open_configured_backup_dir(self):
@@ -258,7 +261,7 @@ class PatchPanel(BasePanel):
 
     def run_preview(self, cfg):
         """消费本次固定参数；计算结果不写入面板或配置状态。"""
-        project = validate_required_path(cfg["project_root"], "项目根目录")
+        project = validate_required_path(cfg["project_root"], "项目根文件夹")
 
         patch = validate_required_path(cfg["patch_text"], "修改包内容")
         from ui.patch_link_authorization import (
@@ -403,12 +406,12 @@ class PatchPanel(BasePanel):
     def build_apply_operation_summary(self, cfg, preview):
         """确认范围只从固定计划派生，不读取磁盘或消费内部执行单元。"""
         groups = [
-            ("create", "新增文件"), ("create_dir", "创建目录"),
+            ("create", "新增文件"), ("create_dir", "创建文件夹"),
             ("overwrite", "覆盖已有路径"), ("append_text", "追加文本"),
             ("replace_exact", "精确替换"), ("replace_between", "锚点区间替换"),
             ("rename_file", "文件改名"), ("move_file", "移动文件"),
-            ("copy_file", "复制文件"), ("rename_dir", "目录改名"),
-            ("move_dir", "移动目录"), ("copy_dir", "复制目录"),
+            ("copy_file", "复制文件"), ("rename_dir", "文件夹改名"),
+            ("move_dir", "移动文件夹"), ("copy_dir", "复制文件夹"),
             ("delete_file", "删除文件"), ("delete_dir", "删除文件夹"),
             ("skip", "固定跳过"),
         ]
@@ -482,11 +485,11 @@ class PatchPanel(BasePanel):
         lines = [
             f"总 OP：{summary['total_op_count']} 个（包含固定跳过，不代表提交数量）。",
             f"涉及路径：文件 {summary['file_path_count']} 个；"
-            f"目录 {summary['directory_path_count']} 个。",
+            f"文件夹 {summary['directory_path_count']} 个。",
             "其中预演时尚不存在："
             f"文件目标 {summary['absent_file_path_count']} 个；"
-            f"目录目标 {summary['absent_directory_path_count']} 个。",
-            "路径按实际身份去重；双路径操作计入源和目标，目录内部对象不展开统计。",
+            f"文件夹目标 {summary['absent_directory_path_count']} 个。",
+            "路径按实际身份去重；双路径操作计入源和目标，文件夹内部对象不展开统计。",
             "尚不存在的目标按操作类型分类，不表示对应对象已经存在。",
             "",
             "【分类操作清单】",
@@ -599,7 +602,7 @@ class PatchPanel(BasePanel):
                 outcome="文件修改已经完成",
             )
             self.set_status("修改包执行完成")
-            self.log(f"文件修改已经完成，备份目录：{result.backup_root}")
+            self.log(f"文件修改已经完成，本次备份路径：{result.backup_root}")
             if saved.persisted:
                 safe_show_info("执行完成", "业务已完成，请查看执行结果。", self.root)
             if cfg["open_backup_after_done"] and result.backup_root:

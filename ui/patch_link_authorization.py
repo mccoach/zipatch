@@ -7,8 +7,8 @@ from services.patch_scope import PatchScopeTree, format_package_scope
 
 LINK_GROUPS = (
     ("file_symlink", "文件软链接"),
-    ("directory_symlink", "目录软链接"),
-    ("junction", "目录联接 Junction"),
+    ("directory_symlink", "文件夹软链接"),
+    ("junction", "文件夹联接（Junction）"),
 )
 
 
@@ -50,7 +50,7 @@ def describe_patch_scope_choice(scope):
     if scope.fixed_skip:
         lines.append("既定跳过：不会因勾选而执行。")
     elif any(isinstance(member, PatchScopeTree) for member in scope.observations):
-        lines.append("该OP及所列目录树作为一个工作项处理，不拆分树内成员。")
+        lines.append("该OP及所列文件夹树作为一个工作项处理，不拆分树内成员。")
     return "\n".join(lines)
 
 
@@ -91,10 +91,10 @@ def select_patch_scope(parent, commits, scopes, root):
     selected = select_work_scope(
         parent, commits, title="选择本次修改操作",
         introduction=(
-            f"项目目录：{root}\n"
+            f"项目根文件夹：{root}\n"
             "按实际工作目标授权；同一文件的全部关联OP共同保留或取消。\n"
             "正文编辑关联实际正文文件；入口操作关联被操作入口，"
-            "不是链接的引用目标。目录树作为一个范围，不展开逐项授权。\n"
+            "不是链接的引用目标。文件夹树作为一个范围，不展开逐项授权。\n"
             "未选目标不读取正文、不验证正文定位、不备份、不执行。"
             "保留范围仍须通过正文和联合检查，再确认执行。"
         ),
@@ -139,19 +139,19 @@ def make_patch_enumeration_selector(parent, commits):
                 lines.append(describe_scan_access(access))
                 if access.kind == "directory":
                     lines.append(
-                        "此OP保留时需枚举该实际普通目录及普通子树；"
+                        "此OP保留时需枚举该实际普通文件夹及普通子树；"
                         "树内链接为叶子，不进入其引用目标。"
                     )
-                    label += "\n实际目录：" + str(access.actual_path)
+                    label += "\n实际文件夹：" + str(access.actual_path)
             choices.append(WorkScopeChoice(label, patch_scope_group(scope)))
             details.append("\n".join(lines))
         return select_work_scope(
-            parent, commits, title="选择修改包先行目录枚举范围",
+            parent, commits, title="选择修改包先行文件夹枚举范围",
             introduction=(
-                f"项目目录：{root}\n"
+                f"项目根文件夹：{root}\n"
                 "整包参数、入口类型及名义路径冲突已检查；"
-                "尚未枚举本包目录树或读取普通正文。\n"
-                "勾选允许为该OP枚举列出的实际普通目录及普通子树元信息；"
+                "尚未枚举本包文件夹树或读取普通正文。\n"
+                "勾选允许为该OP枚举列出的实际普通文件夹及普通子树元信息；"
                 "一个OP的两端必须一起选择。\n"
                 "未选OP固定跳过：不枚举、不读取正文、不备份、不执行，"
                 "后续最终OP窗口不能重新勾回。\n"

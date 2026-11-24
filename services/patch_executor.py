@@ -177,7 +177,7 @@ class PatchExecutor:
             ("允许删除", allow_delete),
             ("允许多处精确替换", allow_multi_replace_exact),
 
-            ("文本换行标准化", normalize_text_newlines),
+            ("标准化换行", normalize_text_newlines),
         ):
             if type(value) is not bool:
                 raise TypeError(f"{name}开关必须是布尔值")
@@ -1125,7 +1125,7 @@ class PatchExecutor:
         if self.fact_error is not None:
             lines.append(f"不确定事实补充也未保存：{self.fact_error}")
         lines.extend((
-            f"备份目录：{self.backup_root or '未启用或无需保护'}",
+            f"本次备份路径：{self.backup_root or '无需生成备份任务'}",
             "保护材料、清单、工作目标及辅助输出分别判断。",
             "正文确认不等于整体工作正常完成；没有替换不代表没有原地改变。",
             "unknown不认证正文；前序真实步骤不自动撤销。",
@@ -1300,8 +1300,8 @@ class PatchExecutor:
         try:
             self.log("【开始执行修改包】")
             self.log(f"协议版本：{PATCH_PROTOCOL_DESCRIPTION}")
-            self.log(f"项目根目录：{self.root}")
-            self.log(f"备份目录：{self.backup_root or '未启用或无需保护'}")
+            self.log(f"项目根文件夹：{self.root}")
+            self.log(f"本次备份路径：{self.backup_root or '无需生成备份任务'}")
             self.task_execution.execute(
                 self.execution_units, protection=self.protection,
                 initial_recheck=self.recheck, prepare_entry=prepare_entry,

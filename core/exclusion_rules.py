@@ -31,7 +31,7 @@ class PreparedExclusions:
         if self.directories.has_errors or self.files.has_errors:
             raise ExclusionValidationError(
                 format_rule_diagnostics(
-                    (("目录名单", self.directories), ("文件名单", self.files)),
+                    (("文件夹排除名单", self.directories), ("文件排除名单", self.files)),
                     use_input_lines=True,
                 )
             )

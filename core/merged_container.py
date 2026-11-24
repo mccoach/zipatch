@@ -19,6 +19,7 @@ from core.merged_format import (
 
 SPOOL_MEMORY_BYTES = 1024 * 1024
 READ_CHARACTERS = 64 * 1024
+TOKEN_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 
 class MergedContainer:
@@ -77,57 +78,66 @@ class MergedContainer:
         source = None if origin_path is None else encode_source_line(origin_path)
         self._records.append((path, structure, mtime, offset, len(body), source))
 
-    def _contains_token(self, token):
-        if any(token in text for text in (
+    def _used_tokens(self):
+        """一次收集全部两位冲突，不为每个候选重新扫描正文。
+
+        独立说明字段分别检查；暂存流按原有连续布局检查，
+        包括读取块边界及相邻正文记录之间的组合。
+        不重新获取来源，不将不同说明字段拼成新的冲突。
+        """
+        used = set()
+        alphabet = frozenset(TOKEN_ALPHABET)
+
+        def collect(text, previous=""):
+            for character in text:
+                if previous in alphabet and character in alphabet:
+                    used.add(previous + character)
+                previous = character
+            return previous
+
+        for text in (
             self.start_label, self.end_label, self.preamble, self.ending,
-        )):
-            return True
+        ):
+            collect(text)
         for path, structure, mtime, _, _, source in self._records:
-            if any(token in text for text in (
-                path, structure or "", mtime or "", source or "",
-            )):
-                return True
+            for text in (path, structure or "", mtime or "", source or ""):
+                collect(text)
+
         self._stream.flush()
         self._stream.seek(0)
-        tail = ""
+        previous = ""
         while True:
             chunk = self._stream.read(READ_CHARACTERS)
             if not chunk:
-                return False
-            combined = tail + chunk
-            if token in combined:
-                return True
-            tail = combined[-(len(token) - 1):]
+                return used
+            previous = collect(chunk, previous)
 
     def _fix_token(self):
         if self._closed:
             raise ValueError("容器已经关闭")
-        if self._token is None:
-            while True:
-                alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-                combinations = len(alphabet) ** 2
-                first = secrets.randbelow(combinations)
-                for offset in range(combinations):
-                    number = (first + offset) % combinations
-                    candidate = (
-                        alphabet[number // len(alphabet)]
-                        + alphabet[number % len(alphabet)]
-                    )
-                    # 两位标识仍须避让全部正文、路径、结构和附加文本；
-                    # 随机只决定搜索起点，不代替完整避撞。
-                    container_marker_lines(
-                        candidate, self.start_label, self.end_label,
-                    )
-                    if not self._contains_token(candidate):
-                        self._token = candidate
-                        break
-                if self._token is None:
-                    raise ValueError(
-                        "全部3844种两位容器标识均与内容冲突；"
-                        "本次未取得安全边界，请缩小合并范围后重新生成"
-                    )
-                break
-        return self._token
+        if self._token is not None:
+            return self._token
+
+        used = self._used_tokens()
+        size = len(TOKEN_ALPHABET)
+        combinations = size * size
+        first = secrets.randbelow(combinations)
+        for offset in range(combinations):
+            number = (first + offset) % combinations
+            candidate = (
+                TOKEN_ALPHABET[number // size]
+                + TOKEN_ALPHABET[number % size]
+            )
+            if candidate not in used:
+                container_marker_lines(
+                    candidate, self.start_label, self.end_label,
+                )
+                self._token = candidate
+                return candidate
+        raise ValueError(
+            "全部3844种两位容器标识均与内容冲突；"
+            "本次未取得安全边界，请缩小合并范围后重新生成"
+        )
 
     def text_chunks(self):
         """逐块输出原正文；每块额外分隔不抵扣原来的尾换行。"""

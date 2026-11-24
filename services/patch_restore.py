@@ -77,9 +77,10 @@ class BackupRestoreExecutor:
         self.selected_object_ids = tuple(
             action.original["id"] for action in self.plan.actions
         )
+        selected_ids = set(self.selected_object_ids)
         self.unselected_object_ids = tuple(
             entry["id"] for entry in evidence.document.value["objects"]
-            if entry["id"] not in set(self.selected_object_ids)
+            if entry["id"] not in selected_ids
         )
         # 名义访问先定位并在需要时授权；实际工作只使用普通父链。
         # 完整当前结构、原定义及两种位置属于同一本次固定任务。
@@ -135,21 +136,21 @@ class BackupRestoreExecutor:
     def format_preview(self):
         summary = self.risk_summary
         lines = [
-            "【固定所选备份恢复】",
+            "【所选备份还原对象预演】",
             f"清单对象：{len(self.evidence.document.value['objects'])} 个；"
             f"所选：{len(self.selected_object_ids)} 个；"
             f"未选：{len(self.unselected_object_ids)} 个。",
-            "未选对象不获取当前正文、不加入还原前保护或执行依赖。",
-            "完整目录树为一个恢复对象，不任意拆开树内成员。",
-            f"来源：{self.source}",
-            "恢复目标由清单决定；还原保护目录只保存本次独立保护任务。",
-            "仅恢复所列文件、链接和目录树，不回退整个项目。",
-            "恢复清单记录的完整原状态，不重放原修改包。",
-            "按内容、存在性和目录结构比较；仅时间不同不触发恢复。",
-            f"预检需恢复：{summary['restore_count']} 个对象；"
+            "未选对象不获取当前正文、不加入还原前备份或执行依赖。",
+            "完整文件夹树为一个还原对象，不任意拆开树内成员。",
+            f"备份来源：{self.source}",
+            "还原目标由清单决定；还原前备份位置只保存本次独立备份任务。",
+            "仅还原所列文件、链接和文件夹树，不回退整个项目。",
+            "还原清单记录的完整原状态，不重放原修改包。",
+            "按内容、存在性和文件夹结构比较；仅时间不同不触发还原。",
+            f"预演需还原：{summary['restore_count']} 个对象；"
             f"无需修改：{summary['no_operation_count']} 个对象。",
             (
-                f"还原前保护目录：{self.backup_root}"
+                f"本次还原前备份路径：{self.backup_root}"
                 if self.backup_root else
                 "全部对象已符合原状态，本次无需生成空保护任务。"
             ),
@@ -170,13 +171,13 @@ class BackupRestoreExecutor:
                 description = (
                     "只删除新增链接入口，不展开目标"
                     if isinstance(current, LinkPathObservation) else
-                    "删除新增目录及全部固定当前成员"
+                    "删除新增文件夹及全部固定当前成员"
                     if isinstance(current, TreeObservation) else "删除新增文件"
                 )
             elif kind == "directory":
-                description = "恢复原目录树，移除当前额外内容"
+                description = "还原原文件夹树，移除当前额外内容"
             elif isinstance(current, TreeObservation):
-                description = "删除当前目录及全部内容，重建原文件"
+                description = "删除当前文件夹及全部内容，重建原文件"
             elif current.kind == "absent":
                 description = "重建原文件"
             else:
@@ -205,11 +206,11 @@ class BackupRestoreExecutor:
         lines.extend((
             "", "【全部链接入口及定义授权范围】",
             "下面的直接目标仅由原定义解释，不查询其存在性、不读取正文。",
-            "目录软链接和junction是叶子入口，不展开或删除目标目录。",
+            "文件夹软链接和文件夹联接（Junction）是叶子入口，不展开或删除目标文件夹。",
             "指向中间链接时保留该直接引用，不改成最终目标。",
             "本次只在清单固定目标位置移除当前结构及恢复保存原定义。",
-            "经过目录链接的父链已在第一次目标枚举或旧正文读取前单独授权。",
-            "实际工作、还原前保护及失败回滚共同固定这些访问依赖。",
+            "经过文件夹链接的父链已在第一次目标枚举或旧正文读取前单独授权。",
+            "实际工作、还原前备份及失败回滚共同固定这些访问依赖。",
             "预演后改指向时停止；不改用新指向，不修改清单名义目标。",
         ))
         found = False
@@ -265,7 +266,7 @@ class BackupRestoreExecutor:
             f"实际恢复对象：{len(result.completed_units)}；"
             f"跳过未变对象：{len(result.skipped_paths)}。",
             f"原备份保留：{self.source}",
-            f"还原前保护：{self.backup_root or '未生成'}",
+            f"本次还原前备份路径：{self.backup_root or '未生成'}",
         ]
         lines.extend(f"[无需修改] {path}" for path in result.skipped_paths)
         if result.rebuilt_files:
@@ -304,7 +305,7 @@ class BackupRestoreExecutor:
         lines = [
             f"恢复流程未完整结束：{self.current}；阶段={self.phase}。",
             f"原备份：{self.source}",
-            f"还原前保护：{self.backup_root or '未生成'}",
+            f"本次还原前备份路径：{self.backup_root or '未生成'}",
         ]
         if self.execution.backup_cleanup_report:
             lines.append(self.execution.backup_cleanup_report)

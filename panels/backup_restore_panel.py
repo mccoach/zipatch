@@ -17,10 +17,11 @@ from ui.backup_restore import (
 from ui.dialogs import create_managed_text_box
 from ui.message_dialogs import safe_show_error
 from ui.operation_lock import locked_page
+from ui.page_settings import create_page_settings
 from ui.text_editor import get_text_value, replace_text_preserve_view
 from ui.theme import styled_button, styled_frame
 from ui.widgets import (
-    browse_folder, create_entry_row, make_checkbutton,
+    browse_folder, create_entry_row,
     open_path_with_default_app,
 )
 
@@ -49,61 +50,60 @@ class BackupRestorePanel(BasePanel):
         self.restore_source_dir = tk.StringVar(value=self.cfg["restore_source_dir"])
         self.backup_dir = tk.StringVar(value=self.cfg["backup_dir"])
         self.restore_source_entry = create_entry_row(
-            body, "备份来源", self.restore_source_dir,
+            body, "备份来源文件夹", self.restore_source_dir,
             commits=self.commits, config=self.cfg,
             field="restore_source_dir", page=self.config_key,
             history_key="backup_restore.restore_source_dir",
             value_normalizer=normalize_windows_display_path,
             browse_command=lambda: browse_folder(
                 self.restore_source_dir,
-                "选择包含 recovery.json 和 backup.complete 的任务目录",
-                parent=self.root,
+                "选择包含 recovery.json 和 backup.complete 的备份任务文件夹",
+                parent=self.root, commits=self.commits,
+                history_key="backup_restore.restore_source_dir",
             ),
             open_command=lambda: open_restore_source(self),
-            tooltip_text="选择完整任务目录，不是files材料目录。恢复位置由清单决定。",
+            tooltip_text="选择完整备份任务文件夹，不是 files 材料文件夹；还原目标由清单决定。",
             on_accepted=self.follow_source,
         )
         self.backup_dir_entry = create_entry_row(
-            body, "还原保护目录", self.backup_dir,
+            body, "还原前备份位置", self.backup_dir,
             commits=self.commits, config=self.cfg,
             field="backup_dir", page=self.config_key,
             history_key="backup_restore.backup_dir",
             value_normalizer=normalize_windows_display_path,
             browse_command=lambda: browse_folder(
-                self.backup_dir, "选择还原前保护任务的保存目录",
-                parent=self.root,
+                self.backup_dir, "选择还原前备份位置",
+                parent=self.root, commits=self.commits,
+                history_key="backup_restore.backup_dir",
             ),
             open_command=lambda: open_path_with_default_app(
                 self.backup_dir.get(), self.root,
             ),
-            tooltip_text="还原前在这里新建独立保护任务，不覆盖原备份。",
+            tooltip_text="还原前在这里新建独立备份任务，保存还原开始前的状态；这里不是还原目标，也不会覆盖来源备份。",
         )
         # 浏览、完成输入和历史回填均经过字段接受回调。
         # 连续输入不触发联动；窗口隐藏也不影响已经接受的配置事实。
 
         tk.Label(
             body,
-            text="选择新的有效备份来源后，还原保护目录自动设为其上一级；"
+            text="选择新的有效备份来源后，还原前备份位置自动设为其上一级；"
                  "可以手动修改，再次改变来源时重新跟随。\n"
-                 "仅恢复本备份记录的文件、链接和目录树，不回退整个项目。"
+                 "仅恢复本备份记录的文件、链接和文件夹树，不回退整个项目。"
                  "范围内的后续更改可能被覆盖或移除，还原前将先行备份。",
             bg=THEME["bg_panel"], fg=THEME["fg_label"],
             font=THEME["font_main"], anchor="w", justify="left",
             wraplength=1000,
         ).pack(fill="x", pady=(8, 6))
 
-        options = styled_frame(body, bg=THEME["bg_panel"])
-        options.pack(fill="x", pady=(4, 6))
-        for field, label in (
-            ("open_backup_after_done", "完成后打开本次保护备份"),
-            ("keep_restore_source_path", "还原成功后保留来源路径"),
-        ):
-            variable = tk.BooleanVar(value=self.cfg[field])
+        _, _, variables = create_page_settings(
+            body, self.commits, self.cfg,
+            (
+                ("open_backup_after_done", "完成后打开备份", "完成后打开本次实际生成的还原前备份"),
+                ("keep_restore_source_path", "成功后保留来源路径", "整份备份完整还原成功后仍保留来源路径；未勾选时仅清空输入路径，不删除备份"),
+            ),
+        )
+        for field, variable in variables.items():
             setattr(self, field, variable)
-            make_checkbutton(
-                options, label, variable, commits=self.commits,
-                config=self.cfg, field=field,
-            ).pack(side="left", padx=(0, 16))
 
         self.result_text = create_managed_text_box(
             body, "预演 / 还原结果", self.cfg["last_result_text"],
@@ -115,8 +115,8 @@ class BackupRestorePanel(BasePanel):
         actions = styled_frame(body, bg=THEME["bg_panel"])
         actions.pack(fill="x", pady=(12, 0))
         styled_button(
-            actions, "打开本次保护", lambda: open_last_backup_folder(self),
-            width=14,
+            actions, "打开还原前备份", lambda: open_last_backup_folder(self),
+            width=16,
         ).pack(side="left")
         styled_button(
             actions, "预演并还原", lambda: self.run(True),
@@ -135,7 +135,7 @@ class BackupRestorePanel(BasePanel):
             directory = source_parent_for_protection(source)
         except (OSError, ValueError) as error:
             # 来源故障不改保护目录；正式预演仍会精确拒绝。
-            self.log(f"备份来源尚不能用于保护目录跟随：{error}")
+            self.log(f"备份来源尚不能用于还原前备份位置跟随：{error}")
             return
         if directory is None:
             return
@@ -204,8 +204,8 @@ class BackupRestorePanel(BasePanel):
                 if cfg is None:
                     return
                 for field, label, entry in (
-                    ("restore_source_dir", "备份来源", self.restore_source_entry),
-                    ("backup_dir", "还原保护目录", self.backup_dir_entry),
+                    ("restore_source_dir", "备份来源文件夹", self.restore_source_entry),
+                    ("backup_dir", "还原前备份位置", self.backup_dir_entry),
                 ):
                     value = strip_outer_quotes(cfg[field])
                     if not value or not Path(value).is_absolute():

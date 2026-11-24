@@ -9,6 +9,7 @@ from core.config import SaveStatus
 from core.constants import THEME
 from core.time_utils import current_timestamp_text
 from ui.operation_lock import locked_page
+from ui.page_settings import create_page_settings
 from ui.text_editor import (
     get_text_value, replace_text_keep_undo, replace_text_preserve_view,
 )
@@ -25,10 +26,15 @@ from ui.newline_settings import edit_newline_settings
 from ui.text_output_settings import show_output_help
 from ui.theme import styled_button, styled_frame
 from ui.widgets import (
-    browse_folder, create_entry_row, make_checkbutton,
+    browse_folder, create_entry_row,
     make_radiobutton, open_path_with_default_app,
 )
 
+
+
+def split_target_label(mode):
+    """只解释界面名称，不改变配置字段或路径定位政策。"""
+    return "目标文件夹" if mode == "directory" else "相对路径基准"
 
 
 def format_split_preview(plan):
@@ -37,32 +43,32 @@ def format_split_preview(plan):
         "【代码拆分完整预演】",
         f"来源：{plan.source_description}",
         "位置模式：" + (
-            "指定目录映射" if plan.mode == "directory" else "原位还原"
+            "指定文件夹映射" if plan.mode == "directory" else "原位还原"
         ),
-        f"指定目录／相对路径基准：{plan.base or '未使用'}",
+        f"{split_target_label(plan.mode)}：{plan.base or '未使用'}",
         f"容器块：{plan.block_count} 个。",
         f"实际工作入口：{len(plan.entries)} 个；"
         f"普通文件：{plan.file_count} 个；"
         f"涉及既有链接路线：{plan.linked_access_count} 项。",
-        f"普通目录要求：{len(plan.directories)} 个；"
+        f"普通文件夹要求：{len(plan.directories)} 个；"
         f"固定跳过：{len(plan.skipped)} 个。",
 
         "",
         "普通正文只解析、转换和编码一次；结构定义不进入普通正文。",
-        "目录记录只要求普通目录存在，不清空未列出的成员。",
+        "文件夹记录只要求普通文件夹存在，不清空未列出的成员。",
         "不创建、删除或改指向链接；授权后沿用根、父链及末端已有链接。",
-        "目录链接结构按名义目录要求处理，缺失时只创建普通目录。",
+        "文件夹链接结构按名义文件夹要求处理，缺失时只创建普通文件夹。",
         "只有文件链接定义而无正文的记录明确跳过，不补读目标或生成空文件。",
         "文件覆盖／跳过政策保持；现存硬链接正文仍写回原对象。",
         "经链接访问的实际范围已在读取旧正文前取得当次授权。",
         "访问依赖不成为备份或恢复对象；不因来源定义枚举或补读引用目标。",
-        "预演不创建工作目录、发布成果或保存正式备份材料。",
+        "预演不创建工作文件夹、发布成果或保存正式备份材料。",
         "关闭、取消或执行尝试后任务失效。",
     ]
     if plan.mode == "directory":
         lines.append(
-            "完整盘符路径映射到指定目录下的大写盘符字母目录，"
-            "保留其后层级；相对路径直接拼接指定目录。"
+            "完整盘符路径映射到目标文件夹下的大写盘符字母文件夹，"
+            "保留其后层级；相对路径直接拼接目标文件夹。"
         )
     else:
         lines.append("绝对路径原位定位；相对路径使用明确绝对基准。")
@@ -76,15 +82,15 @@ def format_split_preview(plan):
             f"  实际位置：{member.target}；容器类型={member.entry_kind}；"
             f"原现场类型={member.kind}"
         )
-    lines.extend(("", "【普通目录要求】"))
+    lines.extend(("", "【普通文件夹要求】"))
     lines.extend(
         f"- {member.source_path} -> {member.target}；"
-        f"原类型={member.access.kind}；不清空目录"
+        f"原类型={member.access.kind}；不清空文件夹"
         for member in plan.directories
     )
     lines.extend((
         "",
-        f"强制备份目录：{plan.backup_root or '无实际工作，不生成空任务'}",
+        f"本次备份路径：{plan.backup_root or '无实际工作，不生成空任务'}",
         "全部必要原状态、严格version 4清单及完成凭据成功后才开始工作。",
         "备份失败清理本次唯一任务目录；清理失败提示人工处理。",
         "【必要保护对象】",
@@ -93,7 +99,7 @@ def format_split_preview(plan):
         f"- {member.target}；原类型={member.original_type}"
         for member in plan.projection.objects
     )
-    lines.extend(("", "【固定必要目录创建计划】"))
+    lines.extend(("", "【固定必要文件夹创建计划】"))
     lines.extend("- " + str(path) for path in plan.missing_directories)
     if plan.skipped:
         lines.extend(("", "【固定跳过】"))
@@ -103,7 +109,7 @@ def format_split_preview(plan):
     lines.extend((
         "",
         "任一失败停止后续，不自动回滚、不自动重试；前序成果与备份保留。",
-        "工作结束边界核对正式成果及目录要求，不从现场增加工作范围。",
+        "工作结束边界核对正式成果及文件夹要求，不从现场增加工作范围。",
         "不保证完整元数据、原硬链接拓扑、全部竞态或整批事务。",
         "确认及执行期间请避免外部修改。",
     ))
@@ -116,24 +122,31 @@ class RestorePanel(BasePanel):
     def build(self):
         body = self.make_body()
         self.last_backup_root = ""
+        # 模式先初始化，使首次显示直接对应已保存的模式。
+        # 只提前创建界面变量，原控件组块顺序保持不变。
+        self.target_mode = tk.StringVar(master=self, value=self.cfg["target_mode"])
         for field, label in (
-            ("target_folder", "指定目录"), ("backup_dir", "备份目录"),
+            ("target_folder", split_target_label(self.target_mode.get())),
+            ("backup_dir", "备份保存位置"),
         ):
             variable = tk.StringVar(value=self.cfg[field])
             setattr(self, field, variable)
             entry = create_entry_row(
                 body, label, variable, commits=self.commits, config=self.cfg,
                 field=field, page=self.config_key,
-                history_key=f"restore.{field}",
+                history_key=f"restore.{field}", label_width=12,
                 value_normalizer=normalize_windows_display_path,
-                browse_command=lambda current=variable:
-                browse_folder(current, parent=self.root),
+                browse_command=lambda current=variable, selected=field:
+                browse_folder(
+                    current, parent=self.root, commits=self.commits,
+                    history_key=f"restore.{selected}",
+                ),
                 open_command=lambda current=variable:
                 open_path_with_default_app(current.get(), self.root),
                 tooltip_text=(
-                    "指定目录模式的成果范围；原位模式的相对路径基准。"
+                    "指定文件夹模式：作为成果保存位置。原位还原模式：只作为相对路径基准。"
                     if field == "target_folder" else
-                    "拆分强制备份，填写明确绝对保存目录。"
+                    "拆分强制备份；填写明确的绝对路径，执行时在此新建备份任务文件夹。"
                 ),
             )
             if field == "target_folder":
@@ -141,18 +154,28 @@ class RestorePanel(BasePanel):
             else:
                 self.backup_dir_entry = entry
 
-        options = styled_frame(body, bg=THEME["bg_panel"])
-        options.pack(fill="x", pady=(10, 0))
-        self.target_mode = tk.StringVar(value=self.cfg["target_mode"])
+        _, specific, variables = create_page_settings(
+            body, self.commits, self.cfg,
+            (
+                ("open_after_done", "完成后打开成果", "指定文件夹模式完成后打开成果文件夹；原位还原模式不自动打开"),
+                ("normalize_text_newlines", "标准化换行", "按换行设置转换拆分正文"),
+            ),
+            (
+
+                ("newline", "换行设置", self.open_newline_settings),
+            ),
+        )
+        for field, variable in variables.items():
+            setattr(self, field, variable)
         self.existing_file_policy = tk.StringVar(value=self.cfg["existing_file_policy"])
         for label, variable, field, choices in (
-            ("还原位置：", self.target_mode, "target_mode",
-             (("指定目录", "directory"), ("原位还原", "in_place"))),
+            ("目标位置：", self.target_mode, "target_mode",
+             (("指定文件夹", "directory"), ("原位还原", "in_place"))),
             ("已有文件：", self.existing_file_policy, "existing_file_policy",
              (("覆盖", "overwrite"), ("跳过", "skip"))),
         ):
-            group = styled_frame(options, bg=THEME["bg_panel"])
-            group.pack(side="left", padx=(0, 16))
+            group = styled_frame(specific, bg=THEME["bg_panel"])
+            group.pack(side="left", padx=(0, 8))
             tk.Label(
                 group, text=label, bg=THEME["bg_panel"],
                 fg=THEME["fg_label"], font=THEME["font_main"],
@@ -161,17 +184,9 @@ class RestorePanel(BasePanel):
                 make_radiobutton(
                     group, text, variable, value,
                     commits=self.commits, config=self.cfg, field=field,
-                ).pack(side="left", padx=(0, 6))
-        for field, label in (
-            ("open_after_done", "完成后打开成果目录"),
-            ("normalize_text_newlines", "标准化文本换行"),
-        ):
-            variable = tk.BooleanVar(value=self.cfg[field])
-            setattr(self, field, variable)
-            make_checkbutton(
-                options, label, variable, commits=self.commits,
-                config=self.cfg, field=field,
-            ).pack(side="left", padx=(0, 6))
+                    command=self.refresh_target_label
+                    if field == "target_mode" else None,
+                ).pack(side="left", padx=(0, 3))
         area = styled_frame(body, bg=THEME["bg_panel"])
         area.pack(fill="both", expand=True, pady=(10, 0))
         area.grid_columnconfigure(0, weight=1, uniform="split_text_columns")
@@ -181,7 +196,7 @@ class RestorePanel(BasePanel):
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         self.source_text = create_managed_text_box(
-            left, "拆分源码", self.cfg["source_text"], height=22, mono=True,
+            left, "待拆分内容", self.cfg["source_text"], height=22, mono=True,
             show_statistics=True, commits=self.commits, config=self.cfg,
             field="source_text", page=self.config_key,
             enable_favorites=False, enable_import_text=True, wrap="none",
@@ -198,11 +213,8 @@ class RestorePanel(BasePanel):
         buttons = styled_frame(body, bg=THEME["bg_panel"])
         buttons.pack(fill="x", pady=(12, 0))
         for label, command, width in (
-            ("一键清空", self.clear_all, 10),
+            ("清空输入和结果", self.clear_all, 16),
             ("打开本次备份", lambda: open_last_backup_folder(self), 14),
-
-            ("换行设置", self.open_newline_settings, 10),
-            ("正文规则", lambda: show_output_help(self.root), 10),
         ):
             styled_button(buttons, label, command, width=width).pack(
                 side="left", padx=(0, 8),
@@ -213,6 +225,15 @@ class RestorePanel(BasePanel):
         styled_button(
             buttons, "仅预演", self.preview, width=14, accent=True,
         ).pack(side="right")
+        styled_button(
+            buttons, "正文规则", lambda: show_output_help(self.root), width=10,
+        ).pack(side="right", padx=(0, 8))
+
+    def refresh_target_label(self):
+        """模式按钮同步刷新名称，不清空路径、不另行保存配置。"""
+        self.target_entry._row_label.configure(
+            text=split_target_label(self.target_mode.get()),
+        )
 
     def display_result(self, text):
         self.result_text.configure(state="normal")
@@ -298,9 +319,9 @@ class RestorePanel(BasePanel):
             f"即将处理工作入口 {len(plan.entries)} 项："
             f"普通文件 {plan.file_count}，"
             f"涉及既有链接路线 {plan.linked_access_count} 项。\n"
-            f"普通目录要求 {len(plan.directories)}；固定跳过 {len(plan.skipped)}。\n"
+            f"普通文件夹要求 {len(plan.directories)}；固定跳过 {len(plan.skipped)}。\n"
             f"强制备份：{plan.backup_root}\n\n"
-            "目录不清空成员；只创建普通实体，已有链接保持并按授权路线工作。\n"
+            "文件夹不清空成员；只创建普通实体，已有链接保持并按授权路线工作。\n"
             "全部必要备份成功后开始工作；失败停止，前序成果与备份保留。\n"
             "完整范围已显示在结果中。确认执行？",
             self.root, danger=True,
@@ -343,7 +364,7 @@ class RestorePanel(BasePanel):
                 if not task.plan.entries:
                     task._check_directories(require_present=True)
                     task.invalidate()
-                    self.finish_result(report, outcome="无实际工作，目录要求已满足")
+                    self.finish_result(report, outcome="无实际工作，文件夹要求已满足")
                     self.set_status("无实际工作，任务已作废")
                     return
                 if not self.confirm_split_execution(task.plan):
@@ -375,8 +396,8 @@ class RestorePanel(BasePanel):
         message = (
             "拆分任务完成。\n"
             f"成功正文文件：{len(result.completed_files)} 个；未创建或移除链接。\n"
-            f"普通目录要求已满足：{result.required_directory_count} 个。\n"
-            f"实际创建目录：{len(result.created_directories)} 个；"
+            f"普通文件夹要求已满足：{result.required_directory_count} 个。\n"
+            f"实际创建文件夹：{len(result.created_directories)} 个；"
             f"固定跳过：{result.skipped_count} 个。\n"
 
             f"本次备份：{result.backup_root or '未生成'}"

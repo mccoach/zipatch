@@ -20,7 +20,7 @@ def select_backup_restore(parent, preview, *, keep_source_path, commits):
     try:
         dialog = tk.Toplevel(parent)
         dialog.withdraw()
-        dialog.title("确认所选范围恢复")
+        dialog.title("确认所选范围还原")
         dialog.configure(bg=THEME["bg"])
         dialog.transient(parent)
         controls = styled_frame(dialog)
@@ -60,7 +60,7 @@ def select_backup_restore(parent, preview, *, keep_source_path, commits):
         cancel_button = styled_button(controls, "取消", cancel, width=12)
         cancel_button.pack(side="right", padx=(8, 0))
         styled_button(
-            controls, "确认所选范围恢复", confirm, width=18, danger=True,
+            controls, "确认所选范围还原", confirm, width=18, danger=True,
         ).pack(side="right")
         center_window(
             dialog, 1000, min(740, dialog.winfo_screenheight() - 100),

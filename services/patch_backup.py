@@ -13,7 +13,7 @@ def resolve_backup_base_dir(project_root, backup_dir):
     # 保留UI输入的外围清洗和变量展开；检查之前不消除原路径导航。
     selected = strip_outer_quotes(backup_dir)
     if not selected:
-        raise ValueError("备份目录不能为空")
+        raise ValueError("备份保存位置不能为空")
     expanded = os.path.expandvars(os.path.expanduser(selected))
     expanded = expanded.replace("\\", os.path.sep).replace("/", os.path.sep)
     root = checked_chain(project_root)

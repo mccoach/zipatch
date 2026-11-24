@@ -78,10 +78,10 @@ del _gear
 
 
 # 样式只属于查找工具栏，不增加全局主题或用户配置。
-MODE_SELECTED_BACKGROUND = "#d5e5da"
-MODE_SELECTED_BORDER = "#587762"
-ACTION_BACKGROUND = "#d2d2d2"
-BUTTON_HOVER_BACKGROUND = "#e8e8e8"
+MODE_SELECTED_BACKGROUND = "#d6ddcd"
+MODE_SELECTED_BORDER = "#85917a"
+ACTION_BACKGROUND = "#d9d4cb"
+BUTTON_HOVER_BACKGROUND = "#eee9e0"
 ICON_SUPERSAMPLING = 4
 
 
@@ -122,7 +122,7 @@ def linear_icon_button(parent, name, command, description, *, text=""):
         bg=background, fg=THEME["fg"],
         activebackground=BUTTON_HOVER_BACKGROUND,
         activeforeground=THEME["fg"],
-        relief="flat", bd=1, highlightthickness=1,
+        relief="raised", bd=1, highlightthickness=1,
         highlightbackground=background,
         highlightcolor=THEME["accent"],
         padx=round((5 if text else 2) * scale),
@@ -156,7 +156,7 @@ def set_mode_button_state(button, label, selected):
     """开启态同时使用边框、按下效果及背景，不只依赖颜色。"""
     button._mode_selected = selected
     button.configure(
-        relief="sunken" if selected else "flat",
+        relief="sunken" if selected else "raised",
         bg=MODE_SELECTED_BACKGROUND
         if selected else button._normal_background,
         activebackground=MODE_SELECTED_BACKGROUND

@@ -37,7 +37,7 @@ def format_patch_preview(
     lines = [
         "【Dry Run 预演结果】",
         f"协议版本：{PATCH_PROTOCOL_DESCRIPTION}",
-        f"项目根目录：{root}",
+        f"项目根文件夹：{root}",
         f"boundary：{patch.get('boundary') or '内部任务未提供 boundary'}",
         f"操作总数：{len(ops)}",
         f"单项校验通过：{len(single_passed)}",
@@ -55,7 +55,7 @@ def format_patch_preview(
 
     if backup_root is not None:
         lines.extend((
-            f"计划备份目录：{backup_root}",
+            f"计划备份路径：{backup_root}",
             "备份状态：尚未启动；执行时按需保护原状态。",
         ))
     elif failed_count:

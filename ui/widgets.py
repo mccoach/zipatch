@@ -86,6 +86,7 @@ def create_entry_row(
     frame, entry = styled_entry(row, text_var)
     frame.pack(side="left", fill="x", expand=True, padx=(0, 8))
     entry._row_frame = row
+    entry._row_label = label
     binding = commits.register(
         entry, config, field, page, variable=text_var,
         normalizer=value_normalizer or str.strip, history_key=history_key,
@@ -119,11 +120,30 @@ def create_entry_row(
     return entry
 
 
-def browse_folder(var, title="选择文件夹", initial_dir=None, parent=None):
-    initial_dir = initial_dir or get_initial_dir_from_path(var.get())
-    return filedialog.askdirectory(
-        initialdir=initial_dir, title=title, parent=parent,
+def browse_folder(
+    var, title="选择文件夹", initial_dir=None, parent=None, *,
+    commits, history_key,
+):
+    """单行浏览同样按入口记忆；当前字段仅作首次选择的候选基准。"""
+    from ui.file_dialog_history import (
+        file_dialog_initial_directory, remember_file_dialog_directory,
     )
+    key = f"entry.{history_key}.browse"
+    if initial_dir is None:
+        try:
+            initial_dir = get_initial_dir_from_path(var.get())
+        except (OSError, ValueError):
+            # 正在编辑的无效路径不是选择器的入场资格。
+            initial_dir = None
+    selected = filedialog.askdirectory(
+        initialdir=file_dialog_initial_directory(
+            commits, key, fallback=initial_dir,
+        ),
+        title=title, mustexist=True, parent=parent,
+    )
+    if selected:
+        remember_file_dialog_directory(commits, key, selected)
+    return selected
 
 
 def browse_open_file(var, title="选择文件", filetypes=None, parent=None):
@@ -157,25 +177,30 @@ def open_output_file(output_folder_var, output_filename_var, parent):
     open_path_with_default_app(path, parent)
 
 
+def _accept_option(commits, config, field, variable, command, parent):
+    """单选和复选共用提交顺序；回调失败只恢复界面变量。"""
+    previous = config[field]
+    completed = False
+    try:
+        if command:
+            command()
+        completed = True
+    finally:
+        if not completed:
+            variable.set(previous)
+    commits.manager.accept(config, {field: variable.get()})
+    commits.finish(parent.winfo_toplevel())
+
+
 def make_checkbutton(
     parent, text, variable, *, commits, config, field,
     command=None, bg=None, tooltip_text=None,
 ):
-    def accept_option():
-        previous = config[field]
-        completed = False
-        try:
-            if command:
-                command()
-            completed = True
-        finally:
-            if not completed:
-                variable.set(previous)
-        commits.manager.accept(config, {field: variable.get()})
-        commits.finish(parent.winfo_toplevel())
-
     widget = tk.Checkbutton(
-        parent, text=text, variable=variable, command=accept_option,
+        parent, text=text, variable=variable,
+        command=lambda: _accept_option(
+            commits, config, field, variable, command, parent,
+        ),
         bg=bg or THEME["bg_panel"], fg=THEME["fg_label"],
         activebackground=bg or THEME["bg_panel"], activeforeground=THEME["fg"],
         selectcolor=THEME["bg_input"], font=THEME["font_main"],
@@ -187,21 +212,11 @@ def make_radiobutton(
     parent, text, variable, value, *, commits, config, field,
     command=None, bg=None, tooltip_text=None, danger=False,
 ):
-    def accept_option():
-        previous = config[field]
-        completed = False
-        try:
-            if command:
-                command()
-            completed = True
-        finally:
-            if not completed:
-                variable.set(previous)
-        commits.manager.accept(config, {field: variable.get()})
-        commits.finish(parent.winfo_toplevel())
-
     widget = tk.Radiobutton(
-        parent, text=text, variable=variable, value=value, command=accept_option,
+        parent, text=text, variable=variable, value=value,
+        command=lambda: _accept_option(
+            commits, config, field, variable, command, parent,
+        ),
         bg=bg or THEME["bg_panel"],
         fg=THEME["danger"] if danger else THEME["fg_label"],
         activebackground=bg or THEME["bg_panel"], activeforeground=THEME["fg"],
@@ -209,6 +224,7 @@ def make_radiobutton(
         font=THEME["font_title"] if danger else THEME["font_main"],
     )
     return add_tooltip(widget, tooltip_text)
+
 
 def open_path_with_default_app(path, parent=None):
     """外部打开前检查原路径和普通对象，不resolve后追踪链接目标。

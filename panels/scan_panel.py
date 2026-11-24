@@ -6,13 +6,15 @@ from core.constants import THEME
 from ui.message_dialogs import safe_show_info
 from ui.widgets import resolve_output_file_conflict, open_path_with_default_app
 from core.path_validation import normalize_windows_display_path
-from core.paths import build_output_path, validate_required_path
+from core.paths import resolve_output_path, validate_required_path
+from ui.output_path import create_output_path_row
 from core.exclusion_rules import PreparedExclusions
 from panels.base_panel import BasePanel
 from services.scan_service import panoramic_scan
 from ui.dialogs import edit_exclude_settings, edit_extra_text_settings
 from ui.theme import styled_button, styled_frame
-from ui.widgets import browse_folder, create_entry_row, make_checkbutton, open_output_file
+from ui.page_settings import create_page_settings
+from ui.widgets import browse_folder, create_entry_row
 
 
 class ScanPanel(BasePanel):
@@ -21,53 +23,46 @@ class ScanPanel(BasePanel):
     def build(self):
         body = self.make_body()
         self.source_folder = tk.StringVar(value=self.cfg["source_folder"])
-        self.output_folder = tk.StringVar(value=self.cfg["output_folder"])
-        self.output_filename = tk.StringVar(value=self.cfg["output_filename"])
-
-        for field, label, variable in (
-            ("source_folder", "源文件夹", self.source_folder),
-            ("output_folder", "输出文件夹", self.output_folder),
-        ):
-            create_entry_row(
-                body, label, variable, commits=self.commits, config=self.cfg,
-                field=field, page=self.config_key, history_key=f"scan.{field}",
-                value_normalizer=normalize_windows_display_path,
-                browse_command=lambda current=variable: browse_folder(current, parent=self.root),
-                open_command=lambda current=variable: open_path_with_default_app(current.get(), self.root),
-            )
+        self.output_path = tk.StringVar(master=self, value=self.cfg["output_path"])
 
         create_entry_row(
-            body, "输出文件名", self.output_filename,
-            commits=self.commits, config=self.cfg, field="output_filename",
-            page=self.config_key, history_key="scan.output_filename",
-            open_fields={"output_folder", "output_filename"},
-            open_command=lambda: open_output_file(self.output_folder, self.output_filename, self.root),
+            body, "源文件夹", self.source_folder,
+            commits=self.commits, config=self.cfg,
+            field="source_folder", page=self.config_key,
+            history_key="scan.source_folder",
+            value_normalizer=normalize_windows_display_path,
+            browse_command=lambda: browse_folder(
+                self.source_folder, parent=self.root, commits=self.commits,
+                history_key="scan.source_folder",
+            ),
+            open_command=lambda: open_path_with_default_app(
+                self.source_folder.get(), self.root,
+            ),
         )
+        self.output_entry = create_output_path_row(body, self)
 
-        options = styled_frame(body, bg=THEME["bg_panel"])
-        options.pack(fill="x", pady=(10, 0))
-        for field, label in (
-            ("open_after_done", "完成后立即打开成果文件"),
-            ("force_overwrite", "成果文件已存在时强制覆盖"),
-            ("show_actual_path", "显示实际路径"),
-            ("include_size", "输出文件大小"),
-            ("include_date", "输出文件日期"),
-        ):
-            variable = tk.BooleanVar(value=self.cfg[field])
+        _, _, variables = create_page_settings(
+            body, self.commits, self.cfg,
+            (
+                ("open_after_done", "完成后打开成果", "完成后打开本次扫描成果文件"),
+                ("show_actual_path", "显示实际路径", "显示链接来源的附加实际路径"),
+                ("force_overwrite", "直接覆盖已有成果", "成果已存在时直接覆盖；未勾选时选择覆盖、自动改名或取消"),
+                ("include_size", "显示文件大小", "在文件清单中显示实际文件大小"),
+                ("include_date", "显示修改时间", "显示文件修改时间；经过链接的文件夹显示实际文件夹自身修改时间"),
+            ),
+            (
+                ("exclude", "排除名单", self.open_exclude_dialog),
+                ("extra", "附加文本", self.open_extra_text_dialog),
+            ),
+        )
+        for field, variable in variables.items():
             setattr(self, field, variable)
-            make_checkbutton(
-                options, label, variable, commits=self.commits, config=self.cfg, field=field,
-            ).pack(side="left", padx=(0, 16))
 
         row = styled_frame(body, bg=THEME["bg_panel"])
         row.pack(fill="x", pady=(12, 0))
-        styled_button(row, "排除名单", self.open_exclude_dialog, width=10).pack(
-            side="left", padx=(0, 8),
-        )
-        styled_button(row, "附加文本", self.open_extra_text_dialog, width=10).pack(
-            side="left", padx=(0, 8),
-        )
-        styled_button(row, "开始扫描", self.execute, width=12, accent=True).pack(side="right")
+        styled_button(
+            row, "开始扫描", self.execute, width=12, accent=True,
+        ).pack(side="right")
 
     def open_exclude_dialog(self):
         if edit_exclude_settings(
@@ -89,7 +84,7 @@ class ScanPanel(BasePanel):
 
     def _execute(self):
         cfg = self.prepare({
-            "source_folder", "output_folder", "output_filename",
+            "source_folder", "output_path",
             "exclude_folders", "exclude_files",
             "preamble_text", "ending_text", "include_size", "include_date",
             "open_after_done", "force_overwrite", "show_actual_path",
@@ -108,10 +103,9 @@ class ScanPanel(BasePanel):
                 ),
             )
             source = validate_required_path(cfg["source_folder"], "源文件夹")
-            folder = validate_required_path(cfg["output_folder"], "输出文件夹")
-            filename = validate_required_path(cfg["output_filename"], "输出文件名")
             output = resolve_output_file_conflict(
-                build_output_path(folder, filename), cfg["force_overwrite"], self.root,
+                resolve_output_path(cfg["output_path"]),
+                cfg["force_overwrite"], self.root,
             )
             if output is None:
                 return
@@ -139,11 +133,11 @@ class ScanPanel(BasePanel):
         self.set_status("全景扫描完成")
         safe_show_info(
             "成功",
-            f"全景扫描完成！\n\n目录 {result.dir_count} 个，文件 {result.file_count} 个。\n"
+            f"全景扫描完成！\n\n文件夹 {result.dir_count} 个，文件 {result.file_count} 个。\n"
             f"链接入口 {result.link_count} 个："
             f"文件软链接 {result.file_symlink_count}，"
-            f"目录软链接 {result.directory_symlink_count}，"
-            f"Junction {result.junction_count}。\n"
+            f"文件夹软链接 {result.directory_symlink_count}，"
+            f"文件夹联接（Junction）{result.junction_count}。\n"
             "链接全链授权后按普通实体展开；未选在断点收口，不重复只读确认。\n"
             f"已保存到：\n{result.output_file}",
             self.root,

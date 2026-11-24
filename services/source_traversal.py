@@ -86,7 +86,7 @@ class SourceTraversal:
                 f"类型：{definition.kind}\n"
                 f"原定义：{definition.raw_target!r}\n"
                 f"直接引用：{definition.direct_target}\n\n"
-                "选中允许沿此节点访问；目录可枚举普通后代，文件可作为正文来源。"
+                "选中允许沿此节点访问；文件夹可枚举普通后代，文件可作为正文来源。"
                 "\n途中其他链接仍须分别授权；不修改来源或链接入口。"
             )
             decision = self.authorize("来源链接节点授权", description)
@@ -234,7 +234,7 @@ class SourceTraversal:
                 ):
                     self.ignore(
                         nominal, "directory" if directory else "file",
-                        "排除目录名单" if directory else "排除文件名单",
+                        "文件夹排除名单" if directory else "文件排除名单",
                     )
                     continue
                 child = self.resolve(nominal)

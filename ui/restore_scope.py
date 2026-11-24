@@ -41,8 +41,8 @@ def make_recovery_selector(parent, commits):
                 f"清单对象：{entry['id']}",
                 *describe_access(access),
                 f"恢复原类型：{desired.kind}",
-                "目录对象包含清单所列完整原树及待比较的当前普通子树；"
-                "其中目录链接仍为叶子。",
+                "文件夹对象包含清单所列完整原树及待比较的当前普通子树；"
+                "其中文件夹链接仍为叶子。",
             ]
             for relative, specification in desired.link_definitions:
                 position = access.actual_path / relative
@@ -64,10 +64,10 @@ def make_recovery_selector(parent, commits):
         return select_work_scope(
             parent, commits, title="选择本次备份还原对象",
             introduction=(
-                "选择清单中要还原的对象；目录树作为一个完整工作项。\n"
-                "按所选继续，允许为所选对象读取当前正文及枚举普通目录，"
-                "形成固定预检；未选对象不获取、不保护、不恢复。\n"
-                "本次选择不保存。完整预检通过后仍须执行确认。"
+                "选择清单中要还原的对象；文件夹树作为一个完整工作项。\n"
+                "按所选继续，允许为所选对象读取当前正文及枚举普通文件夹，"
+                "形成固定预演；未选对象不获取、不备份、不还原。\n"
+                "本次选择不保存。完整预演通过后仍须执行确认。"
             ),
             choices=choices, details="\n\n".join(details),
         )
@@ -90,8 +90,8 @@ def make_split_selector(parent, commits):
                 ))
             lines.append(
                 "有正文时允许读取、保护并更新固定实际文件；"
-                "已有文件或目录链接保持不变，授权后沿既有路线工作。"
-                "目录结构只要求实体目录存在，不清空成员，不创建链接。"
+                "已有文件或文件夹链接保持不变，授权后沿既有路线工作。"
+                "文件夹结构只要求实体文件夹存在，不清空成员，不创建链接。"
                 "只有文件链接定义而没有正文的记录不写文件，明确报告。"
             )
             details.append("\n".join(lines))
@@ -103,8 +103,8 @@ def make_split_selector(parent, commits):
             parent, commits, title="选择本次代码拆分记录",
             introduction=(
                 "选择要处理的容器记录；未选记录不获取旧正文、不保护、不执行。\n"
-                "所选子项需要的普通父目录仍会按固定计划创建，"
-                "未选父目录记录不表示禁止子项的必要父目录。\n"
+                "所选子项需要的普通父文件夹仍会按固定计划创建，"
+                "未选父文件夹记录不表示禁止子项的必要父文件夹。\n"
                 "不创建、删除或改指向链接；只沿已展示并授权的既有路线工作。"
                 "未选链接范围不获取旧正文、不保护、不执行。"
                 "预检通过后仍须执行确认。"

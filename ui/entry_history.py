@@ -36,8 +36,8 @@ class EntryHistoryPlugin:
             bg=THEME["bg_input"], fg=THEME["fg"],
             activebackground=THEME["bg_btn_hover"],
             activeforeground=THEME["fg_on_dark"],
-            relief="flat", bd=0, highlightthickness=0,
-            padx=3, pady=0, cursor="hand2",
+            relief="raised", bd=1, highlightthickness=0,
+            padx=2, pady=0, cursor="hand2",
             font=THEME["font_main"],
         )
         self.button.pack(side="right", fill="y")

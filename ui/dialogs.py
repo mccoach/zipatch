@@ -4,7 +4,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, TclError
 from pathlib import Path
 
-from core.paths import get_initial_dir_from_path
+from contextlib import nullcontext
+
+from core.path_validation import normalize_windows_display_path
+from ui.file_dialog_history import (
+    file_dialog_initial_directory, remember_file_dialog_directory,
+)
 
 from core.constants import THEME
 from ui.message_dialogs import safe_show_error, safe_show_info
@@ -40,6 +45,40 @@ def read_import_text(path, *, preserve_newlines=False):
     )
 
 
+def show_rule_help(parent, title, content, *, width, height):
+    """排除及换行帮助共用只读窗口，不提交草稿或配置。"""
+    dialog = tk.Toplevel(parent)
+    try:
+        dialog.title(title)
+        dialog.configure(bg=THEME["bg"])
+        dialog.transient(parent)
+        take_modal_control(dialog)
+        center_window(dialog, width, height)
+
+        frame, text = styled_text_with_scrollbars(
+            dialog, height=30, wrap="word", readonly=True,
+        )
+        frame.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        text.configure(state="normal")
+        text.insert("1.0", content)
+        text.configure(state="disabled")
+        buttons = styled_frame(dialog)
+        buttons.pack(fill="x", padx=16, pady=(0, 14))
+
+        def close():
+            unregister_popup(dialog)
+            dialog.destroy()
+            return True
+
+        styled_button(buttons, "关闭", close, width=10).pack(side="right")
+        register_popup(dialog, close)
+        parent.wait_window(dialog)
+    finally:
+        unregister_popup(dialog)
+        if dialog.winfo_exists():
+            dialog.destroy()
+
+
 def create_managed_text_box(
     parent, label_text, initial_value, height=8, mono=False, *,
     commits, favorite_key=None, wrap="word", readonly=False,
@@ -48,26 +87,44 @@ def create_managed_text_box(
     config=None, field=None, page=None, on_content_changed=None,
     preserve_trailing_newlines=False, preserve_import_newlines=False,
     show_statistics=False, title_action_factory=None, enable_copy=False,
+    browse_kind=None, file_dialog_key=None,
 ):
+    """通用编辑框；浏览按需启用，路径固定追加而非替换正文。
+
+    文件选择偏好按文本框稳定用途和操作分别保存。
+    业务名单过滤、检查和配置接受继续经过原正文完成链。
+    """
+    if browse_kind not in (None, "directory", "file"):
+        raise ValueError("浏览类别必须是directory、file或None")
+    identity = file_dialog_key or wrap_config_key or (
+        f"{page}.{field}" if page and field else None
+    )
+    if not readonly and (enable_import_text or browse_kind is not None):
+        if type(identity) is not str or not identity:
+            raise ValueError("启用文件选择的文本框必须提供稳定file_dialog_key")
+
     title_row = styled_frame(parent)
     title_row.pack(fill="x", pady=(8, 2))
     title_label = tk.Label(
         title_row, text=label_text, anchor="w", justify="left",
         bg=THEME["bg"], fg=THEME["fg_label"], font=THEME["font_main"],
     )
-    # 标题不与统计平分剩余空间；操作按钮先占位，
-    # 统计最后取得全部剩余宽度，文字变化不改变标题栏高度。
     title_label.pack(side="left")
+
+    # 工具区整体靠右，内部按阅读顺序从左向右排列；
+    # 不再由多个side=right的登记顺序隐式决定按钮位置。
+    tools = styled_frame(title_row)
+    tools.pack(side="right")
+    text_actions = []
 
     wraps = commits.manager.config_data["text_wrap"]
     wrap_value = wraps[wrap_config_key] if wrap_config_key else wrap != "none"
-    wrap_var = tk.BooleanVar(value=wrap_value)
+    wrap_var = tk.BooleanVar(master=parent, value=wrap_value)
     frame, text = styled_text_with_scrollbars(
         parent, height=height, mono=mono,
         wrap="word" if wrap_value else "none", readonly=readonly,
     )
     frame.pack(fill="both", expand=True)
-    # 规则名单的末尾空行属于正文结构；普通文本继续沿用既有语义。
     text._preserve_trailing_newlines = preserve_trailing_newlines
     if readonly:
         text.configure(state="normal")
@@ -101,37 +158,111 @@ def create_managed_text_box(
         text._content_operation_completed(prepared),
     )
 
-    if not readonly and enable_favorites and favorite_key:
-        FavoriteTextBoxController(
-            parent, title_row, text, commits, favorite_key,
-            lambda prepared=None: text._content_operation_completed(prepared),
+    if not readonly and browse_kind is not None:
+        browse_key = f"text.{identity}.browse"
+
+        def browse():
+            if commits.operation_depth or str(text.cget("state")) != "normal":
+                return
+            try:
+                with (
+                    commits.operation(),
+                    binding.suspend_focus_commit()
+                    if binding is not None else nullcontext(),
+                ):
+                    owner = text.winfo_toplevel()
+                    initial = file_dialog_initial_directory(commits, browse_key)
+                    if browse_kind == "directory":
+                        selected = filedialog.askdirectory(
+                            title="选择文件夹，追加到名单末尾",
+                            initialdir=initial, mustexist=True, parent=owner,
+                        )
+                        paths = (selected,) if selected else ()
+                    else:
+                        paths = filedialog.askopenfilenames(
+                            title="选择文件，追加到名单末尾（可多选）",
+                            initialdir=initial,
+                            filetypes=[("All Files", "*.*")], parent=owner,
+                        )
+                    if not paths:
+                        return
+
+                    # 选择器填写名义路径，不resolve压平链接，
+                    # 不读取文件正文，不保存任何业务授权。
+                    normalized = []
+                    for spelling in paths:
+                        path = Path(spelling)
+                        if (
+                            not path.is_absolute()
+                            or any(ord(character) < 32 for character in spelling)
+                            or not (
+                                path.is_dir() if browse_kind == "directory"
+                                else path.is_file()
+                            )
+                        ):
+                            raise ValueError(f"选择路径已失效或类型不符：{spelling}")
+                        normalized.append(normalize_windows_display_path(spelling))
+                    directory = (
+                        Path(paths[0]) if browse_kind == "directory"
+                        else Path(paths[0]).parent
+                    )
+                    editing = getattr(text, "_list_text_editing", None)
+                    current = (
+                        editing.complete() if editing is not None
+                        else text.get("1.0", "end-1c")
+                    )
+                    separator = "\n" if current and not current.endswith("\n") else ""
+                    addition = separator + "\n".join(normalized) + "\n"
+                    with editing.edit_group() if editing is not None else nullcontext():
+                        automatic = text.cget("autoseparators")
+                        text.edit_separator()
+                        text.configure(autoseparators=False)
+                        try:
+                            text.insert("end-1c", addition)
+                        finally:
+                            text.edit_separator()
+                            text.configure(autoseparators=automatic)
+                    remember_file_dialog_directory(commits, browse_key, directory)
+                    text.mark_set("insert", "end-1c")
+                    text.see("end")
+                # 有绑定时，正文完成链统一保存正文和选择目录偏好。
+                # 无绑定的草稿只保存目录偏好，不提前接受草稿正文。
+                text._content_operation_completed()
+                if binding is None:
+                    commits.finish(owner)
+            except (OSError, ValueError) as error:
+                safe_show_error("浏览未完成", str(error), text.winfo_toplevel())
+            finally:
+                restore_editor_interaction(text)
+
+        browse_button = title_bar_button(tools, "浏览", browse, width=4)
+        text_actions.append(browse_button)
+        text._browse_button = browse_button
+        from ui.widgets import add_tooltip
+        add_tooltip(
+            browse_button,
+            "选择文件夹，追加绝对路径到名单末尾"
+            if browse_kind == "directory"
+            else "选择文件，逐行追加绝对路径到名单末尾；支持多选",
         )
 
     if not readonly and enable_import_text:
-        import_key = wrap_config_key or (
-            f"{page}.{field}" if page and field else label_text
-        )
-        import_directories = commits.manager.config_data["import_directories"]
+        import_key = f"text.{identity}.import"
 
         def import_text():
             if commits.operation_depth or str(text.cget("state")) != "normal":
                 return
             try:
-                with commits.operation():
+                with (
+                    commits.operation(),
+                    binding.suspend_focus_commit()
+                    if binding is not None else nullcontext(),
+                ):
                     owner = text.winfo_toplevel()
-                    previous_directory = import_directories.get(import_key, "")
-                    try:
-                        initial = get_initial_dir_from_path(previous_directory)
-                    except (OSError, ValueError) as error:
-                        safe_show_error(
-                            "导入目录不可访问",
-                            f"上次导入目录：{previous_directory}\n{error}",
-                            owner,
-                        )
-                        return
                     path = filedialog.askopenfilename(
                         title="导入文本文件", filetypes=[("All Files", "*.*")],
-                        initialdir=initial, parent=owner,
+                        initialdir=file_dialog_initial_directory(commits, import_key),
+                        parent=owner,
                     )
                     if not path:
                         return
@@ -143,29 +274,86 @@ def create_managed_text_box(
                         safe_show_error("导入失败", str(error), owner)
                         return
                     replace_text_keep_undo(text, content)
-                    # 成功取得并放入正文后才记录；取消或读取失败不覆盖。
-                    commits.manager.accept(
-                        import_directories,
-                        {import_key: str(Path(path).parent)},
+                    remember_file_dialog_directory(
+                        commits, import_key, Path(path).parent,
                     )
-                    completed = text._content_operation_completed(content)
+                completed = text._content_operation_completed(content)
+                # 有绑定的完成链已经交付保存结果，失败后不自动再试。
+                # 无绑定的设置草稿仅持久化选择目录，不提交草稿正文。
+                if binding is None:
                     saved = commits.finish(owner)
-                    if completed and saved.request_satisfied:
-                        safe_show_info(
-                            "导入完成",
-                            f"文本文件已导入。\n\n编码：{encoding}\n路径：\n{path}",
-                            owner,
-                        )
+                    completed = completed and saved.request_satisfied
+                if completed:
+                    safe_show_info(
+                        "导入完成",
+                        f"文本文件已导入。\n\n编码：{encoding}\n路径：\n{path}",
+                        owner,
+                    )
+            except (OSError, ValueError) as error:
+                safe_show_error("导入未完成", str(error), text.winfo_toplevel())
             finally:
                 restore_editor_interaction(text)
 
-        title_bar_button(title_row, "导入", import_text, width=6).pack(
-            side="right", padx=(0, 6),
+        import_button = title_bar_button(tools, "导入", import_text, width=4)
+        text_actions.append(import_button)
+        text._import_button = import_button
+
+    if not readonly and enable_favorites and favorite_key:
+        favorite = FavoriteTextBoxController(
+            parent, tools, text, commits, favorite_key,
+            lambda prepared=None: text._content_operation_completed(prepared),
         )
+        favorite.button.pack_forget()
+        text_actions.append(favorite.button)
+
+    if title_action_factory is not None:
+        # 页面专属动作处于输入来源工具之后、复制与清空之前。
+        # 工厂仍只取得正文及工具容器，业务语义不进入通用编辑器。
+        existing = set(tools.winfo_children())
+        title_action_factory(text, tools)
+        for action in tools.winfo_children():
+            if action not in existing:
+                action.pack_forget()
+                text_actions.append(action)
+
+    if enable_copy:
+        def copy_all():
+            try:
+                content = text.get("1.0", "end-1c")
+                text.clipboard_clear()
+                text.clipboard_append(content)
+            except TclError as error:
+                safe_show_error("复制失败", str(error), text.winfo_toplevel())
+                return
+            copy_button.configure(text="已复制")
+            pending = copy_button._feedback_after_id
+            if pending is not None:
+                copy_button.after_cancel(pending)
+
+            def reset_feedback():
+                copy_button._feedback_after_id = None
+                copy_button.configure(text="复制")
+
+            copy_button._feedback_after_id = copy_button.after(
+                1200, reset_feedback,
+            )
+
+        copy_button = title_bar_button(tools, "复制", copy_all, width=4)
+        copy_button._feedback_after_id = None
+        text_actions.append(copy_button)
+
+        def cancel_copy_feedback(event):
+            if event.widget is copy_button:
+                pending = copy_button._feedback_after_id
+                if pending is not None:
+                    copy_button.after_cancel(pending)
+                    copy_button._feedback_after_id = None
+
+        copy_button.bind("<Destroy>", cancel_copy_feedback, add="+")
+        text._copy_all_button = copy_button
 
     if enable_clear:
         def clear():
-            # 已锁定输入不得产生空配置接受；只读清空仍保留原有用途。
             if commits.operation_depth:
                 return
             if not readonly and str(text.cget("state")) != "normal":
@@ -178,54 +366,7 @@ def create_managed_text_box(
                 replace_text_keep_undo(text, "")
             text._content_operation_completed("")
 
-        title_bar_button(title_row, "清空", clear, width=6).pack(
-            side="right", padx=(0, 6),
-        )
-
-    if enable_copy:
-        def copy_all():
-            # 业务确认窗口处于operation中也允许复制只读详情。
-            # 复制不接受配置、不改变正文、选区或窗口滚动。
-            try:
-                content = text.get("1.0", "end-1c")
-                text.clipboard_clear()
-                text.clipboard_append(content)
-            except TclError as error:
-                safe_show_error("复制失败", str(error), text.winfo_toplevel())
-                return
-            copy_button.configure(text="已复制")
-            pending = getattr(copy_button, "_feedback_after_id", None)
-            if pending is not None:
-                copy_button.after_cancel(pending)
-
-            def reset_feedback():
-                copy_button._feedback_after_id = None
-                copy_button.configure(text="复制")
-
-            copy_button._feedback_after_id = copy_button.after(
-                1200, reset_feedback,
-            )
-
-        copy_button = title_bar_button(
-            title_row, "复制", copy_all, width=6,
-        )
-        copy_button._feedback_after_id = None
-        copy_button.pack(side="right", padx=(0, 6))
-
-        def cancel_copy_feedback(event):
-            if event.widget is copy_button:
-                pending = copy_button._feedback_after_id
-                if pending is not None:
-                    copy_button.after_cancel(pending)
-                    copy_button._feedback_after_id = None
-
-        copy_button.bind("<Destroy>", cancel_copy_feedback, add="+")
-        text._copy_all_button = copy_button
-
-    if title_action_factory is not None:
-        # right按登记顺序从右向左排列：业务动作紧邻清空左侧。
-        # 工厂只取得本次正文控件及标题栏；业务语义不进入通用编辑器。
-        title_action_factory(text, title_row)
+        text_actions.append(title_bar_button(tools, "清空", clear, width=4))
 
     if enable_wrap_toggle:
         def toggle_wrap():
@@ -235,12 +376,15 @@ def create_managed_text_box(
                     wraps, {wrap_config_key: wrap_var.get()}, text.winfo_toplevel(),
                 )
 
-        tk.Checkbutton(
-            title_row, text="自动换行", variable=wrap_var, command=toggle_wrap,
+        text_actions.insert(0, tk.Checkbutton(
+            tools, text="自动换行", variable=wrap_var, command=toggle_wrap,
             bg=THEME["bg"], fg=THEME["fg_label"],
             activebackground=THEME["bg"], selectcolor=THEME["bg_input"],
             font=THEME["font_main"], relief="flat", bd=0, padx=4, pady=0,
-        ).pack(side="right", padx=(0, 6))
+        ))
+    for action in text_actions:
+        action.pack(side="left", padx=(0, 6))
+    text._title_tools = tools
     if show_statistics and not readonly:
         TextStatistics(text, title_row)
     return text

@@ -40,46 +40,86 @@ def apply_global_theme(root):
     root.option_add("*Radiobutton.SelectColor", THEME["accent"])
 
 
-def styled_button(parent, text, command, width=8, accent=False, danger=False):
+def button_width(text, *, compact=False):
+    """文字按钮采用有限尺寸档；不测量字体，不让长按钮扩大整组。"""
+    if compact and text == "选中 OP":
+        return 8
+    length = len(text)
+    if compact:
+        if length <= 2:
+            return 4
+        if length <= 4:
+            return 6
+        return min(16, 2 * ((length + 2) // 2))
+    if length <= 2:
+        return 6
+    if length <= 4:
+        return 8
+    if length <= 6:
+        return 10
+    if length <= 8:
+        return 12
+    if length <= 10:
+        return 14
+    return 16
+
+
+def styled_button(
+    parent, text, command, width=8, accent=False, danger=False, *,
+    compact=False, bold=False,
+):
+    # width参数保留调用兼容；有限尺寸由共同规则决定，
+    # 避免各页历史参数使同类按钮大小不一致。
     if danger:
         bg_normal = THEME["danger"]
         fg_normal = THEME["fg_on_dark"]
+        bg_hover = "#91463f"
+        bg_active = "#824039"
     else:
         bg_normal = THEME["bg_btn_accent"] if accent else THEME["bg_btn"]
         fg_normal = THEME["fg_on_dark"] if accent else THEME["fg"]
-
-    bg_hover = THEME["bg_btn_hover"]
-    bg_active = THEME["bg_btn_selected"]
+        bg_hover = THEME["bg_btn_hover"] if accent else "#e0dbd2"
+        bg_active = THEME["bg_btn_selected"] if accent else "#c5c0b6"
 
     btn = tk.Button(
         parent,
         text=text,
         command=command,
-        width=width,
+        width=button_width(text, compact=compact),
         bg=bg_normal,
         fg=fg_normal,
         activebackground=bg_active,
-        activeforeground=THEME["fg_on_dark"],
-        relief="flat",
-        bd=0,
-        padx=8,
-        pady=4,
+        activeforeground=THEME["fg_on_dark"] if danger or accent else THEME["fg"],
+        relief="raised",
+        overrelief="raised",
+        bd=1,
+        highlightthickness=1,
+        highlightbackground=parent.cget("bg"),
+        highlightcolor=THEME["accent"],
+        padx=4 if compact else 6,
+        pady=1 if compact else 3,
         cursor="hand2",
-        font=THEME["font_main"],
+        takefocus=True,
+        font=(
+            (THEME["font_main"][0], THEME["font_main"][1], "bold")
+            if bold else THEME["font_main"]
+        ),
     )
-
     btn._normal_bg = bg_normal
     btn._normal_fg = fg_normal
 
-    btn.bind(
-        "<Enter>",
-        lambda e: btn.config(bg=bg_hover, fg=THEME["fg_on_dark"]),
-    )
-    btn.bind(
-        "<Leave>",
-        lambda e: btn.config(bg=btn._normal_bg, fg=btn._normal_fg),
-    )
+    def enter(event=None):
+        if str(btn.cget("state")) != "disabled":
+            btn.configure(
+                bg=bg_hover,
+                fg=THEME["fg_on_dark"] if danger or accent else THEME["fg"],
+            )
 
+    def leave(event=None):
+        btn.configure(bg=btn._normal_bg, fg=btn._normal_fg)
+
+    btn.bind("<Enter>", enter, add="+")
+    btn.bind("<Leave>", leave, add="+")
     return btn
 
 

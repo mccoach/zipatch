@@ -157,7 +157,7 @@ def format_merge_omissions(ignored, failures, *, successful_paths=()):
             lines.append("无")
             continue
         for path, kind, reasons in members:
-            label = "目录" if kind == "directory" else "文件"
+            label = "文件夹" if kind == "directory" else "文件"
             explanation = ""
             if kind == "directory":
                 successful = {
@@ -166,8 +166,8 @@ def format_merge_omissions(ignored, failures, *, successful_paths=()):
                 }
                 if successful:
                     explanation = (
-                        f"；此处仅表示该目录来源被忽略，另有 {len(successful)} "
-                        "项通过其他明确来源成功输出，见正文；并非整目录全部未输出"
+                        f"；此处仅表示该文件夹来源被忽略，另有 {len(successful)} "
+                        "项通过其他明确来源成功输出，见正文；并非整个文件夹的内容全部未输出"
                     )
             lines.append(
                 f"- [{label}] {path}；{'；'.join(reasons)}{explanation}"
@@ -241,8 +241,8 @@ def write_merge_file(
     validate_markers(code_header_line, code_footer_line)
 
     for name, value in (
-        ("正文标准化", normalize_text_newlines),
-        ("记录文件修改时间", record_file_mtime),
+        ("标准化换行", normalize_text_newlines),
+        ("记录修改时间", record_file_mtime),
         ("显示实际路径", show_actual_path),
     ):
         if type(value) is not bool:
@@ -309,15 +309,19 @@ def write_merge_file(
                 normalize_text_newlines and access.kind == "file"
                 and entry["merge_content"] and previous_entry["merge_content"]
             ):
-                def newline_for(nominal):
-                    within_root = root is not None and contains(root, nominal)
+                def newline_for(member, observed):
+                    nominal = observed.nominal_path
+                    member_root = member.get("match_root", root)
+                    within_root = (
+                        member_root is not None and contains(member_root, nominal)
+                    )
                     parts = (
-                        nominal.relative_to(root).parts
+                        nominal.relative_to(member_root).parts
                         if within_root else nominal.parts[1:]
                     )
                     return output_rules.matches(parts, ignore_root=not within_root)
 
-                if newline_for(access.nominal_path) != newline_for(previous_access.nominal_path):
+                if newline_for(entry, access) != newline_for(previous_entry, previous_access):
                     raise ValueError(
                         "同一实际普通正文的名义别名要求不同换行成果；"
                         "请统一规则，不生成矛盾容器"
@@ -375,7 +379,7 @@ def write_merge_file(
             reasons = []
             if not entry["merge_content"]:
                 ignored_entries.append((
-                    display_path, "file", "排除文件名单",
+                    display_path, "file", "文件排除名单",
                 ))
                 excluded_count += 1
                 continue
@@ -402,9 +406,12 @@ def write_merge_file(
                 continue
 
             if normalize_text_newlines:
-                within_root = root is not None and contains(root, display_path)
+                member_root = entry.get("match_root", root)
+                within_root = (
+                    member_root is not None and contains(member_root, display_path)
+                )
                 parts = (
-                    Path(display_path).relative_to(root).parts
+                    Path(display_path).relative_to(member_root).parts
                     if within_root else Path(display_path).parts[1:]
                 )
                 matched = output_rules.matches(
@@ -478,14 +485,14 @@ def write_merge_file(
                 f"成功正文文件：{entry_counts['file']} 个",
 
                 f"已授权文件软链接节点：{link_counts['file_symlink']} 个",
-                f"已授权目录软链接节点：{link_counts['directory_symlink']} 个",
-                f"已授权目录联接 Junction 节点：{link_counts['junction']} 个",
+                f"已授权文件夹软链接节点：{link_counts['directory_symlink']} 个",
+                f"已授权文件夹联接（Junction）节点：{link_counts['junction']} 个",
                 f"成功输出入口块合计：{total} 个",
                 f"主动忽略记录：{excluded_count} 条",
                 f"正文读取／解码失败：{read_failure_count} 个",
                 f"文件修改时间缺失：{len(mtime_failures)} 个",
-                "仅输出文件正文块，不单列目录；实际路径说明按显示开关输出，拆分不用于定位。",
-                "主动忽略记录可能代表整个目录，不等于忽略文件总数。",
+                "仅输出文件正文块，不单列文件夹；实际路径说明按显示开关输出，拆分不用于定位。",
+                "主动忽略记录可能代表整个文件夹，不等于忽略文件总数。",
                 "",
             ))
             + format_merge_omissions(
@@ -536,128 +543,179 @@ def _log_completed(result, mode, log_func):
         ) from error
 
 
+def _select_merge_rules(text, base, cancel, traversal, object_kind):
+    """同次来源任务解释规则；目录与文件只在所选实体类别上不同。"""
+    jobs = tuple(enumerate(demand_physical_lines(text), 1))
+    prepared = prepare_demand_inspection(
+        jobs, base, cancel, traversal=traversal, object_kind=object_kind,
+    )
+    matches = inspect_prepared_demand_rules(
+        prepared, cancel, traversal=traversal, object_kind=object_kind,
+    )
+    selection = build_demand_selection(
+        tuple(matches[number] for number, _ in jobs)
+    )
+    if (
+        not selection.complete or selection.has_errors
+        or selection.requires_authorization
+    ):
+        name = "文件夹列表" if object_kind == "directory" else "文件列表"
+        reasons = [
+            f"第 {number} 行：{matches[number].issue}"
+            for number, _ in jobs if matches[number].issue
+        ]
+        raise ValueError(
+            f"{name}未形成完整授权来源。\n" + "\n".join(reasons)
+        )
+    return selection
+
+
 def merge_files(
-    mode, source_folder, list_text, output_file, exclusions,
+    mode, relative_base_folder, directory_list_text, list_text,
+    output_file, exclusions,
     preamble_text, ending_text, code_header_line, code_footer_line,
     log_func=None, *, normalize_text_newlines=False, record_file_mtime=True,
     output_rules=None, select_source_links=None, authorize_merge_scope=None,
     show_actual_path=True,
 ):
-    """一次任务共用节点决定、名称枚举及正式容器发布。"""
+    """全部源目录共用一次节点决定、名称枚举及成果发布。
+
+    每个目录独立保留根限定语义；规则顺序决定目录顺序，
+    每个目录内部沿用原排序，文件列表在目录来源之后补充。
+    相对基准只解释相对规则，不自动成为合并来源。
+    """
     from core.exclusion_rules import PreparedExclusions
     from services.source_traversal import SourceTraversal
 
     if type(mode) is not str or mode not in MERGE_MODES:
         raise ValueError("合并模式必须是 directory、list 或 combined")
+    for name, value in (
+        ("相对路径基准", relative_base_folder),
+        ("文件夹列表", directory_list_text),
+        ("文件列表", list_text),
+    ):
+        if type(value) is not str:
+            raise TypeError(f"{name}必须是字符串")
     if type(show_actual_path) is not bool:
         raise TypeError("显示实际路径必须是布尔值")
-    if mode in ("directory", "combined"):
-        if not source_folder:
-            raise ValueError("源文件夹不能为空")
-        if not isinstance(exclusions, PreparedExclusions):
-            raise TypeError("目录合并必须消费正式排除名单")
+    if mode in ("directory", "combined") and not isinstance(
+        exclusions, PreparedExclusions,
+    ):
+        raise TypeError("目录合并必须消费正式排除名单")
     validate_markers(code_header_line, code_footer_line)
     if normalize_text_newlines:
         validate_file_rules(output_rules)
+
     expected = observe_file(output_file, include_digest=True)
     cancel = Event()
     traversal = SourceTraversal(
         output=expected, selector=select_source_links,
         authorize=authorize_merge_scope,
     )
-
-    root = None
-    plan = []
+    roots = ()
+    plans = []
+    directory_owners = {}
     if mode in ("directory", "combined"):
-        root = traversal.resolve(source_folder)
-        if root is not None and root.kind != "directory":
-            raise ValueError("合并源文件夹必须定位到普通目录")
-        if root is not None:
-            plan = build_regular_merge_plan(
-                source_folder, exclusions, expected.path,
+        ignored_start = len(traversal.ignored)
+        directories = _select_merge_rules(
+            directory_list_text, relative_base_folder,
+            cancel, traversal, "directory",
+        )
+        roots = directories.accesses
+        by_nominal = {
+            windows_path_key(access.nominal_path): access for access in roots
+        }
+        roots = tuple(by_nominal[windows_path_key(path)] for path in directories.files)
+        if not roots and len(traversal.ignored) == ignored_start:
+            raise ValueError("文件夹列表至少需要一条实际选中文件夹的启用规则")
+        for root in roots:
+            before = len(traversal.ignored)
+            current = build_regular_merge_plan(
+                root.nominal_path, exclusions, expected.path,
                 traversal=traversal, root_access=root,
             )
-    directory_keys = {windows_path_key(entry["path"]) for entry in plan}
-    directory_keys.update(
-        windows_path_key(path)
-        for path, kind, reason in traversal.ignored
-        if kind == "file" and reason == "排除文件名单"
-    )
-
-    selected_files = ()
-    selection_accesses = ()
-    if mode in ("list", "combined"):
-        jobs = tuple(enumerate(demand_physical_lines(list_text), 1))
-        rules = prepare_demand_inspection(
-            jobs, source_folder, cancel, traversal=traversal,
-        )
-        errors = tuple(
-            f"合并列表第 {number} 行：{result.issue}"
-            for number, rule, access, result in rules
-            if result is not None and result.issue
-        )
-        if errors:
-            raise ValueError("合并列表检查未通过。\n" + "\n".join(errors))
-        matches = inspect_prepared_demand_rules(
-            rules, cancel, traversal=traversal,
-        )
-        selection = build_demand_selection(
-            tuple(matches[number] for number, expression in jobs)
-        )
-        if not selection.complete or selection.has_errors or selection.requires_authorization:
-            reasons = [
-                f"第 {number} 行：{matches[number].issue}"
-                for number, expression in jobs if matches[number].issue
+            current = [
+                {**entry, "match_root": root.nominal_path}
+                for entry in current
             ]
-            raise ValueError("合并列表未形成完整授权来源。\n" + "\n".join(reasons))
-        selected_files = selection.files
-        selection_accesses = selection.accesses
-        if mode == "list" and not selected_files and not traversal.ignored:
-            raise ValueError("仅列表模式至少需要一条实际选中文件的启用规则")
-
-    positions = {
-        windows_path_key(entry["path"]): number
-        for number, entry in enumerate(plan)
-    }
-    for entry in build_demand_merge_plan(selected_files, selection_accesses):
-        access = entry["access"]
-        # 明确选中目录链接时按目录实体充分展开；普通明确目录仍由规则拒绝。
-        expanded = (
-            (
-                {"path": str(child.nominal_path),
-                 "merge_content": True, "access": child}
-                for child, parts in traversal.walk(
-                    access, include_root=True, skip_output=False,
+            plans.append(current)
+            for entry in current:
+                directory_owners.setdefault(
+                    windows_path_key(entry["path"]), root.nominal_path,
                 )
-                if child.kind == "file"
-            )
-            if access.kind == "directory" else (entry,)
-        )
-        for member in expanded:
-            key = windows_path_key(member["path"])
-            previous = positions.get(key)
-            if previous is None:
-                positions[key] = len(plan)
-                plan.append(member)
-            elif plan[previous]["access"] != member["access"]:
-                raise ValueError("目录与列表的同名来源观察不一致")
+            for path, kind, reason in traversal.ignored[before:]:
+                if kind == "file" and reason == "文件排除名单":
+                    directory_owners.setdefault(
+                        windows_path_key(path), root.nominal_path,
+                    )
 
-    if mode == "combined" and root is not None:
-        plan = sorted(
-            (entry for entry in plan if windows_path_key(entry["path"]) in directory_keys),
-            key=lambda entry: entry["path"].lower(),
-        ) + [
-            entry for entry in plan
-            if windows_path_key(entry["path"]) not in directory_keys
-        ]
+    plan = [entry for current in plans for entry in current]
+    positions = {}
+    for number, entry in enumerate(plan):
+        positions.setdefault(windows_path_key(entry["path"]), number)
+
+    if mode in ("list", "combined"):
+        ignored_start = len(traversal.ignored)
+        selection = _select_merge_rules(
+            list_text, relative_base_folder, cancel, traversal, "file",
+        )
+        if (
+            mode == "list" and not selection.files
+            and len(traversal.ignored) == ignored_start
+        ):
+            raise ValueError("文件列表至少需要一条实际选中文件的启用规则")
+        for entry in build_demand_merge_plan(selection.files, selection.accesses):
+            access = entry["access"]
+            expanded = (
+                (
+                    {"path": str(child.nominal_path),
+                     "merge_content": True, "access": child}
+                    for child, _ in traversal.walk(
+                        access, include_root=True, skip_output=False,
+                    )
+                    if child.kind == "file"
+                )
+                if access.kind == "directory" else (entry,)
+            )
+            for member in expanded:
+                key = windows_path_key(member["path"])
+                member = {
+                    **member, "match_root": directory_owners.get(key),
+                }
+                previous = positions.get(key)
+                if previous is None:
+                    positions[key] = len(plan)
+                    plan.append(member)
+                elif plan[previous]["access"] != member["access"]:
+                    raise ValueError("文件夹列表与文件列表的同名来源观察不一致")
+
+    if mode == "combined":
+        # 明确补回的目录文件排除项归入首次对应目录的原排序区；
+        # 排除目录内部及其他外部补充仍保持文件列表顺序。
+        ordered = []
+        for root in roots:
+            ordered.extend(sorted(
+                (
+                    entry for entry in plan
+                    if entry.get("match_root") == root.nominal_path
+                ),
+                key=lambda entry: entry["path"].lower(),
+            ))
+        ordered.extend(
+            entry for entry in plan if entry.get("match_root") is None
+        )
+        plan = ordered
+
     included = {windows_path_key(entry["path"]) for entry in plan}
     ignored = tuple(
         member for member in traversal.ignored
-        if member[1] == "directory" or windows_path_key(member[0]) not in included
+        if member[1] == "directory"
+        or windows_path_key(member[0]) not in included
     )
     if log_func:
-        log_func(f"开始合并：{mode}；输出：{expected.path}")
-    # 已枚举的访问路线仍需固定复核；未授权节点没有下游访问事实。
+        log_func(
+            f"开始合并：{mode}；源文件夹 {len(roots)} 个；输出路径：{expected.path}"
+        )
     dependencies = tuple(
         access for access in traversal.accesses if access.kind == "directory"
     )
@@ -666,7 +724,6 @@ def merge_files(
         code_header_line, code_footer_line, log_func,
         normalize_text_newlines=normalize_text_newlines,
         record_file_mtime=record_file_mtime, output_rules=output_rules,
-        match_root=source_folder if mode in ("directory", "combined") else None,
         enumeration_accesses=dependencies, ignored_entries=ignored,
         show_actual_path=show_actual_path,
     )

@@ -5,44 +5,40 @@ import tkinter as tk
 from core.constants import THEME
 from core.exclusion_rules import PreparedExclusions
 from core.path_validation import normalize_windows_display_path
-from core.paths import build_output_path, validate_required_path
+from core.paths import resolve_output_path, validate_required_path
+from ui.output_path import create_output_path_row
 from panels.base_panel import BasePanel
 from services.merge_service import merge_files
+from ui.demand_editor import SourceListEditor, show_source_list_help
 from ui.dialogs import edit_exclude_settings, edit_extra_text_settings
-from ui.message_dialogs import safe_show_info
+from ui.message_dialogs import safe_show_info, safe_ask_risk_confirm
 from ui.newline_settings import edit_newline_settings
 from ui.operation_lock import locked_page
-from ui.text_output_settings import edit_output_format_settings, show_output_help
+from ui.page_settings import create_page_settings
+from ui.text_output_settings import edit_output_format_settings
 from ui.theme import styled_button, styled_frame
 from ui.widgets import (
-    browse_folder, create_entry_row, make_checkbutton,
-    open_output_file, open_path_with_default_app, resolve_output_file_conflict,
+    browse_folder, create_entry_row,
+    open_path_with_default_app, resolve_output_file_conflict,
 )
 
 
 def merge_completion_message(result, mode):
     incomplete = result.read_failure_count or result.mtime_failures
     title = "合并完成，存在缺失信息" if incomplete else "合并完成"
-    counts = dict(result.entry_counts)
     links = dict(result.link_counts)
     message = (
-        f"{mode}成果已发布：成功正文文件 {counts.get('file', 0)} 个。\n"
-        f"共输出 {result.total_files} 个文件正文块，不单列目录。\n"
+        f"{mode}成果已发布：成功正文文件 {result.total_files} 个。\n"
         f"已授权链接节点：文件软链接 {links.get('file_symlink', 0)}；"
-        f"目录软链接 {links.get('directory_symlink', 0)}；"
-        f"Junction {links.get('junction', 0)}。\n"
-        "节点数与正文块数分别统计，同一节点不按后代文件重复计数。\n\n"
+        f"文件夹软链接 {links.get('directory_symlink', 0)}；"
+        f"文件夹联接（Junction）{links.get('junction', 0)}。\n\n"
         f"主动忽略：{result.excluded_count}；"
         f"正文失败：{result.read_failure_count}；"
         f"时间缺失：{len(result.mtime_failures)}。\n"
-        "普通与链接来源一视同仁；实际路径按显示开关附加，拆分只使用名义主路径。\n\n"
+        "只输出文件正文块；重复实际文件只输出一次。\n"
+        "忽略与失败名单位于成果末尾，不作为拆分输入。\n\n"
         f"保存位置：\n{result.output_file}"
     )
-    if result.excluded_count or result.read_failure_count:
-        message += (
-            "\n\n忽略及正文失败项不生成源码块；"
-            "名单集中位于成果末尾，目录范围不展开后代。"
-        )
     if result.mtime_failures:
         message += "\n\n时间未取得：\n" + "\n".join(
             path for path, _ in result.mtime_failures
@@ -55,103 +51,107 @@ class MergePanel(BasePanel):
 
     def build(self):
         body = self.make_body()
-        for field, label in (
-            ("source_folder", "源文件夹"),
-            ("output_folder", "输出文件夹"),
-            ("output_filename", "输出文件名"),
-        ):
-            variable = tk.StringVar(value=self.cfg[field])
-            setattr(self, field, variable)
-            browse = None
-            opener = None
-            open_fields = None
-            normalizer = str.strip
-            if field in ("source_folder", "output_folder"):
-                browse = lambda current=variable: browse_folder(
-                    current, parent=self.root,
-                )
-                opener = lambda current=variable: open_path_with_default_app(
-                    current.get(), self.root,
-                )
-                normalizer = normalize_windows_display_path
-            else:
-                opener = lambda: open_output_file(
-                    self.output_folder, self.output_filename, self.root,
-                )
-                open_fields = {"output_folder", "output_filename"}
-            create_entry_row(
-                body, label, variable, commits=self.commits, config=self.cfg,
-                field=field, page=self.config_key, history_key=f"merge.{field}",
-                browse_command=browse, open_command=opener,
-                open_fields=open_fields, value_normalizer=normalizer,
-            )
+        body.pack_configure(fill="both", expand=True)
+        self.relative_base_folder = tk.StringVar(
+            master=self, value=self.cfg["relative_base_folder"],
+        )
+        self.output_path = tk.StringVar(master=self, value=self.cfg["output_path"])
+        self.output_entry = create_output_path_row(body, self)
 
-        row = styled_frame(body, bg=THEME["bg_panel"])
-        row.pack(fill="x", pady=(10, 0))
-
-        for field, label in (
-            ("open_after_done", "完成后立即打开成果文件"),
-            ("force_overwrite", "成果文件已存在时强制覆盖"),
-            ("normalize_text_newlines", "标准化文本换行"),
-            ("show_actual_path", "显示实际路径"),
-            ("record_file_mtime", "记录文件修改时间"),
-        ):
-            variable = tk.BooleanVar(value=self.cfg[field])
-            setattr(self, field, variable)
-            make_checkbutton(
-                row, label, variable, commits=self.commits,
-                config=self.cfg, field=field,
-            ).pack(side="left", padx=(0, 6))
-
-        row = styled_frame(body, bg=THEME["bg_panel"])
-        row.pack(fill="x", pady=(12, 0))
-        styled_button(
-            row, "合并列表", self.open_merge_list_dialog, width=10,
-        ).pack(side="left", padx=(0, 8))
-        styled_button(
-            row, "排除名单", self.open_exclude_dialog, width=10,
-        ).pack(side="left", padx=(0, 8))
-        styled_button(
-            row, "附加文本", self.open_extra_text_dialog, width=10,
-        ).pack(side="left", padx=(0, 8))
-        styled_button(
-            row, "容器标记",
-            lambda: edit_output_format_settings(
-                self.root, self.commits, self.cfg, "merge",
+        _, _, variables = create_page_settings(
+            body, self.commits, self.cfg,
+            (
+                ("open_after_done", "完成后打开成果", "完成后打开本次成果文件"),
+                ("normalize_text_newlines", "标准化换行", "按换行设置转换正文换行"),
+                ("show_actual_path", "显示实际路径", "显示链接来源的附加实际路径"),
+                ("force_overwrite", "直接覆盖已有成果", "成果已存在时直接覆盖；未勾选时选择覆盖、自动改名或取消"),
+                ("record_file_mtime", "记录修改时间", "在成果中记录来源文件修改时间"),
             ),
-            width=10,
-        ).pack(side="left", padx=(0, 8))
+            (
+                ("exclude", "排除名单", self.open_exclude_dialog),
+                ("extra", "附加文本", self.open_extra_text_dialog),
+                ("markers", "容器标记", lambda: edit_output_format_settings(
+                    self.root, self.commits, self.cfg, "merge",
+                )),
+
+                ("newline", "换行设置", lambda: edit_newline_settings(
+                    self.root, self.commits,
+                )),
+            ),
+        )
+        for field, variable in variables.items():
+            setattr(self, field, variable)
+
+        # 底部先占位；列表取得剩余高度，执行入口不被正文挤出窗口。
+        bottom = styled_frame(body, bg=THEME["bg_panel"])
+        bottom.pack(side="bottom", fill="x", pady=(8, 0))
+        bottom.grid_columnconfigure(0, weight=1, uniform="merge_bottom_zones")
+        bottom.grid_columnconfigure(1, weight=1, uniform="merge_bottom_zones")
+        buttons = styled_frame(bottom, bg=THEME["bg_panel"])
+        buttons.grid(row=0, column=1, sticky="e", padx=(10, 0))
         styled_button(
-            row, "换行设置",
-            lambda: edit_newline_settings(self.root, self.commits),
-            width=10,
+            buttons, "填写规则", lambda: show_source_list_help(self.root), width=9,
         ).pack(side="left", padx=(0, 8))
-        styled_button(
-            row, "正文规则", lambda: show_output_help(self.root), width=10,
-        ).pack(side="left", padx=(0, 8))
-        # right 按登记顺序从右向左排列，使最终顺序为目录、列表、组合。
+        from ui.widgets import add_tooltip
+
         for label, mode, color in (
-            ("目录+列表合并", "combined", "#a85d12"),
-            ("仅列表合并", "list", "#287044"),
-            ("仅目录合并", "directory", "#28679b"),
+            ("合并文件夹", "directory", "#6b7c83"),
+            ("合并文件", "list", "#718071"),
+            ("组合合并", "combined", "#927c63"),
         ):
             button = styled_button(
-                row, label,
-                lambda selected=mode: self.execute_merge(selected),
-                width=12,
+                buttons, label,
+                lambda selected=mode: self.execute_merge(selected), width=11,
             )
             button.configure(
                 bg=color, fg=THEME["fg_on_dark"],
-                activebackground=color,
-                activeforeground=THEME["fg_on_dark"],
+                activebackground=color, activeforeground=THEME["fg_on_dark"],
             )
             button._normal_bg = color
             button._normal_fg = THEME["fg_on_dark"]
-            button.pack(side="right", padx=(8, 0))
+            add_tooltip(button, {
+                "directory": "只使用文件夹列表，递归合并其中的文件，并应用排除名单。",
+                "list": "只使用文件列表，不使用文件夹来源的排除名单。",
+                "combined": "先处理文件夹列表，再补充文件列表；明确选中的文件不受文件夹来源排除规则影响。",
+            }[mode])
+            button.pack(side="left", padx=(4, 0))
+        base = styled_frame(bottom, bg=THEME["bg_panel"])
+        base.grid(row=0, column=0, sticky="ew")
+        create_entry_row(
+            base, "相对路径基准", self.relative_base_folder,
+            commits=self.commits, config=self.cfg,
+            field="relative_base_folder", page=self.config_key,
+            history_key="merge.relative_base_folder", label_width=11,
+            value_normalizer=normalize_windows_display_path,
+            browse_command=lambda: browse_folder(
+                self.relative_base_folder, "选择相对规则基准", parent=self.root,
+                commits=self.commits, history_key="merge.relative_base_folder",
+            ),
+            open_command=lambda: open_path_with_default_app(
+                self.relative_base_folder.get(), self.root,
+            ),
+            tooltip_text="只解释两份列表的相对规则，不自动加入合并；绝对规则可留空。",
+        )
 
-    def open_merge_list_dialog(self):
-        from ui.demand_editor import open_demand_editor
-        return open_demand_editor(self)
+        lists = tk.PanedWindow(
+            body, orient="horizontal", bg=THEME["bg_panel"],
+            sashwidth=6, sashrelief="flat", bd=0,
+        )
+        lists.pack(fill="both", expand=True)
+        left = styled_frame(lists, bg=THEME["bg_panel"])
+        right = styled_frame(lists, bg=THEME["bg_panel"])
+        lists.add(left, minsize=280, stretch="always")
+        lists.add(right, minsize=280, stretch="always")
+        self.directory_editor = SourceListEditor(
+            left, self, field="directory_list_text", title="文件夹列表",
+            object_kind="directory", favorite_key="merge_directory_list",
+            wrap_key="merge.directory_list",
+        )
+        self.file_editor = SourceListEditor(
+            right, self, field="demand_file_list_text", title="文件列表",
+            object_kind="file", favorite_key="demand_file_list",
+            wrap_key="merge.demand_file_list",
+        )
 
     def open_exclude_dialog(self):
         if edit_exclude_settings(
@@ -168,12 +168,11 @@ class MergePanel(BasePanel):
             self.log("文件代码合并 - 附加文本 已保存")
 
     def resolve_output_and_markers(self, cfg):
-        folder = validate_required_path(cfg["output_folder"], "输出文件夹")
-        name = validate_required_path(cfg["output_filename"], "输出文件名")
         header = validate_required_path(cfg["code_header_line"], "开始标记")
         footer = validate_required_path(cfg["code_footer_line"], "结束标记")
         output = resolve_output_file_conflict(
-            build_output_path(folder, name), cfg["force_overwrite"], self.root,
+            resolve_output_path(cfg["output_path"]),
+            cfg["force_overwrite"], self.root,
         )
         return output, header, footer
 
@@ -184,26 +183,24 @@ class MergePanel(BasePanel):
             return self._execute_merge(mode)
 
     def _execute_merge(self, mode):
-        # 本次模式来自点击的按钮；沿原配置接受和保存屏障记录最近模式。
         self.commits.manager.accept(self.cfg, {"merge_mode": mode})
         fields = {
-            "merge_mode", "output_folder", "output_filename",
-            "preamble_text", "ending_text", "code_header_line",
-            "code_footer_line", "open_after_done", "force_overwrite",
-            "normalize_text_newlines", "record_file_mtime", "show_actual_path",
+            "merge_mode", "relative_base_folder", "output_path",
+            "preamble_text", "ending_text",
+            "code_header_line", "code_footer_line",
+            "open_after_done", "force_overwrite", "normalize_text_newlines",
+            "record_file_mtime", "show_actual_path",
         }
         if mode in ("directory", "combined"):
-            fields |= {"source_folder", "exclude_folders", "exclude_files"}
+            fields |= {"directory_list_text", "exclude_folders", "exclude_files"}
         if mode in ("list", "combined"):
-            fields |= {"source_folder", "demand_file_list_text"}
+            fields.add("demand_file_list_text")
         cfg = self.prepare(fields)
         if cfg is None:
             return
-
         try:
             exclusions = None
-            if cfg["merge_mode"] in ("directory", "combined"):
-                validate_required_path(cfg["source_folder"], "源文件夹")
+            if mode in ("directory", "combined"):
                 exclusions = PreparedExclusions(
                     self.commits.prepare_rule(
                         self.cfg, "exclude_folders", "directory",
@@ -217,51 +214,42 @@ class MergePanel(BasePanel):
             output_rules = (
                 self.commits.prepare_rule(
                     self.config_data["settings"], "crlf_file_list", "file",
-                )
-                if cfg["normalize_text_newlines"] else None
+                ) if cfg["normalize_text_newlines"] else None
             )
             output, header, footer = self.resolve_output_and_markers(cfg)
             if output is None:
                 return
-
-            labels = {
-                "directory": "仅目录",
-                "list": "仅列表",
-                "combined": "目录+列表",
-            }
-            mode_label = labels[cfg["merge_mode"]]
-            self.set_status(f"正在合并文件代码：{mode_label}...")
-            self.log(f"用户启动：合并（{mode_label}）")
-            self.commits.metrics["business_starts"] += 1
-            from ui.message_dialogs import safe_ask_risk_confirm
-
             from ui.source_scope import make_source_node_selector
 
+            labels = {
+                "directory": "合并文件夹", "list": "合并文件", "combined": "组合合并",
+            }
+            mode_label = labels[mode]
+            self.set_status(f"正在合并：{mode_label}...")
+            self.log(f"用户启动：合并（{mode_label}）")
+            self.commits.metrics["business_starts"] += 1
             result = merge_files(
-                select_source_links=make_source_node_selector(
-                    self.root, self.commits,
-                ),
-                authorize_merge_scope=lambda title, description:
-                safe_ask_risk_confirm(
-                    title, description, self.root, danger=True,
-                ),
-                mode=cfg["merge_mode"],
-                source_folder=cfg.get("source_folder", ""),
+                mode=mode,
+                relative_base_folder=cfg["relative_base_folder"],
+                directory_list_text=cfg.get("directory_list_text", ""),
                 list_text=cfg.get("demand_file_list_text", ""),
                 output_file=output, exclusions=exclusions,
-                preamble_text=cfg["preamble_text"],
-                ending_text=cfg["ending_text"],
+                preamble_text=cfg["preamble_text"], ending_text=cfg["ending_text"],
                 code_header_line=header, code_footer_line=footer,
                 log_func=self.log,
                 normalize_text_newlines=cfg["normalize_text_newlines"],
                 record_file_mtime=cfg["record_file_mtime"],
                 show_actual_path=cfg["show_actual_path"],
                 output_rules=output_rules,
+                select_source_links=make_source_node_selector(self.root, self.commits),
+                authorize_merge_scope=lambda title, description:
+                safe_ask_risk_confirm(
+                    title, description, self.root, danger=True,
+                ),
             )
         except (OSError, ValueError) as error:
             self.handle_error("合并", error)
             return
-
         title, message = merge_completion_message(result, mode_label)
         self.set_status(title)
         safe_show_info(title, message, self.root)

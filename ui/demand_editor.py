@@ -1,987 +1,431 @@
 # -*- coding: utf-8 -*-
 
-"""按名单合并草稿、后台检查调度和最终操作的界面协调。"""
+"""常驻目录／文件列表的后台检查、高亮和行悬浮摘要。
+
+控件拥有正文，配置绑定负责接受；检查结果仅是本次派生视图。
+后台不接触Tk、不授权链接、不读取普通文件正文或执行合并。
+"""
 
 import tkinter as tk
-from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
 
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from time import monotonic
-from tkinter import messagebox
 
 from core.constants import THEME
-from ui.message_dialogs import safe_show_error, safe_show_info
-from ui.window_manager import center_window
-from ui.text_editor import replace_text_keep_undo
-from services.demand_rules import (
-    DemandCheckCancelled,
-    DemandMatch,
-    build_demand_selection,
-
-    demand_physical_lines,
-    inspect_demand_rules,
-    rule_is_relative,
-)
-from ui.dialogs import TextDraftSession, create_managed_text_box
-from ui.theme import styled_button, styled_frame, styled_text_with_scrollbars
-from ui.window_manager import register_popup, unregister_popup, take_modal_control
-from ui.list_text_editing import ListTextEditing
+from core.path_validation import normalize_windows_display_path
 from core.rule_lists import clean_rule_quotes, is_exclusion_layout_line
-
-
-DEBOUNCE_SECONDS = 0.2
-RESULT_POLL_MILLISECONDS = 40
-
-# 正文高亮与顶部色块图例共用颜色，避免展示含义发生偏离。
-DEMAND_HIGHLIGHT_STYLES = (
-    ("demand_error", THEME["danger"], THEME["danger_bg"], "红：选择错误"),
-    ("demand_warning", THEME["fg"], "#fff2a8", "黄：存在重复"),
-    ("demand_success", "#175c25", "#cde8cf", "绿：选择成功且无重复"),
-    ("demand_disabled", "#555555", "#c6c6c6", "灰：主动停用"),
+from services.demand_rules import (
+    DemandCheckCancelled, DemandMatch, build_demand_selection,
+    demand_physical_lines, inspect_demand_rules,
+)
+from ui.dialogs import create_managed_text_box
+from ui.list_text_editing import ListTextEditing
+from ui.theme import styled_button, styled_frame, styled_text_with_scrollbars
+from ui.widgets import add_tooltip
+from ui.window_manager import (
+    center_window, register_popup, take_modal_control, unregister_popup,
 )
 
-DEMAND_HELP = r"""合并列表填写规则
 
-一、每行选择一个文件或一组文件
-────────────────────────────────────────
-每行填写一条文件选择规则。
-可以填写具体文件路径，也可以使用通配符选择一组文件。
-这里是“选择要合并的文件”，不是排除名单；
-扫描和按目录合并的排除名单不适用于这里。
+CHECK_DELAY_MS = 200
+POLL_MS = 50
+HIGHLIGHTS = {
+    "error": (THEME["danger"], THEME["danger_bg"]),
+    "warning": (THEME["fg"], "#fff2a8"),
+    "success": ("#175c25", "#cde8cf"),
+    "disabled": ("#555555", "#c6c6c6"),
+}
 
-例：
-README.md
-docs\a.md
-docs\*.md
+SOURCE_LIST_HELP = r"""文件夹列表与文件列表
 
-不要用逗号或分号分隔多条规则。
-名称里的空格、逗号、分号和方括号都是普通字符。
+共同填写规则
+• 每行一条；半角双引号实时删除。
+• 空行及纯半角空格行保留，不参与选择。
+• 行首 | 停用；Ctrl+反引号逐物理行切换。
+• 实际规则首尾空格参与匹配，不自动删掉。
+• 支持完整盘符、UNC绝对路径和相对路径。
+• 相对规则以页面“相对路径基准”为起点。
+• 基准不自动加入合并；全部使用绝对规则时可以留空。
+• 不展开环境变量或 ~；相对路径不允许 ..。
+• 不用逗号或分号分隔规则；不支持行尾注释。
+• * 匹配当前路径段零个或多个字符，? 匹配一个字符。
+• ** 必须独占路径段，表示零层或多层文件夹。
+• 不支持正则、花括号扩展、取反及设备路径。
 
+文件夹列表
+• 明确文件夹直接选中；明确文件拒绝。
+• 通配符选择符合规则的文件夹，不直接选择文件正文。
+• 例如 E:\项目、E:\工作区\项目*。
+• 每个选中文件夹随后按原合并流程递归取文件。
+• 同一份排除名单分别以每个源文件夹为根匹配。
+• 规则按行顺序；单条命中文件夹按完整路径排序。
+• 每个源文件夹内部保持原文件排序。
+• 相同文件夹去重；上级和下级文件夹不擅自归并。
+• 文件夹来源可重叠，同一实际文件只输出一个正文块。
 
-二、引号、空行和空格
-────────────────────────────────────────
-• 半角双引号 " 在输入、粘贴和回填时实时删除，包括路径内部的双引号。
-• 删除双引号后完全为空、或仅含半角空格的行属于排版。
-• 排版行原样保留位置、数量和半角空格数量；不选择文件、不高亮、不提醒。
-• 开头、中间、末尾及连续排版行都保留，保存和收藏不压缩。
-• 实际规则不自动删除首尾空格；空格参与文件名匹配，不增加专门警告。
-• 全角空格、NBSP 等 Unicode 空白不是排版，保留并按实际名称检查。
-  存在对应文件时可以选择；不存在时显示正常的文件选择错误。
-• Tab、孤立回车和禁用控制字符不是排版；启用行含这些字符时报红。
-  行首 | 停用的正文不接受路径检查。
-• 整份名单只有排版或停用行时，没有可合并文件，不能执行。
-• 不展开环境变量或 ~，请填写实际路径。
-• 不支持行尾注释；说明文字不要写在启用规则后面。
-• 换行请使用普通回车换行，不用 Tab 分隔规则。
+文件列表
+• 明确文件或通配符选文件，沿用原文件列表语义。
+• 普通文件夹不能直接选，请使用文件夹列表或文件通配符。
+• 原有明确文件夹软链接／文件夹联接（Junction）授权展开行为保留。
+• 文件列表不使用文件夹来源的两份排除名单。
+• 规则按行顺序，单条命中文件按完整路径排序。
+• “组合合并”先处理文件夹列表，再补充文件列表。
+• 明确补回的文件排除项归入首次对应源文件夹的文件排序；
+  被排除文件夹内部或其他外部补充保持文件列表顺序。
 
-例：
-"docs\a.md"       → docs\a.md
-""                → 不选择文件
-;README.md        → 名为 ;README.md 的文件，不表示停用
+检查反馈
+• 绿色：有效且无重复；黄色：与前面的规则重复。
+• 红色：规则、路径或访问错误；灰色：主动停用。
+• 无色：检查中、排版或涉及链接待本次授权。
+• 悬浮规则行查看简短摘要，底部显示当前统计。
+• 后台检查只查询元信息，不弹窗、不授权、不读普通正文。
+• 遇首个待授权链接停止路线，不探查下游。
+• 每次正式执行重新检查，不用旧颜色作为执行资格。
+• 输入、基准变化或窗口销毁会取消旧检查；
+  过期结果不能覆盖新正文的检查状态。
 
+编辑与保存
+• 查找Ctrl+F、替换Ctrl+H、撤销Ctrl+Z、重做Ctrl+Y。
+• 收藏、导入、清空、自动换行分别属于各自文本框。
+• 右上角浏览：文件夹每次选一个，文件支持多选。
+• 每个文本框的浏览、导入分别记住自己的最近有效文件夹，重启保留。
+• 取消或失败不覆盖记录；旧位置失效时从程序所在文件夹重新选择。
+• 选择的绝对路径逐行追加到名单末尾，不替换原文。
+• 取消不修改；重复保留并由检查提示；追加可整体撤销。
+• 浏览只填写路径，不授予链接访问或正式合并资格。
+• 自动换行只改变显示，不决定成果换行。
+• 主页面沿现有编辑完成点保存，不逐字写盘。
+• 可以保存含红项的来源列表，正式使用该列表时必须修正。
+• “合并文件夹”不使用文件列表；“合并文件”不使用文件夹列表。
+• “组合合并”使用两份来源列表。
+• 本次使用的列表任一错误，整次合并停止，不执行通过子集。
 
-三、停用某一行：行首 |
-────────────────────────────────────────
-删除双引号后，第一个字符为半角竖线 |，表示停用。
-去掉行首 | 即可重新启用。
-Ctrl+` 逐行切换行首一个 |；无选区处理光标所在物理行。
-有选区时各行独立切换；结束在下一行行首时不处理该下一行。
-屏幕折行不算新行。空行变为 |，||abc 变为 |abc。
-一次切换可一次撤销，不自动保存。
-
-例：
-|docs\a.md
-|docs\*.md
-
-停用行不选择文件，显示灰色。
-| 必须位于行首；“ |docs\a.md”不是停用规则。
-停用行可以保留暂时不用的路径或备注。
-
-
-四、绝对路径和相对路径
-────────────────────────────────────────
-【绝对路径】
-填写完整盘符路径，或完整网络共享路径。
-
-例：
-C:\docs\a.md
-D:/project/README.md
-\\server\share\docs\a.md
-
-网络共享路径必须包含服务器名和共享名。
-服务器名及共享名不能使用通配符。
-可以选择不同盘符下的文件。
-
-【相对路径】
-以主面板设置的源文件夹为起点。
-
-例：
-README.md
-只选择源文件夹根下的 README.md，不自动搜索子目录。
-
-docs\a.md
-选择源文件夹下 docs 目录中的 a.md。
-
-使用相对路径时，必须设置有效的源文件夹。
-全部启用规则都是绝对路径时，可以不设置源文件夹。
-相对路径不得使用 .. 返回上级目录。
-
-以下形式不支持：
-C:docs\a.md
-C:
-\docs\a.md
-\\?\C:\docs\a.md
-\\.\C:\docs\a.md
-
-可以使用 / 或 \ 作为路径分隔符。
-不要在文件名后加斜杠；docs\a.md\ 表示目录要求，
-不能用来选择文件。
-
-
-五、文件夹不能直接合并
-────────────────────────────────────────
-填写文件夹路径不会自动选择里面的文件。
-如需选择目录内文件，请明确使用通配符。
-
-例：
-docs
-这是文件夹，不是可合并文件。
-
-docs\*
-选择 docs 当前层级的文件。
-
-docs\**\*
-选择 docs 及其全部子目录中的文件。
-
-
-六、通配符
-────────────────────────────────────────
-【*：当前路径段内零个或多个字符】
-不跨目录。
-
-docs\*.md
-选择 docs 当前层级的 Markdown 文件。
-
-test_*.py
-选择源文件夹根下的 test_.py、test_a.py 等文件。
-
-【?：当前路径段内一个字符】
-不跨目录。
-
-part?.txt
-可以选择 part1.txt，不选择 part.txt 或 part10.txt。
-
-【**：零层或多层目录】
-必须独占一个路径段。
-
-docs\**\*.md
-选择 docs 及其子目录中的 Markdown 文件。
-
-**\README.md
-选择源文件夹各层级的 README.md。
-
-docs\**\*
-选择 docs 下所有层级的文件。
-
-以下写法无效：
-a**b
-**.md
-***
-
-不支持正则表达式、花括号扩展或取反。
-[ab].txt 表示字面名称 [ab].txt，不表示 a.txt 或 b.txt。
-
-【Windows链接】
-每个链接都是一个独立选择节点：选中为通，未选为断。
-上层断开时不再访问下游；内部节点即使在其他路线被选中，
-也不能越过本路线较高层的断点。
-
-后台检查不弹窗、不取得授权：
-遇到首个待授权链接立即停止该路线，不先探查其深层定义或目标。
-“待本次合并授权”不是永久非法；应用、保存只保存名单表达。
-
-主页面合并在首次跟随节点前展示名义节点、实际入口、原定义和直接引用。
-授权目录节点后按普通目录遍历，遇到新的链接仍须单独选择。
-文件路线全部接通后读取实际普通文件正文。
-同一任务内同一个实际链接节点决定共用，不对每个后代重复询问。
-全不选是在断点收口；取消任务则停止且不发布成果。
-不再增加同一范围的第二次正文选择或只读确认。
-
-明确填写目录软链接或Junction时，授权后展开其目录实体；
-普通明确目录仍须通过通配符选择。
-通配符保持本身的层级规则：*不跨目录，**可以递归。
-未授权目录只在忽略名单列断点，不访问或列举其内部文件。
-经链接的范围不能使用后续..跳出已经展示的子树。
-
-输出文件块的主路径始终是名义位置。
-经过链接的文件在默认勾选“显示实际路径”时，
-另附一行“实际路径：最终实际位置”，不使用JSON或额外字段。
-说明位于正文开始行之外，拆分不将其作为目标路径；
-正文内部相同字样仍按源码原文保留。
-关闭该显示选项时只输出名义路径，但仍逐节点授权及复核。
-合并只输出文件正文块，不单列普通目录、链接目录或空目录。
-不逐层排列原定义，不把附加实际位置作为拆分写回目标。
-运行期仍分别保存各层链接事实用于漂移复核，不以最终路径代替原定义。
-
-不同名义入口选择同一实际普通文件时沿用首次正文块和一次正文获取，
-全部实际使用路线仍参与发布前复核。
-别名要求不同换行成果、来源漂移、循环及输出冲突仍拒绝。
-
-
-七、顺序和重复选择
-────────────────────────────────────────
-• 合并顺序按名单从上到下排列。
-• 一条通配符规则选中的文件，按完整路径排序，不区分大小写。
-• 多条规则选中同一路径时，只合并一次，保留首次选中的位置。
-• 重复规则不必手动删除；也可以调整顺序改变文件出现位置。
-
-
-八、颜色和诊断
-────────────────────────────────────────
-红：规则无效、文件不存在、没有选中文件或无法访问；
-    查看对应行的原因并修正，红项不能执行。
-
-黄：选中了文件，但与前面的规则有重复；可以执行。
-
-绿：成功选中文件，且没有与前面的规则重复。
-
-灰：该行已主动停用。
-
-无高亮：尚未检查、重复关系待确定，或实际目录枚举待本次合并授权；
-        待授权不是红色错误，也不是已经选取文件；空行也不高亮。
-
-结果区显示对应行的命中、重复和新增数量，
-以及当前选中的文件清单，便于核对选择范围。
-颜色是最近一次检查的结果，不代表文件以后不会变化。
-
-
-九、保存与主页面合并
-────────────────────────────────────────
-本窗口只编辑合并列表，不执行文件合并，也不设置前言、后语。
-顶部说明、颜色图例、规则检查和检查记录仍保留。
-
-应用和保存都会完整检查当前名单并保存规则表达，
-不把通配符改写为具体文件清单；重复行、排版行和末尾空行都保留。
-应用：保存成功后保持窗口打开，可以继续编辑。
-保存：保存成功后关闭；检查或保存未完成时保留窗口和草稿。
-取消：放弃尚未应用的修改并关闭，不撤销此前成功应用的设置。
-检查期间取消会关闭窗口并停止后台检查，不保存本次草稿。
-配置接受和保存期间不能提前关闭，避免留下半次提交。
-标题关闭和 Esc 在有未保存变化时仍询问是否保存。
-有红项可以保存，留待以后修改；主页面合并时仍须完整检查通过。
-右侧检查记录使用统一文本框：标题栏清空、自动换行，Ctrl+F 查找。
-清空只删除显示记录，不改变名单、当前检查结果或已保存设置。
-
-主页面右侧有三个合并按钮，直接点击对应按钮确定本次来源：
-• 仅目录合并（蓝色）：只读取源文件夹，使用排除名单，不使用合并列表。
-• 仅列表合并（绿色）：只选择合并列表文件，不使用排除名单。
-• 目录+列表合并（橙色）：先选择目录文件，再补充列表文件。
-不需要先选择模式；三个按钮共用原有合并处理流程。
-
-仅目录和目录+列表必须填写有效源文件夹；
-不会把空源文件夹当成程序当前工作目录。
-仅列表全部使用绝对路径时，可以不填写源文件夹；
-相对路径仍需要有效源文件夹作为基准。
-
-目录+列表按目录排序在前、列表顺序在后。
-同一路径只出现一次，保留首次位置。
-列表明确选中的目录排除文件提供真实正文；
-排除目录中的文件也可以通过列表明确补入。
-这不改变排除名单本身。
-
-所有模式的前言和后语统一来自主页面“附加文本”。
-本窗口保存不会开始合并、创建成果目录或发布成果文件。
-主页面执行时重新检查本次所需列表，不直接使用旧颜色作为执行资格。
-
-执行前请确认：
-• 所需列表没有红项。
-• 仅列表模式至少选中一个文件。
-• 文件清单及顺序符合预期。
-• 没有选中本次输出文件。
-• 相对路径所需的源文件夹正确。
-• 目录+列表可以使用空列表，表示没有额外补充文件。
+链接及成果
+• 普通来源静默保留；链接节点在首次跟随前逐个选择。
+• 同次任务同一实际节点决定共用，不保存未来授权。
+• 未选在断点收口；取消任务不发布成果。
+• 链接授权、来源隔离、固定路线复核及正文解码政策保持。
+• 输出文件不得由文件列表明确选中；文件夹遍历自动跳过。
+• 成果只输出成功文件正文块，遗漏名单集中放在尾部。
+• 同一实际正文的别名要求不同换行成果时拒绝。
+• 附加实际路径只用于说明，拆分仍按名义主路径定位。
 """
 
 
-@dataclass
-class RuleState:
-    identifier: int
-    raw: str
-    match: DemandMatch | None = None
-
-
-@dataclass(frozen=True)
-class CheckRequest:
-    version: int
-    source: str
-    jobs: tuple
-    due: float
-    final_action: str = ""
-
-
-def descendants(widget):
-    for child in widget.winfo_children():
-        yield child
-        yield from descendants(child)
-
-
-def show_demand_help(parent):
-
+def show_source_list_help(parent):
     dialog = tk.Toplevel(parent)
-    dialog.title("合并列表 - 填写规则")
+    dialog.title("文件夹与文件列表 - 填写规则")
     dialog.configure(bg=THEME["bg"])
     dialog.transient(parent)
-    take_modal_control(dialog)
-    center_window(dialog, 860, 720)
+    footer = styled_frame(dialog)
+    footer.pack(side="bottom", fill="x", padx=16, pady=12)
     frame, text = styled_text_with_scrollbars(
-        dialog, height=30, wrap="word", readonly=True,
+        dialog, height=25, wrap="word", readonly=True,
     )
-    frame.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+    frame.pack(fill="both", expand=True, padx=16, pady=(12, 0))
     text.configure(state="normal")
-    text.insert("1.0", DEMAND_HELP)
+    text.insert("1.0", SOURCE_LIST_HELP)
     text.configure(state="disabled")
-    row = styled_frame(dialog)
-    row.pack(fill="x", padx=16, pady=(0, 14))
 
     def close():
         unregister_popup(dialog)
         dialog.destroy()
         return True
 
-    styled_button(row, "关闭", close, width=10).pack(side="right")
-    register_popup(dialog, close)
+    styled_button(footer, "关闭", close, width=10).pack(side="right")
     try:
+        center_window(dialog, 860, min(720, dialog.winfo_screenheight() - 100))
+        take_modal_control(dialog)
+        register_popup(dialog, close)
         parent.wait_window(dialog)
     finally:
         unregister_popup(dialog)
+        if dialog.winfo_exists():
+            dialog.destroy()
 
 
-
-class DemandDraftSession(TextDraftSession):
-    """控件是草稿源；任务和匹配结果是有明确失效边界的派生快照。"""
-
-    def __init__(self, panel, dialog, widgets, result_text, status):
-        super().__init__(dialog, panel.commits, panel.cfg, widgets)
-        self.panel = panel
-        self.result_text = result_text
-        self.status = status
-        self.rule_text = widgets["demand_file_list_text"]
-        self.baseline["demand_file_list_text"] = self.rule_text.get("1.0", "end-1c")
-        self.source = panel.cfg["source_folder"]
-        self.version = 0
-        self.rules = []
-        self.next_identifier = 0
-        self.pending = None
-        self.running = None
-        self.executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="ZipatchDemandCheck",
+def _check_jobs(jobs, base, cancel, object_kind):
+    """工作线程只交付领域结果，具体I/O失败成为本次列表诊断。"""
+    try:
+        return inspect_demand_rules(
+            jobs, base, cancel, object_kind=object_kind,
         )
-        self._poll_id = None
-        self._writing_text = False
-        self._final_values = None
-        self._operation_scope = None
-        self._final_check_finished = False
-        self._locked_widgets = []
-        self._source_bindings = []
-        self._disposed = False
-        self.cancel_button = None
-
-        for tag, foreground, background, _ in DEMAND_HIGHLIGHT_STYLES:
-            self.rule_text.tag_configure(
-                tag, foreground=foreground, background=background,
-            )
-            self.rule_text.tag_lower(tag)
-        self.rule_text.tag_raise("search_match")
-        self.rule_text.tag_raise("search_current")
-        self.rule_text.tag_raise("sel")
-        self.list_editing = ListTextEditing(
-            self.rule_text, self.commits, self.on_rule_text,
-        )
-        self.baseline["demand_file_list_text"] = self.list_editing.text
-        self.rule_text._prepare_favorite_content = self.prepare_favorite
-        for binding in self.commits.select("merge", {"source_folder"}):
-            callback_id = binding.widget.bind(
-                "<<ConfigAccepted>>", self.on_source_accepted, add="+",
-            )
-            self._source_bindings.append((binding.widget, callback_id))
-
-        self.reconcile(self.baseline["demand_file_list_text"])
-        self.request_auto()
-        self._poll_id = dialog.after(RESULT_POLL_MILLISECONDS, self.poll)
-        dialog.bind("<Destroy>", self.on_dialog_destroyed, add="+")
-
-    @property
-    def busy(self):
-        return self._operation_scope is not None
-
-    def values(self):
+    except (OSError, ValueError) as error:
         return {
-            field: (
-                self.list_editing.complete()
-                if field == "demand_file_list_text"
-                else self.commits.read_text(widget)
-            )
-            for field, widget in self.widgets.items()
+            number: DemandMatch(issue=str(error)) for number, _ in jobs
         }
 
+
+class PointerSummaryTooltip:
+    """规则摘要靠近鼠标显示；不改变其他控件的通用Tooltip行为。"""
+
+    def __init__(self, widget):
+        self.widget = widget
+        self.text = ""
+        self.after_id = None
+        self.window = None
+        self.label = None
+        self.x = self.y = 0
+
+    def move(self, event):
+        self.x, self.y = event.x_root, event.y_root
+        if self.window is not None:
+            self.position()
+
+    def position(self):
+        if self.window is None:
+            return
+        self.window.update_idletasks()
+        width = self.window.winfo_reqwidth()
+        height = self.window.winfo_reqheight()
+        screen_width = self.widget.winfo_screenwidth()
+        screen_height = self.widget.winfo_screenheight()
+        x = self.x + 16
+        y = self.y + 20
+        if x + width > screen_width - 8:
+            x = self.x - width - 16
+        if y + height > screen_height - 8:
+            y = self.y - height - 12
+        self.window.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def schedule_show(self):
+        if self.after_id is not None:
+            self.widget.after_cancel(self.after_id)
+        if self.text:
+            self.after_id = self.widget.after(350, self.show)
+
+    def show(self):
+        self.after_id = None
+        if not self.text or not self.widget.winfo_exists():
+            return
+        window = tk.Toplevel(self.widget)
+        self.window = window
+        window.withdraw()
+        window.overrideredirect(True)
+        self.label = tk.Label(
+            window, text=self.text, justify="left",
+            bg="#fff8dc", fg="#222222",
+            relief="solid", borderwidth=1,
+            padx=8, pady=5, wraplength=420,
+            font=THEME["font_main"],
+        )
+        self.label.pack()
+        self.position()
+        window.deiconify()
+
+    def hide(self):
+        if self.after_id is not None:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+        if self.window is not None:
+            self.window.destroy()
+            self.window = None
+            self.label = None
+
+
+class SourceListEditor:
+    """两份列表共用生命周期；目录／文件差异通过明确类别传递。"""
+
+    def __init__(
+        self, parent, panel, *, field, title, object_kind,
+        favorite_key, wrap_key,
+    ):
+        self.panel = panel
+        self.object_kind = object_kind
+        self.destroyed = False
+        self.version = 0
+        self.after_id = None
+        self.running = None
+        self.pending = False
+        self.matches = ()
+        self.summaries = ()
+        self.hover_line = None
+        self.executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f"ZipatchSource-{object_kind}",
+        )
+        self.text = create_managed_text_box(
+            parent, title, panel.cfg[field], height=15, mono=True,
+            commits=panel.commits, config=panel.cfg, field=field, page="merge",
+            favorite_key=favorite_key, enable_import_text=True,
+            browse_kind=object_kind,
+            preserve_trailing_newlines=True, wrap_config_key=wrap_key,
+        )
+        for name, (foreground, background) in HIGHLIGHTS.items():
+            self.text.tag_configure(
+                "source_" + name, foreground=foreground, background=background,
+            )
+        self.status = tk.StringVar(master=self.text, value="待检查")
+        summary_row = styled_frame(parent, bg=THEME["bg_panel"])
+        summary_row.pack(fill="x", pady=(4, 0))
+
+        status_label = tk.Label(
+            summary_row, textvariable=self.status, anchor="w", width=1,
+            bg=THEME["bg_panel"], fg=THEME["fg_dim"], font=THEME["font_main"],
+        )
+        status_label.pack(side="left", fill="x", expand=True)
+        add_tooltip(
+            status_label,
+            "绿色有效；黄色重复；红色错误；灰色停用；"
+            "无色待检查或待授权。详细规则见“填写规则”。",
+        )
+        self.editing = ListTextEditing(
+            self.text, panel.commits, self.on_text,
+        )
+        self.text._prepare_favorite_content = self.prepare_favorite
+        self.text._tooltip = PointerSummaryTooltip(self.text)
+        self.text.bind("<Motion>", self.on_hover, add="+")
+        self.text.bind("<Leave>", self.leave_hover, add="+")
+        self.text.bind("<Destroy>", self.on_destroy, add="+")
+        self.base_trace = panel.relative_base_folder.trace_add(
+            "write", self.base_changed,
+        )
+        self.request()
+
     def prepare_favorite(self, content, display=True):
-        prepared = clean_rule_quotes(content)
-        if display and prepared != content:
-            replace_text_keep_undo(self.rule_text, prepared)
-        return prepared
+        # 与旧文件列表一致：收藏保存表达，不授权或展开链接。
+        return clean_rule_quotes(content)
 
-    def reconcile(self, content):
-        new_lines = demand_physical_lines(content)
-        if new_lines == [rule.raw for rule in self.rules]:
-            return False
-        reusable = defaultdict(deque)
-        for rule in self.rules:
-            reusable[rule.raw].append(rule)
-        rules = []
-        for raw in new_lines:
-            if reusable[raw]:
-                rule = reusable[raw].popleft()
-            else:
-                self.next_identifier += 1
-                rule = RuleState(self.next_identifier, raw)
-                expression = clean_rule_quotes(raw)
-                if is_exclusion_layout_line(expression):
-                    rule.match = DemandMatch(completed=True, empty=True)
-                elif expression.startswith("|"):
-                    rule.match = DemandMatch(completed=True, disabled=True)
-            rules.append(rule)
-        self.rules = rules
+    def on_text(self, content):
+        self.request()
+
+    def base_changed(self, *_):
+        self.request()
+
+    def request(self):
+        if self.destroyed:
+            return
         self.version += 1
-        self.render()
-        return True
-
-    def on_rule_text(self, content):
-        if self._destroyed or self._writing_text:
-            return
-        if demand_physical_lines(content) == [rule.raw for rule in self.rules]:
-            return
-        self.cancel_running()
-        if self.busy:
-            self.pending = None
-            self.status.set("固定正文发生变化，最终操作已取消")
-        self.reconcile(content)
-        if not self.busy:
-            self.request_auto()
-
-    def on_source_accepted(self, event=None):
-        if self._destroyed:
-            return
-        source = self.panel.cfg["source_folder"]
-        if source == self.source:
-            return
-        self.source = source
-        self.version += 1
-        self.cancel_running()
-        for rule in self.rules:
-            if rule_is_relative(rule.raw):
-                rule.match = None
-        self.render()
-        if self.busy:
-            self.pending = None
-            self.status.set("固定源基准发生变化，最终操作已取消")
-        else:
-            self.request_auto()
-
-    def cancel_running(self):
+        self.pending = True
+        self.matches = ()
+        self.summaries = ()
         if self.running is not None:
             self.running[1].set()
+        self.clear_highlights()
+        self.status.set("待检查")
+        self.hover_line = None
+        self.text._tooltip.hide()
+        if self.after_id is not None:
+            self.text.after_cancel(self.after_id)
+        self.after_id = self.text.after(CHECK_DELAY_MS, self.poll)
 
-    def request_auto(self):
-        if self._destroyed or self.busy:
-            return
-        jobs = tuple(
-            (rule.identifier, rule.raw)
-            for rule in self.rules if rule.match is None
-        )
-        self.pending = (
-            CheckRequest(
-                self.version, self.source, jobs,
-                monotonic() + DEBOUNCE_SECONDS,
-            )
-            if jobs else None
-        )
-        self.status.set(
-            "取消中，等待旧任务退出" if self.running is not None
-            else "待检查" if jobs else "检查结果已更新"
-        )
+    def clear_highlights(self):
+        for name in HIGHLIGHTS:
+            self.text.tag_remove("source_" + name, "1.0", "end")
 
     def poll(self):
-        # 正式定时调用与显式调用共用一个入口。
-        # 显式调用不能遗失仍在 Tcl 队列中的旧回调；
-        # 定时调用自身已经消费时，after_cancel 同样可以安全收口。
-        if self._poll_id is not None:
-            self.dialog.after_cancel(self._poll_id)
-            self._poll_id = None
-        if self._destroyed or self._disposed:
+        self.after_id = None
+        if self.destroyed:
             return
         try:
             if self.running is not None and self.running[2].done():
-                request, cancel, future = self.running
+                version, cancel, future = self.running
                 self.running = None
-                delivered = False
                 try:
-                    try:
-                        results = future.result()
-                    except DemandCheckCancelled:
-                        results = None
-                    if (
-                        results is not None and not cancel.is_set()
-                        and request.version == self.version
-                        and request.source == self.source
-                    ):
-                        for rule in self.rules:
-                            if rule.identifier in results:
-                                rule.match = results[rule.identifier]
-                        selection = self.render()
-                        delivered = True
-                        if request.final_action:
-                            self.finish_final(request.final_action, selection)
-                        else:
-                            self.status.set(
-                                "自动检查完成；保存及主页面合并会重新检查所需列表"
-                            )
-                finally:
-                    if request.final_action and self.busy and not delivered:
-                        self.release_final()
-                        self.status.set("最终检查未完成，未保存、未执行")
-            if self._destroyed or self._disposed:
-                return
-
-            # 取消可能发生在旧自动任务退出之前，此时运行请求不是 final。
-            if self.busy and self.running is None and self.pending is None:
-                self.release_final()
-                self.status.set("最终检查已取消，未保存、未执行")
-
-            if (
-                self.running is None and self.pending is not None
-                and monotonic() >= self.pending.due
-            ):
-                request, self.pending = self.pending, None
+                    results = future.result()
+                except DemandCheckCancelled:
+                    results = None
+                if results is not None and not cancel.is_set() and version == self.version:
+                    lines = demand_physical_lines(self.editing.complete())
+                    self.matches = tuple(
+                        results.get(number) for number in range(1, len(lines) + 1)
+                    )
+                    self.render(lines)
+            if self.running is None and self.pending:
+                self.pending = False
+                content = self.editing.complete()
+                jobs = tuple(enumerate(demand_physical_lines(content), 1))
+                base = normalize_windows_display_path(
+                    self.panel.relative_base_folder.get(),
+                )
                 cancel = Event()
-                submitted = False
-                try:
-                    future = self.executor.submit(
-                        inspect_demand_rules, request.jobs, request.source, cancel,
-                    )
-                    self.running = (request, cancel, future)
-                    submitted = True
-                    self.status.set(
-                        "正在完整最终检查" if request.final_action else "检查中"
-                    )
-                finally:
-                    if not submitted and self.busy:
-                        self.release_final()
-                        self.status.set("任务未启动，未保存、未执行")
-        finally:
-            if not self._destroyed and not self._disposed:
-                self._poll_id = self.dialog.after(
-                    RESULT_POLL_MILLISECONDS, self.poll,
+                future = self.executor.submit(
+                    _check_jobs, jobs, base, cancel, self.object_kind,
                 )
+                self.running = (self.version, cancel, future)
+                self.status.set("检查中")
+        finally:
+            if not self.destroyed and (self.running is not None or self.pending):
+                self.after_id = self.text.after(POLL_MS, self.poll)
 
-    def render(self):
-        selection = build_demand_selection([rule.match for rule in self.rules])
-        for tag in (
-            "demand_error", "demand_warning",
-            "demand_success", "demand_disabled",
+    def render(self, lines):
+        selection = build_demand_selection(self.matches)
+        self.clear_highlights()
+        summaries = []
+        enabled = errors = waiting = repeated = 0
+        noun = "文件夹" if self.object_kind == "directory" else "文件"
+        for number, (raw, match, duplicate) in enumerate(
+            zip(lines, self.matches, selection.duplicates), 1,
         ):
-            self.rule_text.tag_remove(tag, "1.0", "end")
-        lines = []
-        for number, (rule, duplicate) in enumerate(
-            zip(self.rules, selection.duplicates), 1,
-        ):
-            match = rule.match
             tag = None
-            if match is None:
-                lines.append(f"第 {number} 行：待检查；命中／重复／新增待确定")
-            elif match.empty:
-                continue
-            elif match.disabled:
-                tag = "demand_disabled"
-                lines.append(f"第 {number} 行：停用，不检查、不去重")
-            elif match.requires_authorization:
-                lines.append(
-                    f"第 {number} 行：待本次合并的实际目录枚举授权；"
-                    "后台未进入链接目标目录。\n"
-                    "  规则可以保存；主页面执行时重新定位、展示并授权，"
-                    "当前没有可执行文件清单。"
-                )
-                for access in match.enumeration_accesses:
-                    lines.append(
-                        f"  名义前缀：{access.nominal_path}\n"
-                        f"  实际目录：{access.actual_path}"
-                    )
-            elif match.issue:
-                tag = "demand_error"
-                lines.append(
-                    f"第 {number} 行：{match.issue}\n"
-                    f"  规则转义展示：{rule.raw!r}\n"
-                    "  命中／重复／新增无有效结论"
-                )
-            elif duplicate.determined:
-                tag = "demand_warning" if duplicate.duplicates else "demand_success"
-                lines.append(
-                    f"第 {number} 行：命中 {duplicate.hits}，"
-                    f"重复 {duplicate.duplicates}，新增 {duplicate.additions}"
-                )
+            if is_exclusion_layout_line(raw):
+                summary = ""
+            elif raw.startswith("|"):
+                summary, tag = "已停用，不参与合并", "disabled"
             else:
-                lines.append(
-                    f"第 {number} 行：命中 {duplicate.hits}；"
-                    "前序结果未确定，重复／新增待确定"
-                )
-            if tag:
-                self.rule_text.tag_add(tag, f"{number}.0", f"{number}.end")
-        lines.extend((
-            "",
-            "最终有序去重文件清单"
-            if selection.complete and not selection.has_errors and not selection.requires_authorization
-            else "当前有效匹配文件清单（非可执行结论）",
-            "-" * 48,
-        ))
-        lines.extend(
-            f"{number}. {path}"
-            for number, path in enumerate(selection.files, 1)
-        )
-        if not selection.files:
-            lines.append("无")
-        # 高亮表达当前事实；结果正文保留按时间追加的检查反馈。
-        # 历史记录不参与选择、去重或执行资格判断。
-        follow_end = self.result_text.yview()[1] >= 0.999
-        self.result_text.configure(state="normal")
-        separator = "" if self.result_text.index("end-1c") == "1.0" else "\n\n"
-        self.result_text.insert(
-            "end-1c",
-            separator + "【当前名单检查记录】\n" + "\n".join(lines),
-        )
-        self.result_text.configure(state="disabled")
-        if follow_end:
-            self.result_text.see("end")
-        return selection
-
-
-    def lock_inputs(self):
-        candidates = list(descendants(self.dialog)) + list(descendants(self.panel))
-        for widget in candidates:
-            if widget is self.cancel_button:
-                continue
-            if isinstance(
-                widget, (tk.Text, tk.Entry, tk.Button, tk.Checkbutton, tk.Radiobutton),
-            ):
-                self._locked_widgets.append((widget, str(widget.cget("state"))))
-                widget.configure(state="disabled")
-        if self.cancel_button is not None:
-            self.cancel_button.configure(state="normal")
-
-    def release_final(self):
-        try:
-            for widget, previous in self._locked_widgets:
-                if widget.winfo_exists():
-                    widget.configure(state=previous)
-            if self.cancel_button is not None and self.cancel_button.winfo_exists():
-                self.cancel_button.configure(state="normal")
-        finally:
-            self._locked_widgets.clear()
-            if self._operation_scope is not None:
-                scope, self._operation_scope = self._operation_scope, None
-                scope.__exit__(None, None, None)
-            self._final_values = None
-            self._final_check_finished = False
-
-    def cancel(self):
-        """关闭草稿并撤销检查，不等待只访问文件系统的后台任务。
-
-        已进入配置接受或保存阶段时不能从嵌套事件循环提前销毁。
-        检查结果只由本窗口轮询消费；销毁会取消轮询及任务。
-        """
-        if self._destroyed:
-            return True
-        if self._close_in_progress or self._final_check_finished:
-            return False
-        if self.commits.operation_depth and not self.busy:
-            return False
-        self.pending = None
-        self.cancel_running()
-        if self.busy:
-            self.release_final()
-        self.destroy()
-        return True
-
-    def start_final(self, action):
-        if action not in ("apply", "save"):
-            raise ValueError(f"未知合并列表保存操作：{action}")
-        if self._destroyed or self.busy or self.commits.operation_depth:
-            return False
-        editors = self.commits.select("merge", {"source_folder"})
-        self.commits.accept_editors(editors)
-        if any(editor.dirty for editor in editors):
-            self.status.set("源文件夹尚未有效接受，请修正后再继续")
-            return False
-        self.on_source_accepted()
-        values = self.values()
-        self.reconcile(values["demand_file_list_text"])
-        self._final_values = values
-        self._final_check_finished = False
-        self._operation_scope = self.commits.operation()
-        self._operation_scope.__enter__()
-        prepared = False
-        try:
-            self.lock_inputs()
-            self.cancel_running()
-            for rule in self.rules:
-                expression = clean_rule_quotes(rule.raw)
-                rule.match = (
-                    DemandMatch(completed=True, empty=True)
-                    if is_exclusion_layout_line(expression) else
-                    DemandMatch(completed=True, disabled=True)
-                    if expression.startswith("|") else None
-                )
-            self.render()
-            self.pending = CheckRequest(
-                self.version, self.source,
-                tuple((rule.identifier, rule.raw) for rule in self.rules),
-                monotonic(), action,
-            )
-            self.status.set(
-                "等待旧任务取消，随后完整检查并保存列表"
-                if self.running is not None else "等待完整检查并保存列表"
-            )
-            prepared = True
-            return True
-        finally:
-            if not prepared:
-                self.release_final()
-
-    def finish_final(self, action, selection):
-        try:
-            self._final_check_finished = True
-            if self.cancel_button is not None:
-                self.cancel_button.configure(state="disabled")
-            values = dict(self._final_values)
-            values["demand_file_list_text"] = clean_rule_quotes(
-                values["demand_file_list_text"],
-            )
-            if not selection.complete:
-                self.status.set("最终检查未完整完成，列表未保存")
-                return
-            # 与排除名单一样，本窗口只接受配置。
-            # 文件选择错误允许保存草稿，执行时由唯一合并入口重新检查。
-            if not super().accept(values):
-                self.status.set("保存失败，列表草稿仍保留在窗口")
-                return
-            self._writing_text = True
-            try:
-                original = "\n".join(rule.raw for rule in self.rules)
-                if original != values["demand_file_list_text"]:
-                    self.rule_text.configure(state="normal")
-                    replace_text_keep_undo(
-                        self.rule_text, values["demand_file_list_text"],
+                enabled += 1
+                if match is None:
+                    summary = "待检查"
+                elif match.requires_authorization:
+                    waiting += 1
+                    summary = "涉及链接，执行时选择；后台未进入目标"
+                elif match.issue:
+                    errors += 1
+                    summary, tag = match.issue, "error"
+                elif match.disabled:
+                    summary, tag = "本次来源路线未接通", "disabled"
+                elif duplicate.determined:
+                    repeated += bool(duplicate.duplicates)
+                    summary = (
+                        f"命中{duplicate.hits}个{noun}；"
+                        f"重复{duplicate.duplicates}个；新增{duplicate.additions}个"
                     )
-                    self.rule_text.configure(state="disabled")
-                self.rule_text.edit_modified(False)
-                for rule in self.rules:
-                    rule.raw = clean_rule_quotes(rule.raw)
-                self.render()
-            finally:
-                self._writing_text = False
-
-            self.status.set(
-                "列表已保存；仍有选择错误，使用列表合并前需要修正"
-                if selection.has_errors else
-                "列表已保存；实际目录枚举待主页面本次合并授权，未保存业务授权"
-                if selection.requires_authorization else
-                "合并列表已保存；请在主页面点击仅列表合并或目录+列表合并"
-            )
-            if selection.has_errors:
-                safe_show_info(
-                    "合并列表已保存",
-                    "规则表达已保存，但仍有红色选择错误。\n"
-                    "使用列表的合并模式执行前需要修正。",
-                    self.dialog,
+                    tag = "warning" if duplicate.duplicates else "success"
+                else:
+                    summary = f"命中{duplicate.hits}个{noun}；前序待定，重复尚未确定"
+            summaries.append(summary)
+            if tag is not None:
+                self.text.tag_add(
+                    "source_" + tag, f"{number}.0", f"{number}.end",
                 )
-            if action == "save":
-                self.release_final()
-                self.destroy()
-        finally:
-            if self.busy:
-                self.release_final()
+        for name in HIGHLIGHTS:
+            self.text.tag_lower("source_" + name)
+        for name in ("search_match", "search_current", "sel"):
+            self.text.tag_raise(name)
+        self.summaries = tuple(summaries)
+        self.status.set(
+            f"启用{enabled}条 · 重复{repeated}条 · "
+            f"错误{errors}条 · 待授权{waiting}条"
+        )
 
-    def apply(self):
-        return self.start_final("apply")
-
-    def merge(self):
-        """保存当前列表并关闭，再复用主页面唯一列表合并流程。"""
-        if (
-            self._destroyed or self.busy or self._close_in_progress
-            or self.commits.operation_depth
-        ):
-            return False
-        # 不先重复后台检查；正式合并入口会重新检查当前完整列表，
-        # 并在首次跟随链接前取得本次授权。
-        # 基类保存成功后关闭窗口，退出保存生命周期再启动业务。
-        if not super().save_and_close():
-            return False
-        self.panel.execute_merge("list")
-        return True
-
-    def save_and_close(self):
-        return self.start_final("save")
-
-    def prepare_close(self):
-        if self._destroyed:
-            return True
-        if self._close_in_progress or self.busy or self.commits.operation_depth:
-            return False
-        self._close_in_progress = True
-        try:
-            values = self.values()
-            if values == self.baseline:
-                return True
-            with self.commits.operation():
-                choice = messagebox.askyesnocancel(
-                    "内容已修改", "是否完整检查后保存当前合并列表？",
-                    parent=self.dialog,
-                )
-            if choice is None:
-                return False
-            if choice:
-                action = (
-                    "apply" if getattr(self.dialog._root(), "_zipatch_closing", False)
-                    else "save"
-                )
-                self.start_final(action)
-                return False
-            return True
-        finally:
-            self._close_in_progress = False
-
-    def close(self):
-        if not self.prepare_close():
-            return False
-        self.destroy()
-        return True
-
-    def dispose(self):
-        if self._disposed:
+    def on_hover(self, event):
+        tooltip = self.text._tooltip
+        tooltip.move(event)
+        number = int(self.text.index(f"@{event.x},{event.y}").split(".")[0])
+        if number == self.hover_line:
             return
-        self._disposed = True
-        self.pending = None
-        self.cancel_running()
-        try:
-            if self._poll_id is not None:
-                self.dialog.after_cancel(self._poll_id)
-                self._poll_id = None
-            for widget, callback_id in self._source_bindings:
-                if widget.winfo_exists():
-                    widget.unbind("<<ConfigAccepted>>", callback_id)
-            self._source_bindings.clear()
-            if self.busy:
-                self.release_final()
-        finally:
-            self.executor.shutdown(wait=False, cancel_futures=True)
+        self.hover_line = number
+        tooltip.hide()
+        summary = (
+            self.summaries[number - 1]
+            if number <= len(self.summaries) else "当前规则待检查"
+        )
+        tooltip.text = summary[:240]
+        if summary:
+            tooltip.schedule_show()
 
-    def on_dialog_destroyed(self, event):
-        if event.widget is self.dialog:
-            self.dispose()
+    def leave_hover(self, event=None):
+        self.hover_line = None
+        self.text._tooltip.hide()
 
-    def destroy(self):
-        self.dispose()
-        super().destroy()
-
-
-def open_demand_editor(panel):
-    dialog = tk.Toplevel(panel.root)
-    dialog.title("合并列表")
-    dialog.configure(bg=THEME["bg"])
-    dialog.transient(panel.root)
-    take_modal_control(dialog)
-    # 屏幕边缘预留空间，避免标题栏及底部动作超出可见范围。
-    center_window(
-        dialog, 1180, min(700, dialog.winfo_screenheight() - 100),
-    )
-
-    header = styled_frame(dialog)
-    header.pack(fill="x", padx=16, pady=(12, 4))
-    tk.Label(
-        header,
-        text="每行一条文件选择规则；| 停用；相对路径以主面板源文件夹为基准。"
-             "Ctrl+F 查找，Ctrl+H 替换，Ctrl+Z 撤销，Ctrl+Y 重做，Ctrl+` 逐行停用／启用。",
-        bg=THEME["bg"], fg=THEME["fg_label"], font=THEME["font_main"],
-        anchor="w", justify="left", wraplength=990,
-    ).pack(side="left", fill="x", expand=True)
-    styled_button(
-        header, "填写规则", lambda: show_demand_help(dialog), width=10,
-    ).pack(side="right")
-    legend = styled_frame(dialog)
-    legend.pack(fill="x", padx=16, pady=(4, 4))
-    tk.Label(
-        legend, text="色块图例：", bg=THEME["bg"], fg=THEME["fg_label"],
-        font=THEME["font_main"],
-    ).pack(side="left", padx=(0, 8))
-    legend_styles = [
-        (background, description)
-        for _, _, background, description in DEMAND_HIGHLIGHT_STYLES
-    ]
-    legend_styles.append((
-        THEME["bg_input"], "无高亮：待检查或重复关系未确定",
-    ))
-    for background, description in legend_styles:
-        tk.Label(
-            legend, text="  ", bg=background, relief="solid", bd=1,
-        ).pack(side="left", padx=(0, 5))
-        tk.Label(
-            legend, text=description, bg=THEME["bg"], fg=THEME["fg_label"],
-            font=THEME["font_main"],
-        ).pack(side="left", padx=(0, 16))
-
-    # 先分配底部动作空间，正文区再消费剩余高度。
-    bottom = styled_frame(dialog)
-    bottom.pack(side="bottom", fill="x", padx=16, pady=(6, 14))
-    body = styled_frame(dialog)
-    body.pack(fill="both", expand=True, padx=16, pady=4)
-    body.grid_columnconfigure(0, weight=1, uniform="demand_text_columns")
-    body.grid_columnconfigure(1, weight=1, uniform="demand_text_columns")
-    body.grid_rowconfigure(0, weight=1)
-    left = styled_frame(body)
-    right = styled_frame(body)
-    left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-    widgets = {
-        "demand_file_list_text": create_managed_text_box(
-            left, "合并列表", panel.cfg["demand_file_list_text"],
-            height=30, mono=True, commits=panel.commits,
-            favorite_key="demand_file_list",
-            wrap_config_key="merge.demand_file_list",
-            preserve_trailing_newlines=True,
-        ),
-    }
-    result_text = create_managed_text_box(
-        right, "名单检查记录", "", height=30, mono=True, readonly=True,
-        commits=panel.commits, enable_favorites=False, wrap="none",
-        wrap_config_key="merge.demand_check_history",
-    )
-    status = tk.StringVar(master=dialog, value="待检查")
-    session = DemandDraftSession(panel, dialog, widgets, result_text, status)
-
-    tk.Label(
-        bottom, textvariable=status, bg=THEME["bg"], fg=THEME["fg_dim"],
-        font=THEME["font_main"], anchor="w", wraplength=750,
-    ).pack(side="left", fill="x", expand=True)
-    session.cancel_button = styled_button(
-        bottom, "取消", session.cancel, width=10,
-    )
-    session.cancel_button.pack(side="right", padx=(8, 0))
-    styled_button(
-        bottom, "合并", session.merge, width=10, accent=True,
-    ).pack(side="right", padx=(8, 0))
-    styled_button(
-        bottom, "保存", session.save_and_close, width=10, accent=True,
-    ).pack(side="right", padx=(8, 0))
-    styled_button(bottom, "应用", session.apply, width=10).pack(side="right")
-    register_popup(dialog, session.close, prepare_close=session.prepare_close)
-    return session
+    def on_destroy(self, event):
+        if event.widget is not self.text or self.destroyed:
+            return
+        self.destroyed = True
+        self.text._tooltip.hide()
+        if self.after_id is not None:
+            self.text.after_cancel(self.after_id)
+            self.after_id = None
+        if self.running is not None:
+            self.running[1].set()
+        self.panel.relative_base_folder.trace_remove("write", self.base_trace)
+        self.executor.shutdown(wait=False, cancel_futures=True)

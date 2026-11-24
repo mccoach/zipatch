@@ -115,7 +115,7 @@ def _analyze_enabled_line(line, object_kind):
     body = line[1:] if no_extension else line
     errors = []
     if no_extension and object_kind == "directory":
-        errors.append("目录名单不支持无扩展名条件")
+        errors.append("文件夹名单不支持无扩展名条件")
     if body == "":
         if no_extension and object_kind == "file":
             return line, (), "", CompiledRule(False, True, (), object_kind)

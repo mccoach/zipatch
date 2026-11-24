@@ -36,7 +36,7 @@ def panoramic_scan(
     select_source_links=None, authorize_scan_scope=None, show_actual_path=True,
 ):
     for name, value in (
-        ("输出大小", include_size), ("输出日期", include_date),
+        ("显示文件大小", include_size), ("显示修改时间", include_date),
         ("显示实际路径", show_actual_path),
     ):
         if type(value) is not bool:
@@ -69,8 +69,8 @@ def panoramic_scan(
             f"统计：文件夹总数: {scope.dir_count}，文件总数: {scope.file_count}\n"
             f"已授权链接节点：{len(scope.links)}；"
             f"文件软链接：{counts['file_symlink']}；"
-            f"目录软链接：{counts['directory_symlink']}；"
-            f"Junction：{counts['junction']}\n"
+            f"文件夹软链接：{counts['directory_symlink']}；"
+            f"文件夹联接（Junction）：{counts['junction']}\n"
             "链接全链授权后按普通实体遍历；扫描不读取文件正文。\n\n"
         )
         for number, (access, observed) in enumerate(records, 1):
@@ -83,10 +83,10 @@ def panoramic_scan(
                 date = datetime.fromtimestamp(
                     observed.attributes.st_mtime_ns // 1_000_000_000,
                 ).strftime("%Y-%m-%d %H:%M:%S")
-                line += f" (日期: {date})"
+                line += f" (修改时间: {date})"
             yield line + "\n"
         # 空目录也完整表达；不再因目录是链接而隐藏其内部结构。
-        yield "\n【目录结构】\n"
+        yield "\n【文件夹结构】\n"
         metadata = dict(scope.directory_metadata)
         if scope.root_access is not None and scope.root_access.has_links:
             access = scope.root_access
@@ -98,7 +98,7 @@ def panoramic_scan(
                 date = datetime.fromtimestamp(
                     observed.attributes.st_mtime_ns // 1_000_000_000,
                 ).strftime("%Y-%m-%d %H:%M:%S")
-                line += f"\n目录自身日期：{date}"
+                line += f"\n文件夹自身修改时间：{date}"
             yield line + "\n"
         for access in sorted(
             scope.directories[1:],
@@ -112,7 +112,7 @@ def panoramic_scan(
                 date = datetime.fromtimestamp(
                     observed.attributes.st_mtime_ns // 1_000_000_000,
                 ).strftime("%Y-%m-%d %H:%M:%S")
-                line += f" (目录自身日期: {date})"
+                line += f" (文件夹自身修改时间: {date})"
             yield line + "\n"
         yield "\n【主动忽略／未授权断点】\n"
         from services.merge_service import format_merge_omissions
@@ -135,7 +135,7 @@ def panoramic_scan(
     if log_func:
         try:
             log_func(
-                f"全景扫描完成：目录 {result.dir_count} 个，"
+                f"全景扫描完成：文件夹 {result.dir_count} 个，"
                 f"文件 {result.file_count} 个，授权链接节点 {result.link_count} 个"
             )
         except (OSError, UnicodeError) as error:

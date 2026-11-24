@@ -29,13 +29,13 @@ def resolve_restore_source(config):
     """使用明确绝对来源，不借修改包的项目根或历史报告定位。"""
     source = strip_outer_quotes(config["restore_source_dir"])
     if not source:
-        raise ValueError("请填写包含 recovery.json 的备份任务目录")
+        raise ValueError("请填写包含 recovery.json 和 backup.complete 的完整备份任务文件夹")
     path = Path(source)
     if not path.is_absolute():
-        raise ValueError("备份来源必须是明确的绝对路径，不使用项目根目录")
+        raise ValueError("备份来源文件夹必须是明确的绝对路径，不使用项目根文件夹作为基准")
     target, chain = checked_chain(path, include_observation=True)
     if chain[-1][1] != "directory":
-        raise ValueError(f"备份来源不是既有普通任务目录：{target}")
+        raise ValueError(f"备份来源不是既有普通任务文件夹：{target}")
     return target
 
 
@@ -52,7 +52,7 @@ def open_last_backup_folder(panel):
     """只消费本会话实际任务结果，不解析持久化报告文字。"""
     if not panel.last_backup_root:
         safe_show_error(
-            "打开失败", "本会话尚未生成可打开的备份任务目录。", panel.root,
+            "打开失败", "本会话尚未生成可打开的备份任务文件夹。", panel.root,
         )
         return
     open_path_with_default_app(panel.last_backup_root, panel.root)
@@ -71,17 +71,17 @@ def show_restore_preview(panel, preview):
 
     try:
         dialog = tk.Toplevel(panel.root)
-        dialog.title("备份恢复独立预检")
+        dialog.title("备份还原 - 独立预演")
         dialog.transient(panel.root)
         take_modal_control(dialog)
         center_window(dialog, 1000, 760)
         bottom = styled_frame(dialog)
         bottom.pack(side="bottom", fill="x", padx=14, pady=12)
-        styled_button(bottom, "关闭预检", close, width=14).pack(side="right")
+        styled_button(bottom, "关闭预演", close, width=14).pack(side="right")
         body = styled_frame(dialog)
         body.pack(fill="both", expand=True, padx=14, pady=(12, 0))
         create_managed_text_box(
-            body, "正式依据预检（关闭后任务作废）",
+            body, "备份还原预演（关闭后任务作废）",
             preview.preview_text, height=28, mono=True, readonly=True,
             commits=panel.commits, enable_favorites=False, enable_clear=False,
             enable_wrap_toggle=False, enable_copy=True,
@@ -99,7 +99,7 @@ def _prepare_preview(config, *, select_restore_scope):
     source = resolve_restore_source(config)
     protection_directory = strip_outer_quotes(config["backup_dir"])
     if not protection_directory or not Path(protection_directory).is_absolute():
-        raise ValueError("还原保护目录必须是明确绝对路径")
+        raise ValueError("还原前备份位置必须是明确的绝对路径")
     # 用户只选择保护保存位置；材料布局基准自动使用来源上一级。
     # 内部基准不解释或改变清单目标，也不作为用户授权范围。
     return preview_backup_restore(
@@ -129,8 +129,8 @@ def run_backup_restore(panel, config, *, execute):
     with locked_page(panel):
         try:
             try:
-                panel.set_status("正在预检正式备份...")
-                panel.log("用户启动：备份恢复并执行" if execute else "用户启动：备份恢复独立预检")
+                panel.set_status("正在准备备份还原预演...")
+                panel.log("用户启动：备份还原 - 预演并还原" if execute else "用户启动：备份还原 - 仅预演")
                 panel.commits.metrics["business_starts"] += 1
                 from ui.restore_scope import make_recovery_selector
 
@@ -144,9 +144,9 @@ def run_backup_restore(panel, config, *, execute):
                     show_restore_preview(panel, preview)
                     panel.record_backup_restore_result(
                         preview.preview_text, {},
-                        "恢复独立预检已结束，任务已作废",
+                        "备份还原独立预演已结束，任务已作废",
                     )
-                    panel.set_status("恢复独立预检已结束，任务已作废")
+                    panel.set_status("备份还原独立预演已结束，任务已作废")
                     return
 
                 accepted = select_backup_restore(
@@ -163,14 +163,14 @@ def run_backup_restore(panel, config, *, execute):
                     panel.set_status("恢复已取消，任务已作废")
                     return
 
-                panel.set_status("正在执行本次正式恢复方案...")
+                panel.set_status("正在执行本次备份还原方案...")
                 panel.commits.metrics["business_starts"] += 1
                 result = apply_backup_restore(preview)
             except (OSError, ValueError) as error:
                 if preview is not None:
                     invalidate_preview(preview)
                     _remember_created_backup(panel, preview.execution)
-                title = publication_failure_title(error) or "备份恢复未完整结束"
+                title = publication_failure_title(error) or "备份还原未完整结束"
                 report = (
                     (preview.preview_text + "\n\n" if preview is not None else "")
                     + str(error) + "\n\n" + traceback.format_exc()

@@ -63,10 +63,10 @@ class DraggableFeatureTabs(tk.Frame):
                 fg=THEME["fg_on_dark"] if selected else THEME["fg_label"],
                 activebackground=THEME["bg_btn_hover"],
                 activeforeground=THEME["fg_on_dark"],
-                relief="flat",
-                bd=0,
-                padx=10,
-                pady=6,
+                relief="sunken" if selected else "raised",
+                bd=1,
+                padx=8,
+                pady=4,
                 cursor="hand2",
                 font=THEME["font_main"],
                 command=lambda k=key: self.on_select(k),
@@ -88,6 +88,7 @@ class DraggableFeatureTabs(tk.Frame):
             btn.config(
                 bg=THEME["bg_btn_selected"] if selected else THEME["bg_btn"],
                 fg=THEME["fg_on_dark"] if selected else THEME["fg_label"],
+                relief="sunken" if selected else "raised",
             )
 
     def on_enter(self, key):

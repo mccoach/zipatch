@@ -12,6 +12,7 @@ from services.patch_executor import PatchExecutionError
 from services.patch_restore import BackupRestoreExecutionError
 from services.stream_output import StreamOutputError, StreamOutputPostError
 from ui.theme import styled_frame
+from ui.page_layout import protect_page_controls
 
 
 
@@ -160,13 +161,14 @@ class BasePanel(tk.Frame):
         self.log = app.log
         self.set_status = app.status_var.set
         self.build()
+        protect_page_controls(self)
 
     def build(self):
         raise NotImplementedError
 
     def make_body(self):
         body = styled_frame(self, bg=THEME["bg_panel"])
-        body.pack(fill="x")
+        body.pack(fill="both", expand=True)
         return body
 
     def prepare(self, fields=None, parent=None):

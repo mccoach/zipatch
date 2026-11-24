@@ -200,9 +200,9 @@ class RestoreExecutionError(OSError):
             lines.append("无；后续流程失败仍不算整任务成功。")
         lines.extend((
             f"固定跳过：{result.skipped_count}。",
-            f"备份目录：{result.backup_root or '尚未完成备份'}",
-            "目录记录不授权清空成员；只在已授权实际位置工作，不创建或消灭链接。",
-            "前序成果、目录及正式材料保留；任务永久失效。",
+            f"本次备份路径：{result.backup_root or '尚未完成备份'}",
+            "文件夹记录不授权清空成员；只在已授权实际位置工作，不创建或移除链接。",
+            "前序成果、文件夹及正式材料保留；任务永久失效。",
             "停止后续，不自动重试、回滚或重新拆分。",
             "现存硬链接正文写回保留对象关系；新名称不重建硬链接拓扑。",
             str(result.error),
@@ -243,18 +243,18 @@ def _target_path(expression, mode, base):
     path = _native_path(expression)
     if mode == "directory":
         if base is None:
-            raise RestoreScopeError("指定目录模式缺少明确绝对目录")
+            raise RestoreScopeError("“指定文件夹”模式缺少明确的目标文件夹绝对路径")
         if path.is_absolute():
             drive = path.drive
             if len(drive) != 2 or drive[1] != ":":
                 raise UnsupportedRestorePath(
-                    f"指定目录模式只支持完整盘符路径：{expression}"
+                    f"“指定文件夹”模式的绝对来源只支持完整盘符路径：{expression}"
                 )
             path = base / drive[0].upper() / Path(*path.parts[1:])
         else:
             path = base / path
         if not contains(base, path) or identity(base) == identity(path):
-            raise RestoreScopeError(f"指定目录范围拒绝：{expression}")
+            raise RestoreScopeError(f"映射路径越出目标文件夹或作用于目标文件夹本身，已拒绝：{expression}")
     elif not path.is_absolute():
         if base is None:
             raise RestoreScopeError(f"相对路径缺少绝对基准：{expression}")
@@ -312,8 +312,8 @@ def _authorize_restore(candidates, authorize):
             )
         elif block.kind in ("directory", "directory_symlink", "junction"):
             lines.append(
-                "只要求名义目录对应的实际实体目录存在；"
-                "缺失时创建普通目录，已有目录链接保持并沿用，不清空成员。"
+                "只要求名义文件夹对应的实际实体文件夹存在；"
+                "缺失时创建普通文件夹，已有文件夹链接保持并沿用，不清空成员。"
             )
         else:
             lines.append(
@@ -384,25 +384,25 @@ def prepare_restore(
     if normalize_text_newlines:
         validate_file_rules(output_rules)
     if type(backup_dir) is not str:
-        raise TypeError("拆分备份目录必须是字符串")
+        raise TypeError("备份保存位置必须是字符串")
     selected = strip_outer_quotes(backup_dir)
     if not selected:
-        raise ValueError("拆分强制备份，请填写明确绝对备份目录")
+        raise ValueError("拆分强制备份，请填写备份保存位置的明确绝对路径")
     backup_path = _native_path(selected)
     if not backup_path.is_absolute():
-        raise ValueError("拆分备份目录必须是明确绝对路径")
+        raise ValueError("备份保存位置必须是明确的绝对路径")
     backup_path, backup_chain = checked_chain(backup_path, include_observation=True)
     if backup_chain[-1][1] not in ("absent", "directory"):
-        raise ValueError("拆分备份位置必须是普通目录或缺失位置")
+        raise ValueError("备份保存位置必须是普通文件夹或缺失位置")
 
     base = None
     if target_mode == "directory" or target_root_folder:
         selected_base = _native_path(os.fspath(target_root_folder))
         if not selected_base.is_absolute():
-            raise ValueError("指定目录／相对基准必须是明确绝对路径")
+            raise ValueError("目标文件夹 / 相对路径基准必须是明确的绝对路径")
         base_access = inspect_link_path(selected_base, follow_final_link=True)
         if base_access.kind not in ("directory", "absent"):
-            raise ValueError("指定目录必须定位到普通目录或缺失位置")
+            raise ValueError("目标文件夹 / 相对路径基准必须定位到普通文件夹或缺失位置")
         # base保留名义路径，逐目标再固定实际位置及访问依赖。
         base = base_access.nominal_path
 
@@ -444,7 +444,7 @@ def prepare_restore(
         if block.kind == "file":
             if entry_access.kind in LINK_ENTRY_KINDS:
                 if entry_access.kind != "file_symlink":
-                    raise ValueError(f"普通正文目标是目录链接入口：{nominal}")
+                    raise ValueError(f"普通文件正文的目标是文件夹链接入口：{nominal}")
                 if existing_file_policy == "skip":
                     skipped.append((block.path, f"既有文件链接按跳过政策保留：{nominal}"))
                     skip_targets.append(SkippedTarget(nominal, access=entry_access))
@@ -453,7 +453,7 @@ def prepare_restore(
                 if access.kind != "file":
                     raise ValueError("悬空文件链接不取得创建引用目标的资格")
             if access.kind == "directory":
-                skipped.append((block.path, f"目标是目录，不删除覆盖：{nominal}"))
+                skipped.append((block.path, f"目标是文件夹，不删除覆盖：{nominal}"))
                 skip_targets.append(SkippedTarget(nominal, access=access))
                 continue
             if access.kind not in ("absent", "file"):
@@ -944,11 +944,11 @@ class RestoreTask:
                 if log_path:
                     log_func(f"跳过日志：{log_path}")
                 if self.protection is not None:
-                    log_func(f"拆分备份目录：{self.backup_root}")
+                    log_func(f"本次拆分备份路径：{self.backup_root}")
                 log_func(
                     f"拆分工作完成：普通文件 {len(self.completed_files)} 个，"
                     f"授权沿用链接路线 {self.plan.linked_access_count} 项，"
-                    f"目录要求 {len(self.plan.directories)} 个，"
+                    f"文件夹要求 {len(self.plan.directories)} 个，"
                     f"固定跳过 {len(self.plan.skipped)} 个"
                 )
             return log_path

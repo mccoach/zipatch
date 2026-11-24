@@ -51,7 +51,7 @@ class PatchOpSelection:
         self.widget = widget
         self.commits = commits
         self.button = title_bar_button(
-            title_row, "选中OP", self.select, width=7,
+            title_row, "选中 OP", self.select, width=7,
         )
         self.button.pack(side="right", padx=(0, 6))
         from ui.widgets import add_tooltip

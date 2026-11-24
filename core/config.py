@@ -180,12 +180,29 @@ def validate_rule_config_source(source):
     for section_name in ("scan", "merge"):
         section = source.get(section_name)
         if isinstance(section, dict) and (
+            "output_path" in section and type(section["output_path"]) is not str
+        ):
+            raise ValueError(
+                f"配置 {section_name}.output_path 必须是字符串；原文件未修改。"
+            )
+        if isinstance(section, dict) and (
             "show_actual_path" in section
             and type(section["show_actual_path"]) is not bool
         ):
             raise OutputSettingsError(
                 f"{section_name}.show_actual_path 必须是布尔值；原文件未修改。"
             )
+
+    merge_settings = source.get("merge")
+    if isinstance(merge_settings, dict):
+        for field in (
+            "directory_list_text", "relative_base_folder",
+            "demand_file_list_text",
+        ):
+            if field in merge_settings and type(merge_settings[field]) is not str:
+                raise ValueError(
+                    f"配置 merge.{field} 必须是字符串；原文件未修改。"
+                )
 
     if "patch" in source:
         patch_settings = source["patch"]
@@ -233,8 +250,8 @@ def validate_rule_config_source(source):
                     f"配置 {section_name}.{field} 类型无效；原文件未修改。"
                 )
 
-    if "import_directories" in source:
-        directories = source["import_directories"]
+    if "file_dialog_directories" in source:
+        directories = source["file_dialog_directories"]
         if (
             type(directories) is not dict
             or any(
@@ -244,7 +261,7 @@ def validate_rule_config_source(source):
             )
         ):
             raise ValueError(
-                "import_directories必须是文本框用途到目录字符串的映射；"
+                "file_dialog_directories必须是独立选择入口到目录字符串的映射；"
                 "原文件未修改。"
             )
 
@@ -312,6 +329,58 @@ def remove_retired_output_config(source):
     if not isinstance(source, dict):
         return source
     result = dict(source)
+    if "import_directories" in result:
+        # 只迁移原本独立的导入记录，不给浏览入口复制历史。
+        previous = result.pop("import_directories")
+        current = result.get("file_dialog_directories", {})
+        if (
+            type(previous) is not dict or type(current) is not dict
+            or any(
+                type(key) is not str or not key or type(value) is not str
+                for key, value in previous.items()
+            )
+        ):
+            raise ValueError("选择目录历史结构无效；原文件未修改。")
+        current = dict(current)
+        for key, value in previous.items():
+            current.setdefault(f"text.{key}.import", value)
+        result["file_dialog_directories"] = current
+    merge = result.get("merge")
+    if isinstance(merge, dict) and "source_folder" in merge:
+        # 一次性结构迁移；正式业务不再读取旧单目录字段。
+        previous = merge["source_folder"]
+        if type(previous) is not str:
+            raise ValueError("配置 merge.source_folder 必须是字符串；原文件未修改。")
+        merge = dict(merge)
+        merge.setdefault("directory_list_text", previous)
+        merge.setdefault("relative_base_folder", previous)
+        del merge["source_folder"]
+        result["merge"] = merge
+    for page, default_name in (
+        ("scan", "panorama_scan.txt"), ("merge", "merged_code.txt"),
+    ):
+        section = result.get(page)
+        if not isinstance(section, dict):
+            continue
+        section = dict(section)
+        for field in ("output_path", "output_folder", "output_filename"):
+            if field in section and type(section[field]) is not str:
+                raise ValueError(
+                    f"配置 {page}.{field} 必须是字符串；原文件未修改。"
+                )
+        if "output_path" not in section:
+            from core.path_validation import normalize_windows_display_path
+
+            folder = normalize_windows_display_path(section.get("output_folder", ""))
+            name = section.get("output_filename", default_name).strip()
+            # 迁移只组合表达，不观察磁盘、不补猜缺少的文件夹。
+            section["output_path"] = (
+                normalize_windows_display_path(str(Path(folder) / name))
+                if folder and name else ""
+            )
+        section.pop("output_folder", None)
+        section.pop("output_filename", None)
+        result[page] = section
     retired_fields = {
         "merge": ("ignore_text", "failure_text"),
         "restore": (
@@ -319,6 +388,7 @@ def remove_retired_output_config(source):
             "code_header_line", "code_footer_line",
         ),
         "text_wrap": (
+            "merge.demand_check_history",
             "merge.ignore_text", "merge.failure_text",
             "restore.ignore_text", "restore.failure_text",
             "restore.code_header_line", "restore.code_footer_line",

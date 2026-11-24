@@ -43,6 +43,8 @@ class ZipatchApp:
         self.current_panel = None
         self.log_auto_scroll = True
         self._scroll_after_id = None
+        self._layout_after_id = None
+        self._height_drag_page = None
 
         apply_global_theme(root)
         self.build_ui()
@@ -52,7 +54,7 @@ class ZipatchApp:
 
     def build_ui(self):
         root = self.root
-        root.title("智派-文本代码修改合并助手 Zipatch v3.11.0-20261123" \
+        root.title("智派-文本代码修改合并助手 Zipatch v3.12.0-20261124" \
         "  ")
         root.protocol("WM_DELETE_WINDOW", self.close_application)
         root.resizable(True, True)
@@ -92,25 +94,36 @@ class ZipatchApp:
             text=" 全局设置",
         ).pack(side="right", padx=(8, 0))
 
+        # 工作区与日志共用可调分隔；合并页把增长空间交给来源列表。
+        self.workspace = tk.PanedWindow(
+            root, orient="vertical", bg=THEME["bg"],
+            sashwidth=7, sashrelief="flat", bd=0,
+        )
+        self.workspace.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         self.content_frame = tk.Frame(
-            root, bg=THEME["bg_panel"], highlightbackground=THEME["border"],
-            highlightthickness=1,
+            self.workspace, bg=THEME["bg_panel"],
+            highlightbackground=THEME["border"], highlightthickness=1,
         )
-        self.content_frame.pack(fill="x", padx=16, pady=(0, 8))
         outer = tk.Frame(
-            root, bg=THEME["bg_panel"], highlightbackground=THEME["border"],
-            highlightthickness=1,
+            self.workspace, bg=THEME["bg_panel"],
+            highlightbackground=THEME["border"], highlightthickness=1,
         )
-        outer.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self.workspace.add(self.content_frame, minsize=160, stretch="always")
+        self.log_frame = outer
+        self.workspace.add(outer, minsize=100, stretch="never")
         body = styled_frame(outer, bg=THEME["bg_panel"])
         body.pack(fill="both", expand=True, padx=8, pady=8)
         self.log_text = create_managed_text_box(
-            body, "运行日志", "", height=12, mono=True, readonly=True,
+            body, "运行日志", "", height=3, mono=True, readonly=True,
             enable_favorites=False, commits=self.commits,
             wrap_config_key="app.log_text",
         )
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>"):
             self.log_text.bind(sequence, self.on_log_scroll, add="+")
+        self.content_frame.bind("<Configure>", self.schedule_layout_protection, add="+")
+        self.workspace.bind("<Configure>", self.schedule_layout_protection, add="+")
+        self.workspace.bind("<ButtonPress-1>", self.begin_height_drag, add="+")
+        self.workspace.bind("<ButtonRelease-1>", self.finish_height_drag, add="+")
         bottom = styled_frame(root)
         bottom.pack(fill="x", padx=16, pady=(0, 14))
         tk.Label(
@@ -148,9 +161,108 @@ class ZipatchApp:
                 self.content_frame, self,
             )
         self.current_panel = self.panels[mode]
-        self.current_panel.pack(fill="x", padx=14, pady=12)
+        merging = mode == "merge"
+        self.current_panel.pack(
+            fill="both", expand=True, padx=14, pady=12,
+        )
+        self.root.update_idletasks()
+        self.refresh_layout_protection()
+        height = self.workspace.winfo_height()
+        panel_minimum = self.current_panel.winfo_reqheight() + 26
+        log_minimum = self.log_frame.winfo_reqheight()
+        position = self.config_data["ui"]["workspace_sash_positions"].get(mode)
+        if type(position) is int and 0 <= position <= 1_000_000:
+            preferred = round(height * position / 1_000_000)
+        else:
+            preferred = height - (150 if merging else 260)
+        self.workspace.sash_place(
+            0, 0,
+            max(panel_minimum, min(preferred, height - log_minimum - 7)),
+        )
         self.status_var.set("就绪")
         self.tabs.refresh_button_styles()
+
+    def begin_height_drag(self, event):
+        self._height_drag_page = None
+        if self.current_panel is None or self.commits.operation_depth:
+            return
+        identified = self.workspace.identify(event.x, event.y)
+        if identified and identified[0] == 0 and identified[1] in ("sash", "handle"):
+            # 只记录真正由用户开始的分隔线拖动；
+            # 页面恢复、窗口缩放和安全限位不写成新的用户偏好。
+            self._height_drag_page = self.current_panel.config_key
+
+    def finish_height_drag(self, event=None):
+        page, self._height_drag_page = self._height_drag_page, None
+        if (
+            page is None or self.current_panel is None
+            or self.current_panel.config_key != page
+            or self.commits.operation_depth
+            or getattr(self.root, "_zipatch_closed", False)
+        ):
+            return
+        # Tk在拖动事件中已经更新分隔位置，松开时同步限位并保存。
+        # 不留延迟保存，也不在每个鼠标移动事件中写盘。
+        self.refresh_layout_protection()
+        height = self.workspace.winfo_height()
+        if height <= 1:
+            return
+        _, position = self.workspace.sash_coord(0)
+        proportion = max(0, min(
+            1_000_000, round(position * 1_000_000 / height),
+        ))
+        positions = self.config_data["ui"]["workspace_sash_positions"]
+        if self.config_manager.accept(positions, {page: proportion}):
+            self.commits.finish(self.root)
+
+    def schedule_layout_protection(self, event=None):
+        if self.current_panel is None or getattr(self.root, "_zipatch_closed", False):
+            return
+        if self._layout_after_id is None:
+            self._layout_after_id = self.root.after_idle(
+                self.refresh_layout_protection,
+            )
+
+    def refresh_layout_protection(self):
+        if self._layout_after_id is not None:
+            self.root.after_cancel(self._layout_after_id)
+            self._layout_after_id = None
+        panel = self.current_panel
+        if panel is None:
+            return
+        # 正文请求只有最低行数，reqheight因而包含完整固定控件、
+        # 当前展开的查找栏、统计及执行行，不再使用任意160像素。
+        panel_minimum = panel.winfo_reqheight() + 26
+        log_minimum = self.log_frame.winfo_reqheight()
+        # 幂等设置：不对相同几何约束重复发起配置，
+        # 避免Configure -> after_idle -> paneconfigure形成空闲循环。
+        content_limit = int(
+            self.workspace.panecget(self.content_frame, "minsize")
+        )
+        if content_limit != panel_minimum:
+            self.workspace.paneconfigure(
+                self.content_frame, minsize=panel_minimum,
+            )
+        log_limit = int(self.workspace.panecget(self.log_frame, "minsize"))
+        if log_limit != log_minimum:
+            self.workspace.paneconfigure(self.log_frame, minsize=log_minimum)
+        outer_height = max(
+            0, self.root.winfo_height() - self.workspace.winfo_height(),
+        )
+        minimum = (
+            max(1080, panel.winfo_reqwidth() + 62),
+            panel_minimum + log_minimum + 7 + outer_height,
+        )
+        if tuple(self.root.minsize()) != minimum:
+            self.root.minsize(*minimum)
+        height = self.workspace.winfo_height()
+        if height >= panel_minimum + log_minimum + 7:
+            x, y = self.workspace.sash_coord(0)
+            protected = max(
+                panel_minimum, min(y, height - log_minimum - 7),
+            )
+            if protected != y:
+                self.workspace.sash_place(0, x, protected)
 
     def on_feature_order_changed(self, order):
         changed = self.config_manager.accept(
@@ -200,6 +312,9 @@ class ZipatchApp:
             if self._scroll_after_id is not None:
                 self.root.after_cancel(self._scroll_after_id)
                 self._scroll_after_id = None
+            if self._layout_after_id is not None:
+                self.root.after_cancel(self._layout_after_id)
+                self._layout_after_id = None
             # 等待设置窗口的回调可能在销毁后恢复；
             # 先记录正式退出事实，使恢复的回调不再访问已销毁的界面。
             self.root._zipatch_closed = True
