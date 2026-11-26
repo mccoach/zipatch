@@ -94,3 +94,12 @@ class SourceEnumeration:
             members[number] = (name, spelling, attributes)
             self.entry_attribute_reads += 1
         return attributes
+    def recheck(self):
+        """选择交互的新边界只比较原快照，不再次枚举接受新成员。"""
+        for key, (revision, members) in self._directories.items():
+            target, attributes = _directory_attributes(Path(key))
+            if _revision(attributes) != revision:
+                raise ValueError(
+                    "来源预扫描目录身份或结构变化，必须重新启动任务："
+                    f"{target}"
+                )

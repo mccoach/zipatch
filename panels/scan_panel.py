@@ -138,7 +138,7 @@ class ScanPanel(BasePanel):
             f"文件软链接 {result.file_symlink_count}，"
             f"文件夹软链接 {result.directory_symlink_count}，"
             f"文件夹联接（Junction）{result.junction_count}。\n"
-            "链接全链授权后按普通实体展开；未选在断点收口，不重复只读确认。\n"
+            "链接目录元信息先预扫描，再集中树形选择；未选路线不进入成果。\n"
             f"已保存到：\n{result.output_file}",
             self.root,
         )

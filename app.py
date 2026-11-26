@@ -54,7 +54,7 @@ class ZipatchApp:
 
     def build_ui(self):
         root = self.root
-        root.title("智派-文本代码修改合并助手 Zipatch v3.12.0-20261124" \
+        root.title("智派-文本代码修改合并助手 Zipatch v3.13.0-20261126" \
         "  ")
         root.protocol("WM_DELETE_WINDOW", self.close_application)
         root.resizable(True, True)

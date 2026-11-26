@@ -71,7 +71,7 @@ def panoramic_scan(
             f"文件软链接：{counts['file_symlink']}；"
             f"文件夹软链接：{counts['directory_symlink']}；"
             f"文件夹联接（Junction）：{counts['junction']}\n"
-            "链接全链授权后按普通实体遍历；扫描不读取文件正文。\n\n"
+            "目录元信息先完整预扫描，再集中选择来源链接；扫描不读取文件正文。\n\n"
         )
         for number, (access, observed) in enumerate(records, 1):
             line = f"{number}. {access.nominal_path}"

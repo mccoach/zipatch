@@ -80,3 +80,54 @@ def project_group_decisions(
     for number in fixed_skips:
         result[number] = "skip"
     return tuple(result)
+
+def validate_selection_parents(parents):
+    """固定展示树按父先子后排列；只校验关系，不查询文件系统。"""
+    parents = tuple(parents)
+    for number, parent in enumerate(parents):
+        if parent is not None and (
+            type(parent) is not int or not 0 <= parent < number
+        ):
+            raise ValueError("选择树父节点必须是此前的唯一节点编号")
+    return parents
+
+
+def change_hierarchical_selection(states, parents, number, enabled):
+    """父项切换覆盖子树；启用子项同时启用全部祖先。
+
+    名义路线是选择关系，不根据实际目录或文件身份合并不同分支。
+    """
+    parents = validate_selection_parents(parents)
+    states = tuple(states)
+    if (
+        len(states) != len(parents)
+        or any(type(value) is not bool for value in states)
+        or type(number) is not int or not 0 <= number < len(states)
+        or type(enabled) is not bool
+    ):
+        raise ValueError("层级选择必须提供完整布尔状态及有效节点")
+    result = list(states)
+    descendants = {number}
+    for index in range(number, len(parents)):
+        if index == number or parents[index] in descendants:
+            descendants.add(index)
+            result[index] = enabled
+    if enabled:
+        parent = parents[number]
+        while parent is not None:
+            result[parent] = True
+            parent = parents[parent]
+    return tuple(result)
+
+
+def validate_hierarchical_decisions(decisions, parents, *, description):
+    """消费完整窗口决定；子项不得绕过未选父路线。"""
+    parents = validate_selection_parents(parents)
+    retained = selected_indices(decisions, len(parents), description=description)
+    selected = set(retained)
+    if any(
+        parents[number] is not None and parents[number] not in selected
+        for number in retained
+    ):
+        raise ValueError("所选子链接缺少父链接许可，禁止读取正文")
+    return retained

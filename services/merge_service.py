@@ -706,6 +706,15 @@ def merge_files(
         )
         plan = ordered
 
+    # 全部使用中的列表和目录元信息已经准备完毕。
+    # 集中选择只裁剪原计划；不重新枚举或读取未选正文。
+    from core.recovery_paths import identity
+
+    retained = traversal.finalize()
+    plan = [
+        entry for entry in plan
+        if identity(entry["access"].nominal_path) in retained
+    ]
     included = {windows_path_key(entry["path"]) for entry in plan}
     ignored = tuple(
         member for member in traversal.ignored

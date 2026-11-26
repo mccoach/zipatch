@@ -80,15 +80,28 @@ def prepare_scan_scope(
     if root.kind != "directory":
         raise ValueError("扫描来源必须定位到普通目录")
     directories = [root]
-    files, accesses = [], []
+    accesses = []
     for access, parts in traversal.walk(root, exclusions):
         if access.kind == "directory":
             directories.append(access)
         else:
-            observed = observe_accessed_file(access)
-            files.append(observed)
             accesses.append(access)
-    # links保存已授权经过的定义，只供分类统计；不再代表结构叶子。
+    retained = traversal.finalize()
+    directories = [
+        access for access in directories
+        if identity(access.nominal_path) in retained
+    ]
+    accesses = [
+        access for access in accesses
+        if identity(access.nominal_path) in retained
+    ]
+    root_retained = identity(root.nominal_path) in retained
+    if not root_retained:
+        return ScanSourceScope(
+            None, (), (), (), (), tuple(traversal.ignored),
+        )
+    files = [observe_accessed_file(access) for access in accesses]
+    # links保存所选路线经过的定义，只供分类统计；不代表结构叶子。
     definitions = {}
     for access in traversal.accesses:
         for definition in access.followed_links:

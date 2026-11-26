@@ -102,8 +102,11 @@ class WindowsSourceNodeTests(unittest.TestCase):
 
     def merge(self, source, output, selector, *, mode="directory", text=""):
         return merge_files(
-            mode, str(source), text, str(output),
-            prepare_exclusions("", ""), "", "", "--begin--", "--end--",
+            mode=mode, relative_base_folder=str(source),
+            directory_list_text=str(source), list_text=text,
+            output_file=str(output), exclusions=prepare_exclusions("", ""),
+            preamble_text="", ending_text="",
+            code_header_line="--begin--", code_footer_line="--end--",
             record_file_mtime=False, select_source_links=selector,
         )
 
@@ -143,32 +146,43 @@ class WindowsSourceNodeTests(unittest.TestCase):
                     self.assertEqual(dict(result.entry_counts)["file"], 1)
                     self.assertEqual(payload.read_bytes(), b"original\r\nbody\n")
 
-    def test_outer_denial_never_reads_inner_definitions(self):
+    def test_outer_denial_prescans_definitions_but_never_reads_body(self):
         with TemporaryDirectory(prefix="Zipatch_nodes_outer_") as folder:
             root = Path(folder)
             source, actual, inner, payload, first, second, final = self.fixture(root)
-            original = os.readlink
-            visited = []
+            original_readlink = os.readlink
+            original_open = Path.open
+            visited, calls = [], []
 
             def readlink(path, *args, **kwargs):
                 visited.append(Path(path))
-                if Path(path) in (second, final):
-                    raise AssertionError("外层断点之后不得读取内部链接定义")
-                return original(path, *args, **kwargs)
+                return original_readlink(path, *args, **kwargs)
+
+            def guarded(path, *args, **kwargs):
+                if Path(path) == payload:
+                    raise AssertionError("未选路线不得读取正文")
+                return original_open(path, *args, **kwargs)
+
+            def select(nodes):
+                calls.append(nodes)
+                return tuple("skip" for node in nodes)
 
             output = root / "merged.txt"
-            with patch("core.link_paths.os.readlink", side_effect=readlink):
-                result = self.merge(
-                    source, output, lambda nodes: tuple("skip" for node in nodes),
-                )
+            with (
+                patch("core.link_paths.os.readlink", side_effect=readlink),
+                patch.object(Path, "open", guarded),
+            ):
+                result = self.merge(source, output, select)
             text = output.read_bytes().decode("utf-8")
             self.assertEqual(parse_merge_blocks(text), [])
             self.assertIn(str(first), text)
             self.assertNotIn(str(first / "nested"), text)
-            self.assertIn(first, visited)
+            self.assertTrue({first, second, final}.issubset(visited))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls[0]), 3)
             self.assertEqual(result.total_files, 0)
 
-    def test_inner_denial_stops_at_inner_nominal_node(self):
+    def test_inner_denial_cancels_descendants_after_one_complete_scan(self):
         with TemporaryDirectory(prefix="Zipatch_nodes_inner_") as folder:
             root = Path(folder)
             source, actual, inner, payload, first, second, final = self.fixture(root)
@@ -176,10 +190,18 @@ class WindowsSourceNodeTests(unittest.TestCase):
 
             def select(nodes):
                 selected.extend(node.definition.entry_path for node in nodes)
-                return tuple(
-                    "skip" if node.definition.entry_path == second else "authorize"
-                    for node in nodes
-                )
+                values = []
+                for node in nodes:
+                    parent_enabled = (
+                        node.parent_index is None
+                        or values[node.parent_index] == "authorize"
+                    )
+                    values.append(
+                        "authorize"
+                        if parent_enabled and node.definition.entry_path != second
+                        else "skip"
+                    )
+                return tuple(values)
 
             output = root / "merged.txt"
             self.merge(source, output, select)
@@ -187,30 +209,42 @@ class WindowsSourceNodeTests(unittest.TestCase):
             self.assertEqual(parse_merge_blocks(text), [])
             self.assertIn(str(first / "nested"), text)
             self.assertNotIn(str(first / "nested" / "code.txt"), text)
-            self.assertNotIn(final, selected)
+            self.assertEqual(selected, [first, second, final])
+            self.assertEqual(payload.read_bytes(), b"original\r\nbody\n")
 
-    def test_repeated_rules_share_denial_without_false_no_match(self):
+    def test_repeated_rules_share_nodes_and_one_complete_decision(self):
         with TemporaryDirectory(prefix="Zipatch_nodes_rules_") as folder:
             root = Path(folder)
             source, actual, inner, payload, first, second, final = self.fixture(root)
             decisions = []
+            calls = []
 
             def select(nodes):
+                calls.append(nodes)
                 decisions.extend(node.definition.entry_path for node in nodes)
-                return tuple(
-                    "skip" if node.definition.entry_path == second else "authorize"
-                    for node in nodes
-                )
+                values = []
+                for node in nodes:
+                    parent_enabled = (
+                        node.parent_index is None
+                        or values[node.parent_index] == "authorize"
+                    )
+                    values.append(
+                        "authorize"
+                        if parent_enabled and node.definition.entry_path != second
+                        else "skip"
+                    )
+                return tuple(values)
 
             output = root / "merged.txt"
             result = self.merge(
                 source, output, select, mode="list",
-                text="linked\\**\\*.py\nlinked\\**\\*.txt",
+                text="linked\\**\\*.txt\nlinked\\nested\\code.txt",
             )
             self.assertTrue(result.output_result.succeeded)
             self.assertEqual(result.total_files, 0)
+            self.assertEqual(len(calls), 1)
             self.assertEqual(decisions.count(second), 1)
-            self.assertNotIn(final, decisions)
+            self.assertEqual(decisions.count(final), 1)
 
     def test_background_stops_at_first_link_for_exact_and_wildcard(self):
         with TemporaryDirectory(prefix="Zipatch_nodes_background_") as folder:
@@ -289,7 +323,7 @@ class WindowsSourceNodeTests(unittest.TestCase):
             raw = output.read_bytes()
             text = raw.decode("utf-8")
             self.assertNotIn(b"\r\r\n", raw)
-            self.assertIn("目录自身日期", text)
+            self.assertIn("文件夹自身修改时间", text)
             self.assertIn(str(first / "nested" / "code.txt"), text)
             self.assertEqual(result.file_count, 1)
             self.assertEqual(result.link_count, 3)
@@ -404,7 +438,10 @@ class FileOnlyMergeTests(WindowsSourceNodeTests):
             (library / "ordinary" / "a.txt").write_bytes(b"a")
             self.symlink(source / "linked", library, directory=True)
             output = root / "merged.txt"
-            with self.assertRaisesRegex(ValueError, "普通目录"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "文件列表不能直接选择普通文件夹，请使用文件夹列表或文件通配符",
+            ):
                 self.merge(
                     source, output,
                     lambda nodes: tuple("authorize" for node in nodes),
@@ -439,8 +476,11 @@ class FileOnlyMergeTests(WindowsSourceNodeTests):
 
             output = root / "merged.txt"
             result = merge_files(
-                "directory", str(source), "", str(output),
-                prepare_exclusions("", ""), "", "", "--begin--", "--end--",
+                mode="directory", relative_base_folder=str(source),
+                directory_list_text=str(source), list_text="",
+                output_file=str(output), exclusions=prepare_exclusions("", ""),
+                preamble_text="", ending_text="",
+                code_header_line="--begin--", code_footer_line="--end--",
                 record_file_mtime=False, show_actual_path=False,
                 select_source_links=select,
             )

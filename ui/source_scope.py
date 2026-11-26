@@ -1,44 +1,249 @@
 # -*- coding: utf-8 -*-
 
-"""来源节点的精简展示；权限及固定路径事实由来源任务拥有。"""
+"""扫描合并的完整来源链接树；只交付选择，不读取正文或规划发布。"""
 
-from ui.work_scope import (
-    WorkScopeChoice, LINK_LABELS, select_link_work_scope,
+import tkinter as tk
+from tkinter import ttk
+
+from core.constants import THEME
+from core.work_selection import (
+    change_hierarchical_selection, validate_selection_parents,
 )
+from ui.dialogs import create_managed_text_box
+from ui.theme import styled_button, styled_frame
+from ui.window_manager import (
+    center_window, register_popup, take_modal_control, unregister_popup,
+)
+from ui.work_scope import LINK_LABELS
+
+
+def select_source_tree(parent, commits, nodes):
+    """名义路线父子联动；不同实际别名不合并选择开关。"""
+    nodes = tuple(nodes)
+    parents = validate_selection_parents(node.parent_index for node in nodes)
+    if not nodes:
+        return ()
+    states = (True,) * len(nodes)
+    decision = None
+    dialog = tk.Toplevel(parent)
+    dialog.withdraw()
+    dialog.title("集中选择本次来源链接")
+    dialog.configure(bg=THEME["bg"])
+    dialog.transient(parent)
+
+    controls = styled_frame(dialog)
+    controls.pack(side="bottom", fill="x", padx=14, pady=12)
+    body = styled_frame(dialog)
+    body.pack(fill="both", expand=True, padx=14, pady=(12, 0))
+    tk.Label(
+        body,
+        text=(
+            "已完成全部可用来源的目录元信息预扫描，包括链接目标及根外目录；"
+            "尚未读取普通文件正文。\n"
+            "取消父链接会取消全部下游；选中子链接自动选中父链接；"
+            "重新选中父链接会选中整个子树。\n"
+            "同一实际目录的不同名义路线分别选择；普通来源自动保留。"
+            "点击节点或按空格切换，双击展开／折叠。\n"
+            "取消不能撤销已经发生的预扫描；只有所选路线用于后续正文获取。"
+        ),
+        bg=THEME["bg"], fg=THEME["fg_label"],
+        anchor="w", justify="left", wraplength=1000,
+        font=THEME["font_main"],
+    ).pack(fill="x", pady=(0, 10))
+
+    area = styled_frame(body)
+    area.pack(fill="both", expand=True)
+    # 样式只用于来源授权树，不改变其他页面或授权窗口。
+    # 行背景表达授权状态；当前操作节点由focus定位，
+    # 不使用系统选中条覆盖已选／未选颜色。
+    style = ttk.Style(dialog)
+    style.configure(
+        "ZipatchSource.Treeview",
+        font=(THEME["font_main"][0], 11),
+        rowheight=34,
+        background="#eeebe6",
+        fieldbackground="#eeebe6",
+        foreground="#77736c",
+    )
+    style.configure(
+        "ZipatchSource.Treeview.Heading",
+        font=(THEME["font_main"][0], 11, "bold"),
+    )
+    tree = ttk.Treeview(
+        area, columns=("kind", "target"), show="tree headings",
+        selectmode="none", height=15, style="ZipatchSource.Treeview",
+    )
+    tree.tag_configure(
+        "authorized", background="#dce5dd", foreground="#30483b",
+    )
+    tree.tag_configure(
+        "not_authorized", background="#eeebe6", foreground="#77736c",
+    )
+    tree.heading("#0", text="选择 / 名义链接路线")
+    tree.heading("kind", text="类型")
+    tree.heading("target", text="原定义路径")
+    tree.column("#0", width=450, minwidth=180, stretch=True)
+    tree.column("kind", width=160, minwidth=130, stretch=False)
+    tree.column("target", width=350, minwidth=180, stretch=True)
+    vertical = tk.Scrollbar(area, orient="vertical", command=tree.yview)
+    horizontal = tk.Scrollbar(area, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+    tree.grid(row=0, column=0, sticky="nsew")
+    vertical.grid(row=0, column=1, sticky="ns")
+    horizontal.grid(row=1, column=0, sticky="ew")
+    area.grid_columnconfigure(0, weight=1)
+    area.grid_rowconfigure(0, weight=1)
+    for number, node in enumerate(nodes):
+        tree.insert(
+            "" if node.parent_index is None else str(node.parent_index),
+            "end", iid=str(number), open=True,
+            values=(LINK_LABELS[node.definition.kind], node.definition.raw_target),
+        )
+    statistics = tk.StringVar(master=dialog)
+    tk.Label(
+        body, textvariable=statistics, anchor="w",
+        bg=THEME["bg"], fg=THEME["fg_dim"], font=THEME["font_main"],
+    ).pack(fill="x", pady=(8, 0))
+
+    def refresh():
+        dialog._source_tree_states = states
+        for number, node in enumerate(nodes):
+            tree.item(
+                str(number),
+                text=("☑ " if states[number] else "☐ ") + str(node.nominal_path),
+                tags=("authorized" if states[number] else "not_authorized",),
+            )
+        statistics.set(
+            f"所选链接路线 {sum(states)} / {len(states)}；"
+            "节点数按名义路线展示，成果按不同实际链接入口统计。"
+        )
+
+    def toggle(number):
+        nonlocal states
+        states = change_hierarchical_selection(
+            states, parents, number, not states[number],
+        )
+        refresh()
+
+    def clicked(event):
+        item = tree.identify_row(event.y)
+        if not item or tree.identify_region(event.x, event.y) not in ("tree", "cell"):
+            return None
+        if tree.identify_element(event.x, event.y).endswith("indicator"):
+            return None
+        tree.focus(item)
+        tree.focus_set()
+        toggle(int(item))
+        return "break"
+
+    def keyboard(event=None):
+        item = tree.focus()
+        if item:
+            toggle(int(item))
+        return "break"
+
+    tree.bind("<ButtonRelease-1>", clicked)
+    tree.bind("<space>", keyboard)
+    dialog._source_tree = tree
+    dialog._source_tree_toggle = toggle
+
+    def set_all(value):
+        nonlocal states
+        states = (value,) * len(nodes)
+        refresh()
+
+    def show_details():
+        current = tree.focus()
+        number = int(current) if current else 0
+        node = nodes[number]
+        definition = node.definition
+        window = tk.Toplevel(dialog)
+        window.title("来源链接固定详情")
+        window.configure(bg=THEME["bg"])
+        window.transient(dialog)
+        footer = styled_frame(window)
+        footer.pack(side="bottom", fill="x", padx=14, pady=12)
+        content = styled_frame(window)
+        content.pack(fill="both", expand=True, padx=14, pady=(12, 0))
+        lines = (
+            f"名义节点：{node.nominal_path}\n"
+            f"实际入口：{definition.entry_path}\n"
+            f"类型：{LINK_LABELS[definition.kind]}\n"
+            f"原定义：{definition.raw_target!r}\n"
+            f"直接引用位置：{definition.direct_target}\n"
+            f"相对定义：{definition.relative}\n"
+            f"入口身份：{definition.object_identity}\n"
+            f"父链接编号：{None if node.parent_index is None else node.parent_index + 1}\n\n"
+            "原定义不等于最终实际文件位置。选择只决定本次路线；"
+            "父节点未选时，下游正文不获取，不用于成果。\n"
+            "预扫描已经访问目录结构，不读取普通文件正文。"
+        )
+        create_managed_text_box(
+            content, "本次固定节点", lines,
+            height=15, readonly=True, commits=commits,
+            enable_favorites=False, enable_clear=False,
+            enable_wrap_toggle=False, enable_copy=True,
+        )
+
+        def close():
+            unregister_popup(window)
+            window.destroy()
+            return True
+
+        styled_button(footer, "关闭", close).pack(side="right")
+        try:
+            center_window(window, 880, min(600, window.winfo_screenheight() - 100))
+            take_modal_control(window)
+            register_popup(window, close)
+            dialog.wait_window(window)
+        finally:
+            unregister_popup(window)
+            if window.winfo_exists():
+                window.destroy()
+
+    def finish(value):
+        nonlocal decision
+        decision = value
+        unregister_popup(dialog)
+        dialog.destroy()
+        return True
+
+    styled_button(controls, "全选", lambda: set_all(True)).pack(
+        side="left", padx=(0, 8),
+    )
+    styled_button(controls, "全不选", lambda: set_all(False)).pack(
+        side="left", padx=(0, 8),
+    )
+    styled_button(controls, "节点详情", show_details).pack(side="left")
+    cancel = styled_button(controls, "取消任务", lambda: finish(None))
+    cancel.pack(side="right", padx=(8, 0))
+    styled_button(
+        controls, "按所选继续",
+        lambda: finish(tuple(
+            "authorize" if value else "skip" for value in states
+        )),
+        danger=True,
+    ).pack(side="right")
+    refresh()
+    try:
+        center_window(dialog, 1080, min(760, dialog.winfo_screenheight() - 100))
+        take_modal_control(dialog)
+        register_popup(
+            dialog, lambda: finish(None),
+            exit_blocker=True, focus_on_register=False,
+        )
+        dialog.deiconify()
+        cancel.focus_set()
+        parent.wait_window(dialog)
+        return decision
+    finally:
+        unregister_popup(dialog)
+        if dialog.winfo_exists():
+            dialog.destroy()
 
 
 def make_source_node_selector(parent, commits):
     def select(nodes):
-        choices, details = [], []
-        for node in nodes:
-            definition = node.definition
-            lines = [
-                f"名义路径：{node.nominal_path}",
-                f"原定义路径：{definition.raw_target}",
-            ]
-            if definition.entry_path != node.nominal_path:
-                lines.append(f"实际入口：{definition.entry_path}")
-            choices.append(WorkScopeChoice(
-                "\n".join(lines), LINK_LABELS[definition.kind],
-            ))
-            details.append(
-                "\n".join(lines)
-                + f"\n类型：{definition.kind}"
-                + f"\n原定义转义展示：{definition.raw_target!r}"
-                + f"\n直接引用：{definition.direct_target}"
-                + "\n选中仅接通本节点，不自动授权下游链接。"
-            )
-        return select_link_work_scope(
-            parent, commits, title="选择本次来源链接节点",
-            introduction=(
-                "选中为通，未选为断；上层断开后不访问或展示下游。\n"
-                "文件夹接通后按普通文件夹展开，新链接仍须分别选择；"
-                "合并只输出最终文件正文，不单列文件夹。\n"
-                "原定义路径是链接保存的指向表达，可能是相对路径；"
-                "不等于全部链接解析后的最终实际位置。\n"
-                "成果的“显示实际路径”只控制附加说明，不关闭授权和安全检查。\n"
-                "已决定节点不重复询问；全不选表示断点收口，取消则不发布。"
-            ),
-            choices=tuple(choices), details="\n\n".join(details),
-        )
+        return select_source_tree(parent, commits, nodes)
+
     return select
