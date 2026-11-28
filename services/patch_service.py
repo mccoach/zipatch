@@ -15,8 +15,7 @@ def preview_patch(
     allow_multi_replace_exact=False,
     backup_dir="99_归档/AI文件修改备份",
     normalize_text_newlines=True,
-    authorize_patch_scope=None, authorize_patch_enumeration=None,
-    select_patch_enumeration=None,
+    authorize_patch_scope=None,
 ):
     if not patch_text.strip():
         raise ValueError("请先粘贴 Zipatch V3 修改包")
@@ -28,8 +27,6 @@ def preview_patch(
         patch_text=patch_text,
         normalize_text_newlines=normalize_text_newlines,
         authorize_patch_scope=authorize_patch_scope,
-        authorize_patch_enumeration=authorize_patch_enumeration,
-        select_patch_enumeration=select_patch_enumeration,
     )
     report, checked_patch, errors, success, failed, global_errors, checks = executor.preview(patch)
     return PatchPreviewResult(

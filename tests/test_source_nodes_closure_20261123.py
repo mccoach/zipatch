@@ -394,10 +394,22 @@ class FileOnlyMergeTests(WindowsSourceNodeTests):
                 lambda nodes: tuple("authorize" for node in nodes),
             )
             blocks = parse_merge_blocks(output.read_bytes().decode("utf-8"))
-            self.assertEqual(len(blocks), 1)
+            self.assertEqual(len(blocks), 2)
             self.assertTrue(all(block.kind == "file" for block in blocks))
-            self.assertEqual(blocks[0].body, "a")
+            self.assertEqual([block.body for block in blocks], ["a", "a"])
+            self.assertEqual(
+                [block.reference_index for block in blocks], [None, 1],
+            )
+            self.assertEqual(
+                [block.path for block in blocks],
+                [
+                    str(source / "first" / "a.txt"),
+                    str(source / "second" / "a.txt"),
+                ],
+            )
             self.assertEqual(result.total_files, 1)
+            self.assertEqual(result.reference_count, 1)
+            self.assertEqual(result.record_count, 2)
             self.assertEqual(sum(dict(result.link_counts).values()), 2)
 
     def test_wildcard_matching_output_rejects_without_overwrite(self):

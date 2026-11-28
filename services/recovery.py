@@ -180,17 +180,50 @@ def plan_restore(
     accesses = tuple(accesses)
     # 全部明确元信息先检查；非法清单或实际别名冲突不能靠局部选择逃避。
     _validate_target_ranges(accesses, evidence)
+    metadata = None
     if select_restore_scope is None:
         _authorize_targets(entries, accesses, authorize_restore_scope)
     else:
         from core.work_selection import selected_indices
+        from services.patch_scope import inspect_scope_tree
+        from services.link_authorization import content_selection_groups
+        from core.file_observation import FileObservation
 
-        retained = selected_indices(
-            select_restore_scope(entries, accesses), len(entries),
+        # 主动对象选择允许必要元信息预扫描，正文仍在选择后获取。
+        # 自动回滚不进入交互分支，不增加扫描许可或二次确认。
+        metadata = tuple(
+            inspect_scope_tree(access.actual_path)
+            if access.kind == "directory" else
+            inspect_link_path(access.actual_path, follow_final_link=False)
+            if access.entry_link is not None else
+            observe_file(access.actual_path)
+            for access in accesses
+        )
+        for access in accesses:
+            recheck_link_path(access)
+        written = {
+            member.object_identity
+            for entry, member in zip(entries, metadata)
+            if isinstance(member, FileObservation)
+            and member.kind == "file"
+            and entry["original"]["kind"] == "file"
+        }
+        groups = content_selection_groups(
+            ((member,) for member in metadata), written,
+        )
+        retained = set(selected_indices(
+            select_restore_scope(entries, accesses, metadata), len(entries),
             description="备份还原范围选择",
+        ))
+        for group in groups:
+            if any(number not in retained for number in group):
+                retained.difference_update(group)
+        retained = tuple(
+            number for number in range(len(entries)) if number in retained
         )
         entries = tuple(entries[number] for number in retained)
         accesses = tuple(accesses[number] for number in retained)
+        metadata = tuple(metadata[number] for number in retained)
         # 选择同时授予详情已经明确展示的所选旧状态获取范围。
         # 未选对象不获取正文、不枚举目录，不保留执行依赖。
         _validate_target_ranges(accesses, evidence)
@@ -201,9 +234,13 @@ def plan_restore(
         recheck_link_path(access)
 
     actions = []
-    for original, access in zip(entries, accesses):
+    for number, (original, access) in enumerate(zip(entries, accesses)):
         recheck_link_path(access)
-        if access.entry_link is not None:
+        if metadata is not None:
+            from services.patch_scope import materialize_scope_observation
+
+            current = materialize_scope_observation(metadata[number])
+        elif access.entry_link is not None:
             current = inspect_link_path(
                 access.actual_path, follow_final_link=False,
             )

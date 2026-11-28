@@ -24,6 +24,7 @@ class ScanResult:
     file_symlink_count: int = 0
     directory_symlink_count: int = 0
     junction_count: int = 0
+    hardlink_count: int = 0
 
     @property
     def output_file(self):
@@ -67,7 +68,8 @@ def panoramic_scan(
             yield preamble_text.rstrip("\n") + "\n\n"
         yield (
             f"统计：文件夹总数: {scope.dir_count}，文件总数: {scope.file_count}\n"
-            f"已授权链接节点：{len(scope.links)}；"
+            f"已授权链接入口：{len(scope.links) + scope.hardlink_count}；"
+            f"文件硬链接：{scope.hardlink_count}；"
             f"文件软链接：{counts['file_symlink']}；"
             f"文件夹软链接：{counts['directory_symlink']}；"
             f"文件夹联接（Junction）：{counts['junction']}\n"
@@ -129,8 +131,10 @@ def panoramic_scan(
         recheck_context=lambda: recheck_scan_scope(scope),
     )
     result = ScanResult(
-        output, scope.file_count, scope.dir_count, len(scope.links),
+        output, scope.file_count, scope.dir_count,
+        len(scope.links) + scope.hardlink_count,
         counts["file_symlink"], counts["directory_symlink"], counts["junction"],
+        scope.hardlink_count,
     )
     if log_func:
         try:

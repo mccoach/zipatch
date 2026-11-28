@@ -47,9 +47,9 @@ class ConfigFailureTests(unittest.TestCase):
             manager = ConfigSaveManager(
                 config, path=Path(folder) / "config.json",
             )
-            old_value = config["scan"]["output_filename"]
+            old_value = config["scan"]["output_path"]
             manager.accept(
-                config["scan"], {"output_filename": "changed.txt"},
+                config["scan"], {"output_path": str(Path(folder) / "changed.txt")},
             )
             with patch(
                 "core.config.observe_file",
@@ -61,7 +61,7 @@ class ConfigFailureTests(unittest.TestCase):
             self.assertTrue(manager.required_write)
             self.assertIn("旧快照不再提供免写资格", failed.failure_description)
             manager.accept(
-                config["scan"], {"output_filename": old_value},
+                config["scan"], {"output_path": old_value},
             )
             with patch.object(
                 manager, "_write_snapshot",

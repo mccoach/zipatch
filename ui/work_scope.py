@@ -14,10 +14,11 @@ from ui.window_manager import (
 
 
 GROUP_ORDER = (
-    "文件软链接", "文件夹软链接", "文件夹联接（Junction）",
+    "文件硬链接", "文件软链接", "文件夹软链接", "文件夹联接（Junction）",
     "混合链接工作项", "普通工作项",
 )
 LINK_LABELS = {
+    "file_hardlink": "文件硬链接",
     "file_symlink": "文件软链接",
     "directory_symlink": "文件夹软链接",
     "junction": "文件夹联接（Junction）",

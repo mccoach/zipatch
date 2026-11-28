@@ -13,7 +13,8 @@ from core.constants import FILE_SECTION_START_TEMPLATE
 from core.merged_format import (
     MTIME_PREFIX, STRUCTURAL_NEWLINE,
     container_marker_lines, encode_container_declaration,
-    encode_source_line, encode_structure_line, validate_markers,
+    encode_content_reference, encode_source_line, encode_structure_line,
+    validate_markers,
 )
 
 
@@ -48,18 +49,22 @@ class MergedContainer:
         self._closed = True
         self._stream.close()
 
-    def add_block(
-        self, path, body, *, kind="file", specification=None, mtime=None,
-        origin_path=None,
-    ):
+    def _validate_append_path(self, path):
         if self._closed or self._token is not None:
             raise ValueError("容器已经关闭或固定标识，不能追加材料")
         if (
             type(path) is not str or not path
             or any(ord(character) < 32 for character in path)
-            or type(body) is not str
         ):
-            raise ValueError("容器块必须具有有效完整路径和字符串正文")
+            raise ValueError("容器记录必须具有有效完整路径")
+
+    def add_block(
+        self, path, body, *, kind="file", specification=None, mtime=None,
+        origin_path=None,
+    ):
+        self._validate_append_path(path)
+        if type(body) is not str:
+            raise TypeError("容器正文必须是字符串")
         if mtime is not None and type(mtime) is not str:
             raise TypeError("容器文件时间必须是已准备的字符串")
         structure = None
@@ -76,7 +81,22 @@ class MergedContainer:
         if written != len(body):
             raise OSError("容器正文暂存没有完整写入")
         source = None if origin_path is None else encode_source_line(origin_path)
-        self._records.append((path, structure, mtime, offset, len(body), source))
+        self._records.append((
+            path, structure, mtime, offset, len(body), source, None,
+        ))
+
+    def add_reference(self, path, reference_index):
+        """保留一个正式文件路径，不生成正文暂存或空代码块。"""
+        self._validate_append_path(path)
+        reference = encode_content_reference(reference_index)
+        if reference_index > len(self._records):
+            raise ValueError("正文引用目标不存在或不是此前记录")
+        target = self._records[reference_index - 1]
+        if target[1] is not None or target[6] is not None:
+            raise ValueError("正文引用必须直接指向真实文件正文")
+        self._records.append((
+            path, None, None, None, None, None, reference,
+        ))
 
     def _used_tokens(self):
         """一次收集全部两位冲突，不为每个候选重新扫描正文。
@@ -99,8 +119,11 @@ class MergedContainer:
             self.start_label, self.end_label, self.preamble, self.ending,
         ):
             collect(text)
-        for path, structure, mtime, _, _, source in self._records:
-            for text in (path, structure or "", mtime or "", source or ""):
+        for path, structure, mtime, _, _, source, reference in self._records:
+            for text in (
+                path, structure or "", mtime or "", source or "",
+                reference or "",
+            ):
                 collect(text)
 
         self._stream.flush()
@@ -149,14 +172,17 @@ class MergedContainer:
             token, self.start_label, self.end_label,
         ) + STRUCTURAL_NEWLINE
         yield self.preamble
-        for number, (path, structure, mtime, offset, length, source) in enumerate(
-            self._records, 1,
-        ):
+        for number, (
+            path, structure, mtime, offset, length, source, reference,
+        ) in enumerate(self._records, 1):
             yield (
                 FILE_SECTION_START_TEMPLATE.format(index=number)
                 + token + STRUCTURAL_NEWLINE
             )
             yield path + STRUCTURAL_NEWLINE
+            if reference is not None:
+                yield reference + STRUCTURAL_NEWLINE
+                continue
             if source is not None:
                 yield source + STRUCTURAL_NEWLINE
             if structure is not None:

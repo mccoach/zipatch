@@ -89,6 +89,7 @@ class WordingHelpTests(unittest.TestCase):
         self.assertEqual(dict(groups), labels)
         self.assertTrue(set(labels.values()).issubset(order))
         self.assertEqual(labels, {
+            "file_hardlink": "文件硬链接",
             "file_symlink": "文件软链接",
             "directory_symlink": "文件夹软链接",
             "junction": "文件夹联接（Junction）",

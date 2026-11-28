@@ -29,13 +29,16 @@ def merge_completion_message(result, mode):
     links = dict(result.link_counts)
     message = (
         f"{mode}成果已发布：成功正文文件 {result.total_files} 个。\n"
-        f"已授权链接节点：文件软链接 {links.get('file_symlink', 0)}；"
+        f"已授权链接入口：文件硬链接 {links.get('file_hardlink', 0)}；"
+        f"文件软链接 {links.get('file_symlink', 0)}；"
         f"文件夹软链接 {links.get('directory_symlink', 0)}；"
         f"文件夹联接（Junction）{links.get('junction', 0)}。\n\n"
         f"主动忽略：{result.excluded_count}；"
         f"正文失败：{result.read_failure_count}；"
         f"时间缺失：{len(result.mtime_failures)}。\n"
-        "只输出文件正文块；重复实际文件只输出一次。\n"
+        f"正文引用记录：{result.reference_count}；"
+        f"成功文件路径记录：{result.record_count}。\n"
+        "同对象正文只保存一次，其他路径保留引用；拆分从容器取得完整正文。\n"
         "忽略与失败名单位于成果末尾，不作为拆分输入。\n\n"
         f"保存位置：\n{result.output_file}"
     )

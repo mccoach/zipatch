@@ -11,6 +11,7 @@ from core.constants import CODE_FOOTER_LINE, CODE_HEADER_LINE, MERGE_MODES
 STRUCTURAL_NEWLINE = "\r\n"
 MTIME_PREFIX = "最后修改时间："
 SOURCE_PREFIX = "实际路径："
+CONTENT_REFERENCE_PREFIX = "ZIPATCH_CONTENT_REF:"
 MTIME_UNAVAILABLE = "未取得"
 MTIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -40,6 +41,8 @@ def validate_markers(start_marker, end_marker):
         raise OutputSettingsError("开始标记不能使用ZIPATCH_ENTRY:结构前缀")
     if start_marker.startswith(SOURCE_PREFIX):
         raise OutputSettingsError("开始标记不能使用“实际路径：”说明前缀")
+    if start_marker.startswith(CONTENT_REFERENCE_PREFIX):
+        raise OutputSettingsError("开始标记不能使用正文引用结构前缀")
 
 
 
@@ -186,12 +189,39 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class MergeBlock:
-    """正文和结构定义分别拥有语义；路径仍是容器记录的名义位置。"""
+    """名义路径拥有恢复位置；引用正文只来自同层容器的真实正文记录。
+
+    reference_index仅说明来源记录，不授予链接创建或磁盘读取资格。
+    body已经由解析器解析为完整正文，普通文件消费者无需另建引用链。
+    """
 
     path: str
     body: str
     kind: str = "file"
     specification: object = None
+    reference_index: int | None = None
+
+
+def encode_content_reference(index):
+    """引用编号使用本层连续节号，不保存重复路径或链接拓扑。"""
+    if type(index) is not int or index < 1:
+        raise ValueError("正文引用必须是正整数记录编号")
+    return CONTENT_REFERENCE_PREFIX + str(index)
+
+
+def decode_content_reference(line, blocks):
+    """只接受此前真实文件正文，拒绝引用链和结构记录。"""
+    value = line[len(CONTENT_REFERENCE_PREFIX):]
+    if re.fullmatch(r"[1-9][0-9]*", value) is None:
+        raise ValueError("正文引用编号必须是规范正整数")
+    # 先限制位数，再转换，避免非法巨大编号触发整数转换限制。
+    if len(value) > len(str(len(blocks))) or int(value) > len(blocks):
+        raise ValueError("正文引用目标不存在或不是此前记录")
+    index = int(value)
+    target = blocks[index - 1]
+    if target.kind != "file" or target.reference_index is not None:
+        raise ValueError("正文引用必须直接指向真实文件正文，不允许引用链或结构记录")
+    return index, target.body
 
 
 def encode_structure_line(kind, specification=None, *, entry_path):
@@ -332,6 +362,19 @@ def parse_merge_blocks(full_text):
                 raise ValueError("合并容器路径与本层标识冲突")
             path = line
             state = "EXPECT_TIME_OR_START"
+            continue
+
+        if state == "EXPECT_TIME_OR_START" and line.startswith(CONTENT_REFERENCE_PREFIX):
+            if source_seen or token in line:
+                raise ValueError("正文引用记录不能携带来源说明或与本层标识冲突")
+            reference_index, body = decode_content_reference(line, blocks)
+            blocks.append(MergeBlock(
+                path, body, reference_index=reference_index,
+            ))
+            source_seen = False
+            section_number = None
+            path = None
+            state = "SEEK_SECTION"
             continue
 
         if state == "EXPECT_TIME_OR_START" and line.startswith(SOURCE_PREFIX):

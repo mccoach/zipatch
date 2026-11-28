@@ -296,10 +296,19 @@ def _describe_access(access):
 def _authorize_restore(candidates, authorize):
     """旧正文获取前授权既有访问路线；来源定义不授予创建链接资格。"""
     descriptions = []
-    for block, access, _ in candidates:
-        if not access.has_links and block.kind not in LINK_ENTRY_KINDS:
+    for block, access, metadata in candidates:
+        hardlink = (
+            metadata is not None and metadata.kind == "file"
+            and metadata.link_count > 1
+        )
+        if not access.has_links and not hardlink:
             continue
         lines = [_describe_access(access), f"容器类型：{block.kind}"]
+        if hardlink:
+            lines.append(
+                f"文件硬链接数量：{metadata.link_count}；"
+                "正文写回会被其他关联名称共同看到；范围外名称不扫描。"
+            )
         if block.specification is not None:
             lines.extend((
                 f"来源保存原定义：{block.specification.raw_target!r}",
@@ -508,6 +517,21 @@ def prepare_restore(
 
     _check_positions(nominal_positions)
     _check_positions(mapped_positions)
+    from services.link_authorization import content_selection_groups
+
+    candidate_observations = tuple(
+        () if metadata is None else (metadata,)
+        for _, _, metadata in candidates
+    )
+    written_objects = {
+        metadata.object_identity
+        for block, _, metadata in candidates
+        if block.kind == "file" and metadata is not None
+        and metadata.kind == "file"
+    }
+    shared_groups = content_selection_groups(
+        candidate_observations, written_objects,
+    )
     if select_split_scope is None:
         _authorize_restore(candidates, authorize_restore_scope)
     else:
@@ -519,6 +543,12 @@ def prepare_restore(
             description="代码拆分范围选择",
         )
         selected = set(retained)
+        for group in shared_groups:
+            if any(number not in selected for number in group):
+                selected.difference_update(group)
+        retained = tuple(
+            number for number in range(len(candidates)) if number in selected
+        )
         skipped.extend(
             (block.path, "本次范围选择未选，不获取旧正文、不保护、不执行")
             for number, (block, access, metadata) in enumerate(candidates)
@@ -527,8 +557,10 @@ def prepare_restore(
         # 授权未选不是固定现场跳过：不添加skip_targets，
         # 因而不在执行期重新访问未选入口。
         candidates = tuple(candidates[number] for number in retained)
-    for _, access, _ in candidates:
+    for _, access, metadata in candidates:
         recheck_link_path(access)
+        if metadata is not None:
+            recheck_file(metadata)
 
     entries, directories, accesses = [], [], []
     for block, access, metadata in candidates:

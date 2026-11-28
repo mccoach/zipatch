@@ -17,8 +17,11 @@ from ui.window_manager import (
 from ui.work_scope import LINK_LABELS
 
 
-def select_source_tree(parent, commits, nodes):
-    """名义路线父子联动；不同实际别名不合并选择开关。"""
+def select_source_tree(
+    parent, commits, nodes, *, related_groups=(), selectable=True,
+    title="集中选择本次来源链接", introduction=None,
+):
+    """共用对象树；业务提供固定节点、关联组和明确交互政策。"""
     nodes = tuple(nodes)
     parents = validate_selection_parents(node.parent_index for node in nodes)
     if not nodes:
@@ -27,7 +30,7 @@ def select_source_tree(parent, commits, nodes):
     decision = None
     dialog = tk.Toplevel(parent)
     dialog.withdraw()
-    dialog.title("集中选择本次来源链接")
+    dialog.title(title)
     dialog.configure(bg=THEME["bg"])
     dialog.transient(parent)
 
@@ -37,7 +40,7 @@ def select_source_tree(parent, commits, nodes):
     body.pack(fill="both", expand=True, padx=14, pady=(12, 0))
     tk.Label(
         body,
-        text=(
+        text=introduction or (
             "已完成全部可用来源的目录元信息预扫描，包括链接目标及根外目录；"
             "尚未读取普通文件正文。\n"
             "取消父链接会取消全部下游；选中子链接自动选中父链接；"
@@ -81,7 +84,7 @@ def select_source_tree(parent, commits, nodes):
     )
     tree.heading("#0", text="选择 / 名义链接路线")
     tree.heading("kind", text="类型")
-    tree.heading("target", text="原定义路径")
+    tree.heading("target", text="原定义 / 文件硬链接数量")
     tree.column("#0", width=450, minwidth=180, stretch=True)
     tree.column("kind", width=160, minwidth=130, stretch=False)
     tree.column("target", width=350, minwidth=180, stretch=True)
@@ -97,7 +100,10 @@ def select_source_tree(parent, commits, nodes):
         tree.insert(
             "" if node.parent_index is None else str(node.parent_index),
             "end", iid=str(number), open=True,
-            values=(LINK_LABELS[node.definition.kind], node.definition.raw_target),
+            values=(
+                LINK_LABELS[node.kind],
+                node.target_description,
+            ),
         )
     statistics = tk.StringVar(master=dialog)
     tk.Label(
@@ -110,7 +116,9 @@ def select_source_tree(parent, commits, nodes):
         for number, node in enumerate(nodes):
             tree.item(
                 str(number),
-                text=("☑ " if states[number] else "☐ ") + str(node.nominal_path),
+                text=(
+                    ("☑ " if states[number] else "☐ ") if selectable else ""
+                ) + str(node.nominal_path),
                 tags=("authorized" if states[number] else "not_authorized",),
             )
         statistics.set(
@@ -120,9 +128,27 @@ def select_source_tree(parent, commits, nodes):
 
     def toggle(number):
         nonlocal states
-        states = change_hierarchical_selection(
-            states, parents, number, not states[number],
-        )
+        if not selectable:
+            return
+        enabled = not states[number]
+        pending = [number]
+        processed = set()
+        while pending:
+            current = pending.pop()
+            if current in processed:
+                continue
+            processed.add(current)
+            previous = states
+            states = change_hierarchical_selection(
+                states, parents, current, enabled,
+            )
+            affected = {
+                index for index, (old, new) in enumerate(zip(previous, states))
+                if old != new
+            } | {current}
+            for group in related_groups:
+                if affected.intersection(group):
+                    pending.extend(index for index in group if index not in processed)
         refresh()
 
     def clicked(event):
@@ -167,16 +193,47 @@ def select_source_tree(parent, commits, nodes):
         content.pack(fill="both", expand=True, padx=14, pady=(12, 0))
         lines = (
             f"名义节点：{node.nominal_path}\n"
-            f"实际入口：{definition.entry_path}\n"
-            f"类型：{LINK_LABELS[definition.kind]}\n"
-            f"原定义：{definition.raw_target!r}\n"
-            f"直接引用位置：{definition.direct_target}\n"
-            f"相对定义：{definition.relative}\n"
-            f"入口身份：{definition.object_identity}\n"
-            f"父链接编号：{None if node.parent_index is None else node.parent_index + 1}\n\n"
-            "原定义不等于最终实际文件位置。选择只决定本次路线；"
-            "父节点未选时，下游正文不获取，不用于成果。\n"
-            "预扫描已经访问目录结构，不读取普通文件正文。"
+            f"实际入口：{node.entry_path}\n"
+            f"类型：{LINK_LABELS[node.kind]}\n"
+            f"父链接编号：{None if node.parent_index is None else node.parent_index + 1}\n"
+        )
+        if node.metadata is not None:
+            lines += (
+                f"文件对象身份：{node.metadata.object_identity}\n"
+                f"文件系统报告的链接数量：{node.metadata.link_count}\n"
+                "硬链接没有独立指向定义，各名称共享同一文件对象。\n"
+                "正文写回会被其他关联名称共同看到；名称移除与正文写回不同。\n"
+                "未枚举范围外的其他名称，数量不代表已发现的路径数。\n"
+            )
+        elif node.specification is not None:
+            from core.link_paths import validate_link_specification
+
+            specification = node.specification
+            lines += (
+                f"保存原定义：{specification.raw_target!r}\n"
+                f"相对定义：{specification.relative}\n"
+                "在恢复位置的直接引用："
+                f"{validate_link_specification(specification, node.entry_path)}\n"
+                "这是清单保存的待恢复定义，不是当前现场入口观察；"
+                "不提供当前入口身份或版本，也不查询引用目标。\n"
+            )
+        else:
+            lines += (
+                f"原定义：{definition.raw_target!r}\n"
+                f"直接引用位置：{definition.direct_target}\n"
+                f"相对定义：{definition.relative}\n"
+                f"入口身份：{definition.object_identity}\n"
+                "直接引用位置不等于最终实际文件对象；不排除范围外反向引用风险。\n"
+            )
+        if node.impact:
+            lines += "\n【本次影响】\n" + node.impact
+        if node.work_indices:
+            lines += "\n关联工作编号：" + "、".join(
+                str(index + 1) for index in node.work_indices
+            )
+        lines += (
+            "\n\n这里只展示固定事实；确认后仍复核身份、定义和链接数量。"
+            "窗口不读取正文，不重新扫描或扩大工作范围。"
         )
         create_managed_text_box(
             content, "本次固定节点", lines,
@@ -208,17 +265,21 @@ def select_source_tree(parent, commits, nodes):
         dialog.destroy()
         return True
 
-    styled_button(controls, "全选", lambda: set_all(True)).pack(
-        side="left", padx=(0, 8),
-    )
-    styled_button(controls, "全不选", lambda: set_all(False)).pack(
-        side="left", padx=(0, 8),
-    )
+    if selectable:
+        styled_button(controls, "全选", lambda: set_all(True)).pack(
+            side="left", padx=(0, 8),
+        )
+        styled_button(controls, "全不选", lambda: set_all(False)).pack(
+            side="left", padx=(0, 8),
+        )
     styled_button(controls, "节点详情", show_details).pack(side="left")
-    cancel = styled_button(controls, "取消任务", lambda: finish(None))
+    cancel = styled_button(
+        controls, "取消任务" if selectable else "拒绝整包",
+        lambda: finish(None),
+    )
     cancel.pack(side="right", padx=(8, 0))
     styled_button(
-        controls, "按所选继续",
+        controls, "按所选继续" if selectable else "授权整包",
         lambda: finish(tuple(
             "authorize" if value else "skip" for value in states
         )),

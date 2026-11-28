@@ -124,7 +124,7 @@ def _family(kind):
 
 
 def prepare_operation_scope(
-    operation, primary, *, position, text_ops, authorize_enumeration=None,
+    operation, primary, *, position, text_ops,
     enumerate_directories=True,
 ):
     """先检查参数与入口；目录枚举可由整包协调延后至集中决定之后。"""
@@ -185,13 +185,12 @@ def prepare_operation_scope(
 
     return expand_operation_scope(
         PatchOperationScope(operation, tuple(accesses), (), fixed_skip),
-        authorize_enumeration=authorize_enumeration,
         enumerate_directories=enumerate_directories,
     )
 
 
 def expand_operation_scope(
-    scope, *, authorize_enumeration=None, enumerate_directories=True,
+    scope, *, enumerate_directories=True,
 ):
     """只消费原固定入口；不重新定位来接受新指向或建立新基线。"""
     if not isinstance(scope, PatchOperationScope):
@@ -212,32 +211,8 @@ def expand_operation_scope(
                 access.actual_path, follow_final_link=False,
             )
         elif access.kind == "directory" and not fixed_skip and enumerate_directories:
-            if access.followed_links:
-                from services.scan_scope import describe_scan_access
-
-                description = (
-                    f'id="{operation["id"]}" {operation["op"]}\n'
-                    + describe_scan_access(access)
-                    + "\n\n本次仅枚举这个明确实际普通目录及其普通子目录。"
-                    "\n树内目录链接仍是叶子，不进入未知后续链接目标。"
-                    "\n此授权不读取普通文件正文，不授权删除、覆盖或恢复。"
-                    "\n成员范围形成后，仍须进入本包完整范围决定和正式执行确认。"
-                )
-                if authorize_enumeration is None:
-                    raise ValueError(
-                        "实际目录尚未取得先行枚举授权，未进入目标目录。\n"
-                        + description
-                    )
-                if not callable(authorize_enumeration):
-                    raise TypeError("实际目录枚举授权必须可调用")
-                decision = authorize_enumeration(
-                    "修改包实际目录枚举授权", description,
-                )
-                if type(decision) is not bool:
-                    raise TypeError("实际目录枚举授权必须返回明确布尔值")
-                if not decision:
-                    raise ValueError("实际目录枚举已取消，未读取正文或执行")
-                recheck_link_path(access)
+            # 修改包启动预演允许本包必要元信息枚举及正文读取。
+            # 固定入口操作中的目录链接仍在前一个分支作为叶子处理。
             observed = inspect_scope_tree(access.actual_path)
         else:
             observed = observe_file(access.actual_path) if access.kind != "directory" else access
@@ -329,7 +304,7 @@ def format_package_scope(scopes, root):
 
     lines = [
         "【本包全部固定范围】",
-        "以下范围已完成元信息探查，普通文件正文尚未读取。",
+        "以下为本次预演固定的范围；必要正文在完整预演中获取。",
         "目录链接叶子不展开；名义父链访问仅定位列出的实际工作范围。",
         "全部授权仅适用于这里已经列出的本包，不授权其他任务或未来OP。",
     ]
@@ -363,61 +338,10 @@ def format_package_scope(scopes, root):
             ))
     lines.extend((
         "",
-        "选择跳过会裁剪该OP的正文、保护和访问依赖。",
-        "保留范围的正文定位、实际冲突及保护规划仍必须全部通过。",
-        "范围决定不是正式工作执行确认；完整预演通过后再确认执行。",
+        "授权不裁剪OP；完整预演任一失败整包拒绝。",
+        "预演通过后确认方案，涉及链接时再集中授权整包执行。",
+        "if_exists固定跳过保持；执行授权拒绝不转换为部分跳过。",
     ))
     return "\n".join(lines)
 
 
-def patch_target_groups(scopes):
-    """业务只提供实际改变关联键；共同归组不复制来源侧算法。
-
-    正文按实际位置及文件身份关联，结构按操作入口关联；
-    复制关联目标，移动关联两端，固定跳过不连接其他成员。
-    """
-    from core.work_selection import group_related_indices
-    from services.patch_file_plan import TEXT_WRITE_OPS
-
-    keys_by_member = []
-    for scope in scopes:
-        keys = []
-        if not scope.fixed_skip:
-            kind = scope.operation["op"]
-            accesses = scope.accesses
-            changed = (
-                accesses[1:] if kind in ("copy_file", "copy_dir") else
-                accesses if kind in DUAL_PATH_OPS else accesses[:1]
-            )
-            for access in changed:
-                keys.append(("position", identity(access.actual_path)))
-                if (
-                    kind in TEXT_WRITE_OPS and access.kind == "file"
-                    and access.object_identity is not None
-                ):
-                    keys.append(("content_object", access.object_identity))
-        keys_by_member.append(tuple(keys))
-    return group_related_indices(keys_by_member)
-
-
-def apply_patch_target_decisions(scopes, decisions):
-    """任一实际目标取消，同组全部OP取消；固定跳过不扩大取消范围。"""
-    scopes = tuple(scopes)
-    if (
-        type(decisions) is not tuple or len(decisions) != len(scopes)
-        or any(type(value) is not str or value not in ("authorize", "skip")
-               for value in decisions)
-    ):
-        raise ValueError("目标决定必须准确对应全部固定OP")
-    result = list(decisions)
-    for numbers in patch_target_groups(scopes):
-        if any(
-            result[number] == "skip" and not scopes[number].fixed_skip
-            for number in numbers
-        ):
-            for number in numbers:
-                result[number] = "skip"
-    for number, scope in enumerate(scopes):
-        if scope.fixed_skip:
-            result[number] = "skip"
-    return tuple(result)

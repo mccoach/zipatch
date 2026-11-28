@@ -25,11 +25,7 @@ class SourceSelectionCancelled(ValueError):
     """取消整次来源任务，不转换为名单错误或局部跳过。"""
 
 
-@dataclass(frozen=True)
-class SourceLinkNode:
-    definition: object
-    nominal_path: Path
-    parent_index: int | None = None
+from services.link_authorization import LinkAuthorizationNode
 
 
 class SourceTraversal:
@@ -70,6 +66,19 @@ class SourceTraversal:
     def nodes(self):
         return tuple(self._nodes)
 
+    @property
+    def selected_nodes(self):
+        """只投影保留路线实际使用的节点，不重新查询或维护第二份决定。"""
+        if self._lifecycle != "selected":
+            raise ValueError("来源选择尚未完成，不能取得所选节点")
+        retained = {
+            number for route in self._routes.values() for number in route
+        }
+        return tuple(
+            node for number, node in enumerate(self._nodes)
+            if number in retained
+        )
+
     def check(self):
         if self.check_cancel is not None:
             self.check_cancel()
@@ -103,7 +112,7 @@ class SourceTraversal:
         if number is None:
             number = len(self._nodes)
             self._node_indices[key] = number
-            self._nodes.append(SourceLinkNode(definition, nominal, parent))
+            self._nodes.append(LinkAuthorizationNode(definition, nominal, parent))
         elif self._nodes[number].parent_index != parent:
             raise ValueError("同一名义链接节点具有矛盾的父路线")
         route.append(number)
@@ -150,6 +159,27 @@ class SourceTraversal:
         if access.kind not in ("file", "directory"):
             raise ValueError(f"来源未定位到普通文件或文件夹：{access.nominal_path}")
         self._validate_output(access)
+        # 硬链接待授权拒绝必须先于入口缓存登记，
+        # 否则后台同轮重复规则可能复用尚未完成的来源入口。
+        if access.kind == "file":
+            from core.file_observation import observe_file
+
+            metadata = observe_file(access.actual_path)
+            if metadata.object_identity != access.object_identity:
+                raise ValueError("来源文件元信息偏离固定入口身份")
+            if metadata.link_count > 1:
+                if self.selector is None and self.authorize is None:
+                    raise SourceAuthorizationRequired(
+                        f"文件硬链接待本次任务授权：{nominal}；"
+                        f"文件系统链接数量={metadata.link_count}"
+                    )
+                number = len(self._nodes)
+                self._nodes.append(LinkAuthorizationNode(
+                    None, nominal, route[-1] if route else None,
+                    metadata=metadata,
+                    impact="本次仅扫描元信息或读取正文，不改变来源；其他名称不在本次范围内扫描。",
+                ))
+                route.append(number)
         accepted = self._accesses.setdefault(key, access)
         if accepted != access:
             raise ValueError("同一名义来源的固定路线或对象变化")
@@ -162,6 +192,11 @@ class SourceTraversal:
 
         self.check()
         recheck_source_paths(self.accesses)
+        from core.file_observation import recheck_file
+
+        for node in self._nodes:
+            if node.metadata is not None:
+                recheck_file(node.metadata)
         self.enumeration.recheck()
         self.check()
 
@@ -190,8 +225,12 @@ class SourceTraversal:
                     lines.extend((
                         f"{number + 1}. 名义节点：{node.nominal_path}",
                         f"   父链接编号：{None if node.parent_index is None else node.parent_index + 1}",
-                        f"   实际入口：{node.definition.entry_path}",
-                        f"   原定义：{node.definition.raw_target!r}",
+                        f"   实际入口：{node.entry_path}",
+                        (
+                            f"   文件硬链接数量：{node.metadata.link_count}"
+                            if node.metadata is not None else
+                            f"   原定义：{node.definition.raw_target!r}"
+                        ),
                     ))
                 accepted = self.authorize("确认本次全部来源链接", "\n".join(lines))
                 if type(accepted) is not bool:
@@ -217,7 +256,7 @@ class SourceTraversal:
                     continue
                 self.ignore(
                     node.nominal_path,
-                    "file" if node.definition.kind == "file_symlink" else "directory",
+                    "file" if node.kind in ("file_symlink", "file_hardlink") else "directory",
                     "链接路线未选",
                 )
             self._accesses = {

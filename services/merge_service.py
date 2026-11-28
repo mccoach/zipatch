@@ -31,6 +31,7 @@ from services.demand_rules import (
 from services.stream_output import (
     StreamOutputPostError, StreamOutputResult, publish_stream_output,
 )
+from services.link_authorization import count_link_nodes
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,12 @@ class MergeResult:
     mtime_failures: tuple = ()
     entry_counts: tuple = ()
     link_counts: tuple = ()
+    reference_count: int = 0
+
+    @property
+    def record_count(self):
+        """成功名义文件记录数；正文引用不重复计为存储正文。"""
+        return self.total_files + self.reference_count
 
     @property
     def output_file(self):
@@ -234,6 +241,7 @@ def write_merge_file(
 
     output_rules=None, match_root=None,
     enumeration_accesses=(), ignored_entries=(), show_actual_path=True,
+    source_link_counts=(),
 ):
     """消费已形成来源清单及固定输出，完整生成后才发布。"""
     if not isinstance(expected_output, FileObservation):
@@ -326,7 +334,8 @@ def write_merge_file(
                         "同一实际普通正文的名义别名要求不同换行成果；"
                         "请统一规则，不生成矛盾容器"
                     )
-            # 首次位置保持；任何明确包含都优先于目录文件排除。
+            # 同对象的首次记录保存正文，后续名义路径仍占正式记录。
+            # 明确包含继续优先于首次目录来源的文件排除事实。
             prepared[previous_index] = (
                 {
                     **previous_entry,
@@ -336,6 +345,7 @@ def write_merge_file(
                 },
                 previous_access,
             )
+            prepared.append((entry, access))
             continue
         actual_positions[actual_key] = len(prepared)
         prepared.append((entry, access))
@@ -351,6 +361,15 @@ def write_merge_file(
         kind: sum(member.kind == kind for member in definitions.values())
         for kind in ("file_symlink", "directory_symlink", "junction")
     }
+    link_counts["file_hardlink"] = 0
+    if source_link_counts:
+        supplied = dict(source_link_counts)
+        if (
+            set(supplied) != set(link_counts)
+            or any(type(value) is not int or value < 0 for value in supplied.values())
+        ):
+            raise ValueError("来源链接统计必须准确覆盖四类链接及非负整数数量")
+        link_counts = supplied
     ignored_entries = list(ignored_entries)
     failure_entries = []
     omitted_content_targets = []
@@ -362,12 +381,14 @@ def write_merge_file(
     file_plan = tuple(prepared)
     # 正文块只统计文件；链接节点另由固定访问路线统计。
     entry_counts = {"file": 0}
-    total = read_failure_count = 0
+    total = read_failure_count = reference_count = 0
     excluded_count = len(ignored_entries)
     mtime_failures = []
+    successful_objects = {}
+    failed_objects = {}
 
     def collect_blocks(container):
-        nonlocal total, excluded_count, read_failure_count
+        nonlocal total, excluded_count, read_failure_count, reference_count
         for entry, access in file_plan:
             source_path = entry["path"]
             recheck_link_path(access)
@@ -383,6 +404,31 @@ def write_merge_file(
                 ))
                 excluded_count += 1
                 continue
+            identifier = access.object_identity
+            reference_index = successful_objects.get(identifier)
+            if reference_index is not None:
+                container.add_reference(display_path, reference_index)
+                reference_count += 1
+                successful_paths.append(display_path)
+                if log_func:
+                    log_func(
+                        f"保留去重文件路径：{display_path}；"
+                        f"正文引用第 {reference_index} 项"
+                    )
+                continue
+            failure_reason = failed_objects.get(identifier)
+            if failure_reason is not None:
+                read_failure_count += 1
+                omitted_content_targets.append(access.actual_path)
+                failure_entries.append((
+                    display_path, "file", failure_reason,
+                ))
+                if log_func:
+                    log_func(
+                        f"同对象正文此前获取失败，未重复读取："
+                        f"{display_path}；{failure_reason}"
+                    )
+                continue
             try:
                 body = read_text_content_for_merge(
                     actual_source, expected_access=access,
@@ -393,6 +439,7 @@ def write_merge_file(
                 IsADirectoryError, NotADirectoryError, TextDecodingError,
             ) as error:
                 read_failure_count += 1
+                failed_objects[identifier] = f"{type(error).__name__}：{error}"
                 # 该项没有进入成果，不用其原末级身份阻断遗漏报告发布。
                 # 原父目录和链接路线仍由共同来源复核保留；
                 # 安全拒绝、资源故障及成功来源漂移不进入此遗漏通道。
@@ -434,6 +481,7 @@ def write_merge_file(
             total += 1
             entry_counts["file"] += 1
             successful_paths.append(display_path)
+            successful_objects[identifier] = len(successful_paths)
             container.add_block(
                 display_path, body,
                 origin_path=(
@@ -484,14 +532,17 @@ def write_merge_file(
                 "【本次合并汇总】",
                 f"成功正文文件：{entry_counts['file']} 个",
 
+                f"已授权文件硬链接入口：{link_counts['file_hardlink']} 个",
                 f"已授权文件软链接节点：{link_counts['file_symlink']} 个",
                 f"已授权文件夹软链接节点：{link_counts['directory_symlink']} 个",
                 f"已授权文件夹联接（Junction）节点：{link_counts['junction']} 个",
-                f"成功输出入口块合计：{total} 个",
+                f"正文引用记录：{reference_count} 个",
+                f"成功文件路径记录合计：{total + reference_count} 个",
                 f"主动忽略记录：{excluded_count} 条",
                 f"正文读取／解码失败：{read_failure_count} 个",
                 f"文件修改时间缺失：{len(mtime_failures)} 个",
-                "仅输出文件正文块，不单列文件夹；实际路径说明按显示开关输出，拆分不用于定位。",
+                "文件路径均保留；同对象重复正文使用本层记录引用，不生成空代码块；不单列文件夹。",
+                "正文引用用于容器内取内容；实际路径说明按显示开关输出，拆分不用于定位。",
                 "主动忽略记录可能代表整个文件夹，不等于忽略文件总数。",
                 "",
             ))
@@ -508,7 +559,7 @@ def write_merge_file(
     return MergeResult(
         output, total, excluded_count, read_failure_count,
         tuple(mtime_failures), tuple(entry_counts.items()),
-        tuple(link_counts.items()),
+        tuple(link_counts.items()), reference_count,
     )
 
 
@@ -520,7 +571,8 @@ def _log_completed(result, mode, log_func):
         log_func(
             f"{mode}完成：成功正文文件 {counts.get('file', 0)} 个，"
             f"已授权链接节点 {sum(dict(result.link_counts).values())} 个；"
-            f"合计 {result.total_files} 个文件正文块"
+            f"正文引用 {result.reference_count} 个；"
+            f"合计保留 {result.record_count} 个文件路径记录"
         )
         log_func(
             f"合并成果已发布；主动忽略 {result.excluded_count} 个，"
@@ -735,6 +787,7 @@ def merge_files(
         record_file_mtime=record_file_mtime, output_rules=output_rules,
         enumeration_accesses=dependencies, ignored_entries=ignored,
         show_actual_path=show_actual_path,
+        source_link_counts=count_link_nodes(traversal.selected_nodes),
     )
     _log_completed(result, "合并", log_func)
     return result

@@ -157,21 +157,13 @@ class PatchExecutor:
         allow_multi_replace_exact=False,
         backup_dir="99_归档/AI文件修改备份",
         patch_text="", preview_text="", normalize_text_newlines=True,
-        authorize_patch_scope=None, authorize_patch_enumeration=None,
-        select_patch_enumeration=None,
+        authorize_patch_scope=None,
     ):
-        if select_patch_enumeration is not None and not callable(select_patch_enumeration):
-            raise TypeError("修改包先行枚举选择必须可调用")
-        self.select_patch_enumeration = select_patch_enumeration
-        self._enumeration_skipped = set()
-        if authorize_patch_enumeration is not None and not callable(authorize_patch_enumeration):
-            raise TypeError("修改包实际目录枚举授权必须可调用")
-        self.authorize_patch_enumeration = authorize_patch_enumeration
         if authorize_patch_scope is not None and not callable(authorize_patch_scope):
-            raise TypeError("本包范围决定必须是可调用对象")
+            raise TypeError("修改包整包执行授权必须可调用")
         self.authorize_patch_scope = authorize_patch_scope
+        self.authorization_nodes = ()
         self._scopes = {}
-        self._scope_decisions = {}
         self.scope_report = ""
         for name, value in (
             ("允许删除", allow_delete),
@@ -329,145 +321,73 @@ class PatchExecutor:
 
 
     def _prepare_scopes(self, operations):
-        """整包参数及无正文范围先准备，全部成立才进入一次范围决定。"""
+        """预演先检查入口，再枚举本包必要结构；不在预演阶段授权裁剪。"""
         checks = []
         for operation in operations:
             try:
                 primary, _ = self.validate_op(operation)
-                scope = prepare_operation_scope(
+                self._scopes[operation["id"]] = prepare_operation_scope(
                     operation, primary,
                     position=self._nominal_position, text_ops=TEXT_WRITE_OPS,
                     enumerate_directories=False,
                 )
-                self._scopes[operation["id"]] = scope
             except (OSError, ValueError) as error:
                 checks.append(PatchOpCheckResult(
                     operation.get("id", ""), operation.get("op", ""),
                     operation.get("path", ""), False, str(error),
                     make_op_locator(operation),
                 ))
-        nominal_errors = collect_path_contract_errors(operations)
         checks.extend(
             make_result_for_global_error("路径互斥：" + message)
-            for message in nominal_errors
+            for message in collect_path_contract_errors(operations)
         )
         if checks:
             return checks
-
-        enumeration_scopes = tuple(
-            self._scopes[operation["id"]]
-            for operation in operations
-            if not self._scopes[operation["id"]].fixed_skip
-            and any(
-                access.kind == "directory" and access.followed_links
-                for access in self._scopes[operation["id"]].accesses
-            )
-        )
-        if enumeration_scopes and self.select_patch_enumeration is not None:
-            from core.work_selection import selected_indices
-
-            retained = set(selected_indices(
-                self.select_patch_enumeration(enumeration_scopes, self.root),
-                len(enumeration_scopes),
-                description="修改包先行枚举范围选择",
-            ))
-            self._enumeration_skipped = {
-                scope.operation["id"]
-                for number, scope in enumerate(enumeration_scopes)
-                if number not in retained
-            }
-
-        # 全部参数和名义路径检查已通过。只展开未跳过OP，
-        # 且始终消费第一次固定的入口，不用后来现场重建范围。
-        expansion_checks = []
         for operation in operations:
-            identifier = operation["id"]
-            scope = self._scopes[identifier]
-            if identifier in self._enumeration_skipped:
-                self._scopes[identifier] = replace(
-                    scope, observations=(), fixed_skip=True,
-                )
-                continue
-            if scope.fixed_skip:
-                continue
             try:
-                self._scopes[identifier] = expand_operation_scope(
-                    scope,
-                    authorize_enumeration=(
-                        (lambda title, description: True)
-                        if self.select_patch_enumeration is not None
-                        else self.authorize_patch_enumeration
-                    ),
+                self._scopes[operation["id"]] = expand_operation_scope(
+                    self._scopes[operation["id"]],
                 )
             except (OSError, ValueError) as error:
-                expansion_checks.append(PatchOpCheckResult(
-                    identifier, operation["op"], operation["path"],
+                checks.append(PatchOpCheckResult(
+                    operation["id"], operation["op"], operation["path"],
                     False, str(error), make_op_locator(operation),
                 ))
-        if expansion_checks:
-            return expansion_checks
-
+        if checks:
+            return checks
         scopes = tuple(self._scopes[operation["id"]] for operation in operations)
         self.scope_report = format_package_scope(scopes, self.root)
-        if self._enumeration_skipped:
-            self.scope_report += "\n\n【先行枚举选择跳过的OP】\n" + "\n".join(
-                f'id="{operation["id"]}"：未枚举、不读取正文、不保护、不执行'
-                for operation in operations
-                if operation["id"] in self._enumeration_skipped
-            )
-        if self.authorize_patch_scope is None:
-            if any(scope.requires_authorization and not scope.fixed_skip for scope in scopes):
-                return [make_result_for_global_error(
-                    "本包链接实际范围尚未取得本地统一决定，禁止读取正文或执行。\n"
-                    + self.scope_report
-                )]
-            decisions = tuple(
-                "skip" if scope.fixed_skip else "authorize" for scope in scopes
-            )
-        else:
-            decisions = self.authorize_patch_scope(scopes, self.root)
-            if decisions is None:
-                return [make_result_for_global_error(
-                    "本包固定范围决定已取消，整包不读取正文、不执行"
-                )]
-            if (
-                type(decisions) is not tuple or len(decisions) != len(scopes)
-                or any(type(value) is not str or value not in ("authorize", "skip")
-                       for value in decisions)
-            ):
-                raise ValueError("统一范围决定必须准确对应本包全部OP的不可变决定元组")
-        from services.patch_scope import apply_patch_target_decisions
+        from services.link_authorization import collect_link_nodes
 
-        decisions = apply_patch_target_decisions(scopes, decisions)
-        self._scope_decisions = {
-            scope.operation["id"]: decision
-            for scope, decision in zip(scopes, decisions)
-        }
-        self.scope_report += "\n\n【本包固定决定】\n" + "\n".join(
-            f'id="{scope.operation["id"]}"：{self._scope_decisions[scope.operation["id"]]}'
-            for scope in scopes
+        active = tuple(scope for scope in scopes if not scope.fixed_skip)
+        self.authorization_nodes = collect_link_nodes(
+            (scope.accesses for scope in active),
+            (scope.observations for scope in active),
+            (
+                f'id="{scope.operation["id"]}" {scope.operation["op"]}；'
+                + (
+                    "修改实际共享正文，链接入口保持。"
+                    if scope.operation["op"] in TEXT_WRITE_OPS else
+                    "按固定计划操作指定名称或完整目录树；目录链接叶子不展开目标。"
+                    "删除、移动或改名可能使范围外按旧路径访问的引用失效。"
+                )
+                for scope in active
+            ),
         )
         return []
 
     def _prepare_action(self, op, primary):
-        """只消费本包统一决定；正文从实际位置一次获取，依赖单独保存。"""
+        """预演获取必要正文；执行授权随后只决定整包通断。"""
         scope = self._scopes[op["id"]]
-        decision = self._scope_decisions[op["id"]]
-        if decision == "skip":
+        if scope.fixed_skip:
             return PatchAction(
                 self.op_label(op), MappingProxyType(dict(op)), False,
                 tuple(
                     SkippedPatchPath(access.nominal_path, (), access.kind)
                     for access in scope.accesses
                 ),
-                skip_reason=(
-                    "先行枚举范围选择跳过"
-                    if op["id"] in self._enumeration_skipped else
-                    "if_exists固定跳过" if scope.fixed_skip else
-                    "本包统一范围决定选择跳过"
-                ),
+                skip_reason="if_exists固定跳过",
             )
-
         recheck_scope_accesses(scope.accesses)
         expectations = []
         for metadata in scope.observations:
@@ -539,6 +459,7 @@ class PatchExecutor:
             )
 
     def _clear_plan(self):
+        self.authorization_nodes = ()
         self.plan = None
         self.projection = None
         self.protection = None
@@ -721,7 +642,7 @@ class PatchExecutor:
             self._observations.clear()
             self._actions.clear()
             self._scopes.clear()
-            self._scope_decisions.clear()
+
             if not returned:
                 self._clear_plan()
                 self.preview_text = ""
@@ -1169,6 +1090,7 @@ class PatchExecutor:
     def invalidate(self):
         if not self.task_execution.invalidate():
             return False
+        self.authorization_nodes = ()
         self.release_prepared_contents()
         return True
 
@@ -1178,11 +1100,27 @@ class PatchExecutor:
         if self.plan is None:
             raise ValueError("没有通过正式预演的执行计划")
         try:
+            # 授权事实来自本次预演，不重新扫描另一份范围。
+            self.recheck()
+            if self.authorization_nodes:
+                if self.authorize_patch_scope is None:
+                    raise ValueError("修改包涉及链接，缺少整包执行授权；未开始备份或工作修改")
+                decision = self.authorize_patch_scope(
+                    self.authorization_nodes, self.root,
+                )
+                if type(decision) is not bool:
+                    raise TypeError("修改包执行授权必须返回明确布尔值")
+                if not decision:
+                    raise ValueError("修改包整包授权已拒绝；未开始备份或工作修改")
+                self.recheck()
             return self._execute_plan()
         except PatchExecutionError as failure:
             self._handle_failure(failure)
             raise
         finally:
+            # 授权拒绝及授权前复核失败也永久消费本次任务资格。
+            self.task_execution.invalidate()
+            self.authorization_nodes = ()
             self.release_prepared_contents()
 
 

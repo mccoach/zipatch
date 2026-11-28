@@ -21,6 +21,7 @@ class ScanSourceScope:
     file_accesses: tuple = ()
     ignored: tuple = ()
     directory_metadata: tuple = ()
+    hardlink_count: int = 0
 
     @property
     def file_count(self):
@@ -124,6 +125,10 @@ def prepare_scan_scope(
     scope = ScanSourceScope(
         root, tuple(directories), tuple(files), tuple(definitions.values()),
         tuple(accesses), tuple(traversal.ignored), tuple(directory_metadata),
+        len({
+            identity(observed.path)
+            for observed in files if observed.link_count > 1
+        }),
     )
     recheck_scan_scope(scope)
     validate_scan_output(scope, output)

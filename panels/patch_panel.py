@@ -264,16 +264,12 @@ class PatchPanel(BasePanel):
         project = validate_required_path(cfg["project_root"], "项目根文件夹")
 
         patch = validate_required_path(cfg["patch_text"], "修改包内容")
-        from ui.patch_link_authorization import (
-            make_patch_enumeration_selector, make_patch_scope_authorizer,
-        )
+        from ui.patch_link_authorization import make_patch_scope_authorizer
         return preview_patch(
             authorize_patch_scope=make_patch_scope_authorizer(
                 self.root, self.commits,
             ),
-            select_patch_enumeration=make_patch_enumeration_selector(
-                self.root, self.commits,
-            ),
+
             output_rules=cfg["output_rules"],
             normalize_text_newlines=cfg["normalize_text_newlines"],
             project_root=project, patch_text=patch,

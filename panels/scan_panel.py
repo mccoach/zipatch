@@ -135,6 +135,7 @@ class ScanPanel(BasePanel):
             "成功",
             f"全景扫描完成！\n\n文件夹 {result.dir_count} 个，文件 {result.file_count} 个。\n"
             f"链接入口 {result.link_count} 个："
+            f"文件硬链接 {result.hardlink_count}，"
             f"文件软链接 {result.file_symlink_count}，"
             f"文件夹软链接 {result.directory_symlink_count}，"
             f"文件夹联接（Junction）{result.junction_count}。\n"
